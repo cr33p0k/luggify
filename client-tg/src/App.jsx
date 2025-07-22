@@ -14,6 +14,7 @@ function App() {
   const [newItem, setNewItem] = useState("");
   const [tgUser, setTgUser] = useState(null);
   const [isTg, setIsTg] = useState(false);
+  const [columns, setColumns] = useState(3);
 
   useEffect(() => {
     // Telegram WebApp API
@@ -38,6 +39,17 @@ function App() {
       setRemovedItems([]);
     }
   }, [result]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      if (window.innerWidth <= 700) setColumns(1);
+      else if (window.innerWidth <= 1100) setColumns(2);
+      else setColumns(3);
+    };
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   const handleSubmit = async () => {
     setError(null);
@@ -129,8 +141,6 @@ function App() {
           {/* Чеклист */}
           {(() => {
             let items = (result.items || []).filter(item => !removedItems.includes(item));
-            const isMobile = window.innerWidth <= 700;
-            const columns = isMobile ? 1 : 2;
             const perCol = Math.ceil(items.length / columns);
             const cols = Array.from({ length: columns }, (_, i) => items.slice(i * perCol, (i + 1) * perCol));
             return (
