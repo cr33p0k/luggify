@@ -20,7 +20,7 @@ function App() {
       return;
     }
     try {
-      const res = await fetch("https://luggify.onrender.com/generate-packing-list", {
+      const res = await fetch("https://luggify.vercel.app/generate-packing-list", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

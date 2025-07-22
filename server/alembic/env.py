@@ -16,9 +16,12 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Импортируем Base и синхронный движок для Alembic
-from server.database import Base, sync_engine  # sync_engine — синхронный create_engine
+from database import Base, sync_engine  
+from models import Checklist
 
 target_metadata = Base.metadata
+
+print("DEBUG Alembic: tables in metadata:", target_metadata.tables.keys())
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
