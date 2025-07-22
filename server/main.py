@@ -340,7 +340,7 @@ async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db))
         categories["Одежда"].extend(["Футболки", "Джинсы", "Кроссовки"])
     # Дождь
     if any("rain" in c or "дождь" in c for c in conditions):
-        categories["Одежда"].append("Зонт/дождевик")
+        categories["Одежда"].append("Дождевик")
         categories["Одежда"].append("Водонепроницаемая обувь")
     # Солнце/жара
     if max_temp > 22:
@@ -372,7 +372,7 @@ async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db))
     if max_temp > 20:
         categories["Прочее"].append("Бутылка для воды")
     if any("rain" in c or "дождь" in c for c in conditions):
-        categories["Прочее"].append("Зонт/дождевик")
+        categories["Прочее"].append("Зонт")
     # Убираем дубли
     for k in categories:
         categories[k] = list(dict.fromkeys(categories[k]))

@@ -141,8 +141,10 @@ function App() {
           {/* Чеклист */}
           {(() => {
             let items = (result.items || []).filter(item => !removedItems.includes(item));
-            const perCol = Math.ceil(items.length / columns);
-            const cols = Array.from({ length: columns }, (_, i) => items.slice(i * perCol, (i + 1) * perCol));
+            let colCount = columns;
+            if (window.innerWidth <= 700) colCount = 1;
+            const perCol = Math.ceil(items.length / colCount);
+            const cols = Array.from({ length: colCount }, (_, i) => items.slice(i * perCol, (i + 1) * perCol));
             return (
               <div className="checklist-multicolumn">
                 {cols.map((col, idx) => (
