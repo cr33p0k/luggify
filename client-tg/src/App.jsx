@@ -56,7 +56,7 @@ function App() {
 
   return (
     <div className="container">
-      <h1>Luggify TMA</h1>
+      <h1>Luggify</h1>
       {isTg && tgUser && (
         <div className="tg-user">Привет, {tgUser.first_name}!</div>
       )}
