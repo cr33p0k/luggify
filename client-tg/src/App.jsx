@@ -142,22 +142,19 @@ function App() {
                         <label
                           key={item}
                           className={`checklist-label${checkedItems[item] ? " checked" : ""}`}
-                          style={{ display: "flex", alignItems: "center", marginBottom: 8, background: "#fff", borderRadius: 8, boxShadow: "0 1px 4px #0001", padding: "6px 10px" }}
                         >
                           <input
                             type="checkbox"
                             className="checklist-checkbox"
                             checked={checkedItems[item] || false}
                             onChange={() => handleCheck(item)}
-                            style={{ marginRight: 10 }}
                           />
-                          <span style={{ flex: 1 }}>{item}</span>
+                          {item}
                           <button
                             className="checklist-remove-btn"
                             title="Удалить из чеклиста"
                             onClick={e => { e.preventDefault(); handleRemoveItem(item); }}
                             tabIndex={-1}
-                            style={{ background: "none", border: "none", color: "#f66", fontSize: 20, cursor: "pointer", marginLeft: 8 }}
                           >×</button>
                         </label>
                       ))}
