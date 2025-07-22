@@ -20,7 +20,7 @@ function App() {
       return;
     }
     try {
-      const res = await fetch("http://localhost:8000/generate-packing-list", {
+      const res = await fetch("https://luggify.onrender.com/generate-packing-list", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -42,7 +42,7 @@ function App() {
 
   return (
     <div className="container">
-      <h1>Luggify</h1>
+      <h1>Luggify TMA</h1>
       <CitySelect value={city} onSelect={setCity} />
       <DateRangePicker onChange={setDates} />
       <button onClick={handleSubmit}>Сгенерировать список</button>
