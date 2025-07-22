@@ -1,6 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from server import models, schemas
+import models
+import schemas
 import uuid
 
 async def create_checklist(db: AsyncSession, data: schemas.ChecklistCreate):
