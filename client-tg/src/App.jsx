@@ -11,20 +11,6 @@ function App() {
   const [error, setError] = useState(null);
   const [addItemMode, setAddItemMode] = useState(false);
   const [newItem, setNewItem] = useState("");
-  const [tgUser, setTgUser] = useState(null);
-  const [isTg, setIsTg] = useState(false);
-
-  useEffect(() => {
-    // eslint-disable-next-line no-undef
-    const tg = window.Telegram?.WebApp;
-    if (tg) {
-      setIsTg(true);
-      tg.ready();
-      if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
-        setTgUser(tg.initDataUnsafe.user);
-      }
-    }
-  }, []);
 
   const handleSubmit = async () => {
     setError(null);
@@ -56,10 +42,7 @@ function App() {
 
   return (
     <div className="container">
-      <h1>Luggify</h1>
-      {isTg && tgUser && (
-        <div className="tg-user">Привет, {tgUser.first_name}!</div>
-      )}
+      <h1>Luggify TMA</h1>
       <CitySelect value={city} onSelect={setCity} />
       <DateRangePicker onChange={setDates} />
       <button onClick={handleSubmit}>Сгенерировать список</button>
