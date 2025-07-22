@@ -5,7 +5,6 @@ load_dotenv()
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy.orm import sessionmaker
 
 class Base(DeclarativeBase):
     pass
@@ -24,7 +23,4 @@ else:
     SYNC_DATABASE_URL = DATABASE_URL
 
 sync_engine = create_engine(SYNC_DATABASE_URL, echo=True)
-
-# Создаём SessionLocal для работы с БД (обычно для FastAPI)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=async_engine)
 
