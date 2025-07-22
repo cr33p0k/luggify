@@ -6,8 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
-from server import crud, models, schemas
-from server.database import SessionLocal, engine
+import crud, models, schemas
+from database import SessionLocal, engine
 
 load_dotenv()
 

@@ -5,7 +5,7 @@ import os
 from dotenv import load_dotenv
 
 Base = declarative_base()
-from server import models
+import models
 
 load_dotenv()
 

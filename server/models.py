@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, Date, Float, Text
 from sqlalchemy.dialects.postgresql import ARRAY
-from server.database import Base
+from database import Base
 
 class Checklist(Base):
     __tablename__ = "checklists"
