@@ -580,6 +580,7 @@ button:hover {
     word-break: break-word;
     overflow-wrap: anywhere;
     background: none;
+    text-align: left;
   }
   .checklist-checkbox {
     width: 18px !important;
@@ -593,6 +594,12 @@ button:hover {
     flex-direction: column;
     align-items: stretch;
     gap: 0.7rem;
+  }
+  .checklist-multicolumn {
+    padding: 1.2rem 1rem !important;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
   }
 }
 
