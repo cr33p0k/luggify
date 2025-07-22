@@ -26,7 +26,7 @@ const App = () => {
   useEffect(() => {
     const fetchChecklistAndForecast = async () => {
       try {
-        const res = await fetch(`http://localhost:8000/checklist/${id}`);
+        const res = await fetch(`https://luggify.onrender.com/checklist/${id}`);
         if (!res.ok) throw new Error("Чеклист не найден");
 
         const data = await res.json();
@@ -220,7 +220,7 @@ const App = () => {
     }
 
     try {
-      const res = await fetch("http://localhost:8000/generate-packing-list", {
+      const res = await fetch("https://luggify.onrender.com/generate-packing-list", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

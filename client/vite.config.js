@@ -5,8 +5,8 @@ export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      '/geo': 'http://localhost:8000',
-      '/generate-packing-list': 'http://localhost:8000',
+      '/geo': 'https://luggify.onrender.com',
+      '/generate-packing-list': 'https://luggify.onrender.com',
     },
   },
 });

@@ -6,7 +6,7 @@ import "./CitySelect.css";
 const fetchCitiesWithCountry = async (inputValue) => {
   if (!inputValue) return [];
   try {
-    const res = await fetch(`http://localhost:8000/geo/cities-autocomplete?namePrefix=${inputValue}`);
+    const res = await fetch(`https://luggify.onrender.com/geo/cities-autocomplete?namePrefix=${inputValue}`);
     const data = await res.json();
     return data.map((city) => ({
       label: city.fullName,
