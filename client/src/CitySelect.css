@@ -1,0 +1,72 @@
+.react-select__control {
+  background-color: #444 !important;
+  border-radius: 8px !important;
+  border: 1.5px solid #ff8c00 !important;
+  box-shadow: none !important;
+  color: white;
+  min-height: 40px;
+}
+
+.react-select__control:hover {
+  border-color: #ffa500 !important;
+}
+
+.react-select__menu {
+  background-color: #2b2b2b !important;
+  max-height: 200px !important;
+  overflow-y: auto !important;
+  border-radius: 0 0 8px 8px !important;
+  border: 1.5px solid #ff8c00 !important;
+  margin-top: 0 !important;
+  z-index: 9999;
+}
+
+.react-select__option {
+  background-color: #2b2b2b;
+  color: white;
+  padding: 10px;
+  cursor: pointer;
+}
+
+.react-select__option--is-focused {
+  background-color: #444 !important;
+  color: white !important;
+  box-shadow: none !important;
+}
+
+
+.react-select__option--is-selected {
+  background-color: #ff8c00;
+  color: black;
+}
+
+.react-select__single-value {
+  color: white;
+}
+
+.react-select__input,
+.react-select__input input {
+  color: white !important;
+  background-color: transparent !important;
+  caret-color: white !important;
+}
+
+
+.react-select__placeholder {
+  color: #aaa;
+}
+
+/* Кастомный скроллбар для меню (в Firefox и Chrome) */
+.react-select__menu::-webkit-scrollbar {
+  width: 8px;
+}
+
+.react-select__menu::-webkit-scrollbar-track {
+  background: #333;
+  border-radius: 4px;
+}
+
+.react-select__menu::-webkit-scrollbar-thumb {
+  background-color: #ff8c00;
+  border-radius: 4px;
+}
