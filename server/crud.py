@@ -43,24 +43,5 @@ async def get_all_checklists_by_tg_user_id(db: AsyncSession, tg_user_id: str):
     return result.scalars().all()
 
 async def save_or_update_tg_checklist(db: AsyncSession, data: schemas.ChecklistCreate):
-    # Пытаемся найти существующий чеклист для пользователя
-    result = await db.execute(
-        select(models.Checklist)
-        .where(models.Checklist.tg_user_id == data.tg_user_id)
-        .order_by(models.Checklist.id.desc())
-    )
-    checklist = result.scalars().first()
-    if checklist:
-        # Обновляем существующий чеклист
-        checklist.city = data.city
-        checklist.start_date = data.start_date
-        checklist.end_date = data.end_date
-        checklist.items = data.items
-        checklist.avg_temp = data.avg_temp
-        checklist.conditions = data.conditions
-        await db.commit()
-        await db.refresh(checklist)
-        return checklist
-    else:
-        # Создаём новый чеклист
-        return await create_checklist(db, data)
+    # Всегда создаём новый чеклист
+    return await create_checklist(db, data)
