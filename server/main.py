@@ -422,7 +422,7 @@ async def save_tg_checklist(data: schemas.ChecklistCreate = Body(...), db: Async
     checklist = await crud.save_or_update_tg_checklist(db, data)
     return checklist
 
-@app.get("/tg-checklist/{tg_user_id}", response_model=List[schemas.ChecklistOut])
+@app.get("/tg-checklists/{tg_user_id}", response_model=List[schemas.ChecklistOut])
 async def get_tg_checklists(tg_user_id: str, db: AsyncSession = Depends(get_db)):
     checklists = await crud.get_all_checklists_by_tg_user_id(db, tg_user_id)
     return checklists
