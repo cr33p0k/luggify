@@ -113,6 +113,7 @@ function App() {
   };
 
   // --- ХЕЛПЕРЫ ДЛЯ СИНХРОНИЗАЦИИ СОСТОЯНИЯ ЧЕКЛИСТА ---
+  // syncChecklistState больше не вызывается из обработчиков изменений, только из handleSaveChecklistState
   const syncChecklistState = async (slug, checked, removed, added) => {
     try {
       await fetch(`https://luggify.onrender.com/checklist/${slug}/state`, {
@@ -132,9 +133,6 @@ function App() {
     setCheckedItems(prev => {
       const updated = { ...prev, [item]: !prev[item] };
       setIsDirty(true);
-      if (result && result.slug) {
-        syncChecklistState(result.slug, updated, removedItems, result.added_items || []);
-      }
       return updated;
     });
   };
@@ -144,9 +142,6 @@ function App() {
     setRemovedItems(prev => {
       const updated = [...prev, item];
       setIsDirty(true);
-      if (result && result.slug) {
-        syncChecklistState(result.slug, checkedItems, updated, result.added_items || []);
-      }
       return updated;
     });
   };
@@ -155,9 +150,6 @@ function App() {
   const handleRestoreAll = () => {
     setRemovedItems([]);
     setIsDirty(true);
-    if (result && result.slug) {
-      syncChecklistState(result.slug, checkedItems, [], result.added_items || []);
-    }
   };
 
   const resetChecklist = () => {
@@ -180,9 +172,6 @@ function App() {
         added_items: [...(prev.added_items || []), newItem.trim()],
       };
       setIsDirty(true);
-      if (prev && prev.slug) {
-        syncChecklistState(prev.slug, checkedItems, removedItems, updated.added_items);
-      }
       return updated;
     });
     setNewItem("");
@@ -314,15 +303,12 @@ function App() {
   const handleSaveChecklistState = async () => {
     if (!result || !result.slug) return;
     try {
-      await fetch(`https://luggify.onrender.com/checklist/${result.slug}/state`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          checked_items: Object.keys(checkedItems).filter(k => checkedItems[k]),
-          removed_items: removedItems,
-          added_items: result.added_items || [],
-        }),
-      });
+      await syncChecklistState(
+        result.slug,
+        checkedItems,
+        removedItems,
+        result.added_items || []
+      );
       setIsDirty(false);
       setSaveStateSuccess(true);
       setTimeout(() => setSaveStateSuccess(false), 1500);
