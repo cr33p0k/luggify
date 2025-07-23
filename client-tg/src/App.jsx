@@ -324,8 +324,14 @@ function App() {
       });
       if (response.ok) {
         const updatedChecklist = await response.json();
-        setResult(updatedChecklist);
-        // Восстанавливаем checkedItems из ответа сервера
+        // Обновляем только items, checked_items, added_items, не трогаем daily_forecast
+        setResult(prev => ({
+          ...prev,
+          items: updatedChecklist.items,
+          checked_items: updatedChecklist.checked_items,
+          added_items: updatedChecklist.added_items,
+        }));
+        // Пересчитываем checkedItems для всех вещей из обновлённого списка
         const checked = {};
         (updatedChecklist.items || []).forEach(item => {
           checked[item] = updatedChecklist.checked_items?.includes(item) || false;
