@@ -300,7 +300,7 @@ function App() {
                       right: 8,
                       background: 'none',
                       border: 'none',
-                      color: '#ff4d00',
+                      color: '#aaa', 
                       fontSize: 22,
                       cursor: 'pointer',
                       padding: 0,
@@ -410,12 +410,6 @@ function App() {
                 ))}
               </div>
             </div>
-          )}
-          {/* Кнопка сохранить чеклист перенесена вниз */}
-          {isTg && tgUser && (
-            <button className="main-btn" style={{ width: '100%', marginTop: 24, background: '#444', color: 'orange', border: '1.5px solid orange' }} onClick={handleSaveChecklist} disabled={saving}>
-              Сохранить в мои чеклисты
-            </button>
           )}
         </div>
       )}

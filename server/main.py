@@ -1,7 +1,7 @@
 import os
 from datetime import datetime
 import httpx
-from fastapi import FastAPI, Query, Depends, HTTPException, Body
+from fastapi import FastAPI, Query, Depends, HTTPException, Body, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -483,6 +483,15 @@ async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):
         "avg_temp": checklist.avg_temp,
         "conditions": checklist.conditions,
     }
+
+@app.delete("/checklist/{slug}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_checklist(slug: str, db: AsyncSession = Depends(get_db)):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    await db.delete(checklist)
+    await db.commit()
+    return
 
 @app.get("/")
 async def root():
