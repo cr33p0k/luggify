@@ -223,13 +223,13 @@ function App() {
   const handleOpenChecklist = async (checklist) => {
     setResult(checklist);
     setShowChecklists(false);
-    // Восстанавливаем состояние чеклиста
+    // Восстанавливаем состояние чекбоксов
     const checked = {};
     (checklist.items || []).forEach(item => {
       checked[item] = checklist.checked_items?.includes(item) || false;
     });
     setCheckedItems(checked);
-    setRemovedItems(checklist.removed_items || []);
+    setRemovedItems([]); // removedItems теперь не нужен, т.к. вещи реально удаляются
     // Добавленные вещи (те, которых нет в items, но есть в added_items)
     if (checklist.added_items && checklist.added_items.length > 0) {
       setResult(prev => prev ? { ...prev, items: [...prev.items, ...checklist.added_items.filter(i => !prev.items.includes(i))] } : prev);
@@ -312,16 +312,29 @@ function App() {
   const handleSaveChecklistState = async () => {
     if (!result || !result.slug) return;
     try {
-      await syncChecklistState(
-        result.slug,
-        checkedItems,
-        removedItems,
-        result.added_items || [],
-        result.items // <-- отправляем актуальный список вещей
-      );
-      setIsDirty(false);
-      setSaveStateSuccess(true);
-      setTimeout(() => setSaveStateSuccess(false), 1500);
+      const response = await fetch(`https://luggify.onrender.com/checklist/${result.slug}/state`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          checked_items: Object.keys(checkedItems).filter(k => checkedItems[k]),
+          removed_items: removedItems,
+          added_items: result.added_items || [],
+          items: result.items,
+        }),
+      });
+      if (response.ok) {
+        const updatedChecklist = await response.json();
+        setResult(updatedChecklist);
+        // Восстанавливаем checkedItems из ответа сервера
+        const checked = {};
+        (updatedChecklist.items || []).forEach(item => {
+          checked[item] = updatedChecklist.checked_items?.includes(item) || false;
+        });
+        setCheckedItems(checked);
+        setIsDirty(false);
+        setSaveStateSuccess(true);
+        setTimeout(() => setSaveStateSuccess(false), 1500);
+      }
     } catch {}
   };
 
