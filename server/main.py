@@ -422,6 +422,13 @@ async def save_tg_checklist(data: schemas.ChecklistCreate = Body(...), db: Async
     checklist = await crud.save_or_update_tg_checklist(db, data)
     return checklist
 
+@app.get("/tg-checklist/{tg_user_id}", response_model=schemas.ChecklistOut)
+async def get_tg_checklist(tg_user_id: str, db: AsyncSession = Depends(get_db)):
+    checklist = await crud.get_checklist_by_tg_user_id(db, tg_user_id)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден для пользователя")
+    return checklist
+
 @app.get("/tg-checklists/{tg_user_id}", response_model=List[schemas.ChecklistOut])
 async def get_tg_checklists(tg_user_id: str, db: AsyncSession = Depends(get_db)):
     checklists = await crud.get_all_checklists_by_tg_user_id(db, tg_user_id)
@@ -432,6 +439,8 @@ async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):
     checklist = await crud.get_checklist_by_slug(db, slug)
     if not checklist:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
+
+    # Категории для чеклиста (для фронта)
     categories = {
         "Важное": [],
         "Документы": [],
@@ -445,31 +454,37 @@ async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):
         for k in categories:
             if item in categories[k]:
                 break
+        # Важное
         if item in ["Паспорт", "Медицинская страховка", "Деньги/карта", "Виза"]:
             categories["Важное"].append(item)
+        # Документы
         elif item in ["Билеты", "Бронь отеля", "Водительское удостоверение"]:
             categories["Документы"].append(item)
+        # Одежда
         elif item in ["Тёплая куртка", "Шапка", "Шарф", "Перчатки", "Термобельё", "Зимние ботинки", "Тёплые носки", "Лёгкая куртка", "Свитер", "Джинсы", "Кроссовки", "Футболки", "Шорты", "Панама", "Легкая обувь", "Купальник", "Треккинговая обувь", "Зонт/дождевик", "Водонепроницаемая обувь", "Солнцезащитные очки"]:
             categories["Одежда"].append(item)
+        # Гигиена
         elif item in ["Зубная щётка", "Паста", "Дезодорант", "Мыло", "Расчёска"]:
             categories["Гигиена"].append(item)
+        # Техника
         elif item in ["Телефон", "Зарядка", "Пауэрбанк", "Переходник для розеток"]:
             categories["Техника"].append(item)
+        # Аптечка
         elif item in ["Личные лекарства", "Пластыри", "Обезболивающее"]:
             categories["Аптечка"].append(item)
+        # Прочее
         elif item in ["Бутылка для воды", "Термос"]:
             categories["Прочее"].append(item)
+    # Убираем дубли
     for k in categories:
         categories[k] = list(dict.fromkeys(categories[k]))
+
     return {
         "slug": checklist.slug,
         "city": checklist.city,
         "start_date": checklist.start_date,
         "end_date": checklist.end_date,
         "items": checklist.items,
-        "checked_items": checklist.checked_items,
-        "added_items": checklist.added_items,
-        "removed_items": checklist.removed_items,
         "items_by_category": categories,
         "avg_temp": checklist.avg_temp,
         "conditions": checklist.conditions,
@@ -487,48 +502,7 @@ async def update_checklist_state(slug: str, state: ChecklistStateUpdate = Body(.
     )
     if not checklist:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
-    categories = {
-        "Важное": [],
-        "Документы": [],
-        "Одежда": [],
-        "Гигиена": [],
-        "Техника": [],
-        "Аптечка": [],
-        "Прочее": []
-    }
-    for item in checklist.items:
-        for k in categories:
-            if item in categories[k]:
-                break
-        if item in ["Паспорт", "Медицинская страховка", "Деньги/карта", "Виза"]:
-            categories["Важное"].append(item)
-        elif item in ["Билеты", "Бронь отеля", "Водительское удостоверение"]:
-            categories["Документы"].append(item)
-        elif item in ["Тёплая куртка", "Шапка", "Шарф", "Перчатки", "Термобельё", "Зимние ботинки", "Тёплые носки", "Лёгкая куртка", "Свитер", "Джинсы", "Кроссовки", "Футболки", "Шорты", "Панама", "Легкая обувь", "Купальник", "Треккинговая обувь", "Зонт/дождевик", "Водонепроницаемая обувь", "Солнцезащитные очки"]:
-            categories["Одежда"].append(item)
-        elif item in ["Зубная щётка", "Паста", "Дезодорант", "Мыло", "Расчёска"]:
-            categories["Гигиена"].append(item)
-        elif item in ["Телефон", "Зарядка", "Пауэрбанк", "Переходник для розеток"]:
-            categories["Техника"].append(item)
-        elif item in ["Личные лекарства", "Пластыри", "Обезболивающее"]:
-            categories["Аптечка"].append(item)
-        elif item in ["Бутылка для воды", "Термос"]:
-            categories["Прочее"].append(item)
-    for k in categories:
-        categories[k] = list(dict.fromkeys(categories[k]))
-    return {
-        "slug": checklist.slug,
-        "city": checklist.city,
-        "start_date": checklist.start_date,
-        "end_date": checklist.end_date,
-        "items": checklist.items,
-        "checked_items": checklist.checked_items,
-        "added_items": checklist.added_items,
-        "removed_items": checklist.removed_items,
-        "items_by_category": categories,
-        "avg_temp": checklist.avg_temp,
-        "conditions": checklist.conditions,
-    }
+    return checklist
 
 @app.delete("/checklist/{slug}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_checklist(slug: str, db: AsyncSession = Depends(get_db)):
