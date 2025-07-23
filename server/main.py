@@ -1,13 +1,14 @@
 import os
 from datetime import datetime
 import httpx
-from fastapi import FastAPI, Query, Depends, HTTPException
+from fastapi import FastAPI, Query, Depends, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
 import crud, models, schemas
 from database import SessionLocal, async_engine
+from typing import List
 
 load_dotenv()
 
@@ -407,6 +408,25 @@ async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db))
         "conditions": checklist.conditions,
         "daily_forecast": daily_forecast
     }
+
+@app.post("/save-tg-checklist", response_model=schemas.ChecklistOut)
+async def save_tg_checklist(data: schemas.ChecklistCreate = Body(...), db: AsyncSession = Depends(get_db)):
+    if not data.tg_user_id:
+        raise HTTPException(status_code=400, detail="Не передан tg_user_id")
+    checklist = await crud.save_or_update_tg_checklist(db, data)
+    return checklist
+
+@app.get("/tg-checklist/{tg_user_id}", response_model=schemas.ChecklistOut)
+async def get_tg_checklist(tg_user_id: str, db: AsyncSession = Depends(get_db)):
+    checklist = await crud.get_checklist_by_tg_user_id(db, tg_user_id)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден для пользователя")
+    return checklist
+
+@app.get("/tg-checklists/{tg_user_id}", response_model=List[schemas.ChecklistOut])
+async def get_tg_checklists(tg_user_id: str, db: AsyncSession = Depends(get_db)):
+    checklists = await crud.get_all_checklists_by_tg_user_id(db, tg_user_id)
+    return checklists
 
 @app.get("/checklist/{slug}", response_model=schemas.ChecklistOut)
 async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):

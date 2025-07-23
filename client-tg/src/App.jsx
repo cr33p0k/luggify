@@ -15,6 +15,11 @@ function App() {
   const [tgUser, setTgUser] = useState(null);
   const [isTg, setIsTg] = useState(false);
   const [columns, setColumns] = useState(3);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [showChecklists, setShowChecklists] = useState(false);
+  const [myChecklists, setMyChecklists] = useState([]);
+  const [checklistsLoading, setChecklistsLoading] = useState(false);
 
   useEffect(() => {
     // Telegram WebApp API
@@ -40,6 +45,22 @@ function App() {
     }
   }, [result]);
 
+  // Загрузка чеклиста по tg_user_id при старте
+  useEffect(() => {
+    if (isTg && tgUser && tgUser.id) {
+      setLoading(true);
+      fetch(`https://luggify.onrender.com/tg-checklist/${tgUser.id}`)
+        .then(async (res) => {
+          if (res.ok) {
+            const data = await res.json();
+            setResult(data);
+          }
+        })
+        .catch(() => {})
+        .finally(() => setLoading(false));
+    }
+  }, [isTg, tgUser]);
+
   useEffect(() => {
     const handleResize = () => {
       if (window.innerWidth <= 700) setColumns(1);
@@ -58,6 +79,7 @@ function App() {
       alert("Заполните все поля!");
       return;
     }
+    setLoading(true);
     try {
       const res = await fetch("https://luggify.onrender.com/generate-packing-list", {
         method: "POST",
@@ -70,12 +92,34 @@ function App() {
       });
       if (!res.ok) {
         setError("Ошибка при генерации списка");
+        setLoading(false);
         return;
       }
       const data = await res.json();
       setResult(data);
+      // Сохраняем чеклист для Telegram пользователя
+      if (isTg && tgUser && tgUser.id) {
+        setSaving(true);
+        fetch("https://luggify.onrender.com/save-tg-checklist", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            city: data.city,
+            start_date: data.start_date,
+            end_date: data.end_date,
+            items: data.items,
+            avg_temp: data.avg_temp,
+            conditions: data.conditions,
+            tg_user_id: tgUser.id,
+          }),
+        })
+          .then(() => setSaving(false))
+          .catch(() => setSaving(false));
+      }
     } catch (e) {
       setError("Ошибка при запросе к серверу");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -119,6 +163,35 @@ function App() {
     return `${day}.${month}.${year}`;
   };
 
+  // Загрузка всех чеклистов пользователя
+  const handleShowChecklists = async () => {
+    if (!tgUser || !tgUser.id) return;
+    setChecklistsLoading(true);
+    setShowChecklists(true);
+    setError(null);
+    try {
+      const res = await fetch(`https://luggify.onrender.com/tg-checklists/${tgUser.id}`);
+      if (!res.ok) {
+        setError("Ошибка при загрузке чеклистов");
+        setMyChecklists([]);
+      } else {
+        const data = await res.json();
+        setMyChecklists(data);
+      }
+    } catch {
+      setError("Ошибка при загрузке чеклистов");
+      setMyChecklists([]);
+    } finally {
+      setChecklistsLoading(false);
+    }
+  };
+
+  // Открыть выбранный чеклист
+  const handleOpenChecklist = (checklist) => {
+    setResult(checklist);
+    setShowChecklists(false);
+  };
+
   return (
     <div className={`container large ${result ? "expanded" : ""}`}
       style={{ maxWidth: 600, margin: "0 auto", padding: 16 }}>
@@ -126,17 +199,52 @@ function App() {
       {isTg && tgUser && (
         <div className="tg-user">Привет, {tgUser.first_name}!</div>
       )}
-      {!result && (
+      {loading && <div className="error">Загрузка...</div>}
+      {saving && <div className="error">Сохраняем чеклист...</div>}
+      {error && <div className="error">{error}</div>}
+      {/* Форма генерации и кнопка мои чеклисты */}
+      {!result && !loading && !showChecklists && (
         <>
           <div className="input-group">
             <CitySelect value={city} onSelect={setCity} />
           </div>
           <DateRangePicker onChange={setDates} />
           <button className="main-btn" onClick={handleSubmit} style={{ width: "100%", marginTop: 12 }}>Сгенерировать список</button>
+          {isTg && tgUser && (
+            <button className="main-btn" style={{ width: "100%", marginTop: 8, background: '#444', color: 'orange', border: '1.5px solid orange' }} onClick={handleShowChecklists}>
+              Мои чеклисты
+            </button>
+          )}
         </>
       )}
-      {error && <div className="error">{error}</div>}
-      {result && (
+      {/* Список чеклистов пользователя */}
+      {showChecklists && (
+        <div style={{ marginTop: 24 }}>
+          <h2 style={{ color: 'orange', marginBottom: 12, textAlign: 'center' }}>Мои чеклисты</h2>
+          {checklistsLoading ? (
+            <div className="error">Загрузка чеклистов...</div>
+          ) : myChecklists.length === 0 ? (
+            <div style={{ color: '#ccc', textAlign: 'center' }}>Нет сохранённых чеклистов</div>
+          ) : (
+            <ul style={{ listStyle: 'none', padding: 0 }}>
+              {myChecklists.map((cl) => (
+                <li key={cl.slug} style={{ marginBottom: 12, background: '#222', borderRadius: 8, padding: 12, boxShadow: '0 0 8px #ffae4222' }}>
+                  <div style={{ fontWeight: 600, color: 'orange' }}>{cl.city}</div>
+                  <div style={{ fontSize: 13, color: '#aaa' }}>{cl.start_date} — {cl.end_date}</div>
+                  <button className="main-btn" style={{ marginTop: 8, width: '100%' }} onClick={() => handleOpenChecklist(cl)}>
+                    Открыть
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <button className="main-btn" style={{ width: '100%', marginTop: 8, background: '#444', color: 'orange', border: '1.5px solid orange' }} onClick={() => setShowChecklists(false)}>
+            Назад
+          </button>
+        </div>
+      )}
+      {/* Чеклист */}
+      {result && !loading && !showChecklists && (
         <div className="result">
           {/* Чеклист */}
           {(() => {

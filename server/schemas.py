@@ -16,6 +16,7 @@ class ChecklistCreate(BaseModel):
     items: List[str]
     avg_temp: float
     conditions: List[str]
+    tg_user_id: Optional[str] = None
 
 class ChecklistOut(ChecklistCreate):
     slug: str
