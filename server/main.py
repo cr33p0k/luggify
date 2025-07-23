@@ -125,6 +125,11 @@ class DailyForecastItem(BaseModel):
 class ChecklistResponse(schemas.ChecklistOut):
     daily_forecast: list[DailyForecastItem]
 
+class ChecklistStateUpdate(BaseModel):
+    checked_items: list[str] | None = None
+    removed_items: list[str] | None = None
+    added_items: list[str] | None = None
+
 @app.get("/geo/cities-autocomplete")
 async def cities_autocomplete(namePrefix: str = Query(..., min_length=1)):
     params = {
@@ -483,6 +488,19 @@ async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):
         "avg_temp": checklist.avg_temp,
         "conditions": checklist.conditions,
     }
+
+@app.patch("/checklist/{slug}/state", response_model=schemas.ChecklistOut)
+async def update_checklist_state(slug: str, state: ChecklistStateUpdate = Body(...), db: AsyncSession = Depends(get_db)):
+    checklist = await crud.update_checklist_state(
+        db,
+        slug,
+        checked_items=state.checked_items,
+        removed_items=state.removed_items,
+        added_items=state.added_items,
+    )
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    return checklist
 
 @app.delete("/checklist/{slug}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_checklist(slug: str, db: AsyncSession = Depends(get_db)):

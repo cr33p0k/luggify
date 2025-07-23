@@ -110,16 +110,49 @@ function App() {
     }
   };
 
+  // --- ХЕЛПЕРЫ ДЛЯ СИНХРОНИЗАЦИИ СОСТОЯНИЯ ЧЕКЛИСТА ---
+  const syncChecklistState = async (slug, checked, removed, added) => {
+    try {
+      await fetch(`https://luggify.onrender.com/checklist/${slug}/state`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          checked_items: Object.keys(checked).filter(k => checked[k]),
+          removed_items: removed,
+          added_items: added,
+        }),
+      });
+    } catch {}
+  };
+
+  // --- ОБНОВЛЯЕМ handleCheck ---
   const handleCheck = (item) => {
-    setCheckedItems(prev => ({ ...prev, [item]: !prev[item] }));
+    setCheckedItems(prev => {
+      const updated = { ...prev, [item]: !prev[item] };
+      if (result && result.slug) {
+        syncChecklistState(result.slug, updated, removedItems, result.added_items || []);
+      }
+      return updated;
+    });
   };
 
+  // --- ОБНОВЛЯЕМ handleRemoveItem ---
   const handleRemoveItem = (item) => {
-    setRemovedItems(prev => [...prev, item]);
+    setRemovedItems(prev => {
+      const updated = [...prev, item];
+      if (result && result.slug) {
+        syncChecklistState(result.slug, checkedItems, updated, result.added_items || []);
+      }
+      return updated;
+    });
   };
 
+  // --- ОБНОВЛЯЕМ handleRestoreAll ---
   const handleRestoreAll = () => {
     setRemovedItems([]);
+    if (result && result.slug) {
+      syncChecklistState(result.slug, checkedItems, [], result.added_items || []);
+    }
   };
 
   const resetChecklist = () => {
@@ -131,13 +164,21 @@ function App() {
     setCheckedItems(reset);
   };
 
+  // --- ОБНОВЛЯЕМ handleAddItem ---
   const handleAddItem = () => {
     if (!newItem.trim()) return;
     if (result.items.includes(newItem.trim())) return;
-    setResult(prev => ({
-      ...prev,
-      items: [...prev.items, newItem.trim()]
-    }));
+    setResult(prev => {
+      const updated = {
+        ...prev,
+        items: [...prev.items, newItem.trim()],
+        added_items: [...(prev.added_items || []), newItem.trim()],
+      };
+      if (prev && prev.slug) {
+        syncChecklistState(prev.slug, checkedItems, removedItems, updated.added_items);
+      }
+      return updated;
+    });
     setNewItem("");
     setAddItemMode(false);
   };
@@ -174,9 +215,21 @@ function App() {
   };
 
   // Открыть выбранный чеклист
+  // --- ОБНОВЛЯЕМ handleOpenChecklist ---
   const handleOpenChecklist = async (checklist) => {
     setResult(checklist);
     setShowChecklists(false);
+    // Восстанавливаем состояние чеклиста
+    const checked = {};
+    (checklist.items || []).forEach(item => {
+      checked[item] = checklist.checked_items?.includes(item) || false;
+    });
+    setCheckedItems(checked);
+    setRemovedItems(checklist.removed_items || []);
+    // Добавленные вещи (те, которых нет в items, но есть в added_items)
+    if (checklist.added_items && checklist.added_items.length > 0) {
+      setResult(prev => prev ? { ...prev, items: [...prev.items, ...checklist.added_items.filter(i => !prev.items.includes(i))] } : prev);
+    }
     // Подгружаем актуальный прогноз погоды
     setLoading(true);
     setError(null);
@@ -194,11 +247,8 @@ function App() {
         const data = await res.json();
         setResult(prev => prev ? { ...prev, daily_forecast: data.daily_forecast } : prev);
       }
-    } catch {
-      // Не показываем ошибку, если не удалось получить прогноз
-    } finally {
-      setLoading(false);
-    }
+    } catch {}
+    setLoading(false);
   };
 
   // Сохранить текущий чеклист в мои чеклисты

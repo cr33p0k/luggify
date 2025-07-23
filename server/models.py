@@ -14,3 +14,6 @@ class Checklist(Base):
     conditions = Column(ARRAY(String))
     slug = Column(String, unique=True, index=True)  # токен/slug
     tg_user_id = Column(String, nullable=True, index=True)  # Telegram user id
+    checked_items = Column(ARRAY(String), nullable=True)
+    removed_items = Column(ARRAY(String), nullable=True)
+    added_items = Column(ARRAY(String), nullable=True)

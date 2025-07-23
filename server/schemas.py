@@ -16,6 +16,9 @@ class ChecklistCreate(BaseModel):
     items: List[str]
     avg_temp: float
     conditions: List[str]
+    checked_items: Optional[List[str]] = None
+    removed_items: Optional[List[str]] = None
+    added_items: Optional[List[str]] = None
     tg_user_id: Optional[str] = None
 
 class ChecklistOut(ChecklistCreate):
