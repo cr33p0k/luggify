@@ -17,6 +17,7 @@ function App() {
   const [columns, setColumns] = useState(3);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
   const [showChecklists, setShowChecklists] = useState(false);
   const [myChecklists, setMyChecklists] = useState([]);
   const [checklistsLoading, setChecklistsLoading] = useState(false);
@@ -192,6 +193,38 @@ function App() {
     setShowChecklists(false);
   };
 
+  // Сохранить текущий чеклист в мои чеклисты
+  const handleSaveChecklist = async () => {
+    if (!result || !tgUser || !tgUser.id) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await fetch("https://luggify.onrender.com/save-tg-checklist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          city: result.city,
+          start_date: result.start_date,
+          end_date: result.end_date,
+          items: result.items,
+          avg_temp: result.avg_temp,
+          conditions: result.conditions,
+          tg_user_id: tgUser.id,
+        }),
+      });
+      if (res.ok) {
+        setSaveSuccess(true);
+        setTimeout(() => setSaveSuccess(false), 1500);
+      } else {
+        setError("Ошибка при сохранении чеклиста");
+      }
+    } catch {
+      setError("Ошибка при сохранении чеклиста");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className={`container large ${result ? "expanded" : ""}`}
       style={{ maxWidth: 600, margin: "0 auto", padding: 16 }}>
@@ -200,6 +233,7 @@ function App() {
         <div className="tg-user">Привет, {tgUser.first_name}!</div>
       )}
       {error && <div className="error">{error}</div>}
+      {saveSuccess && <div style={{ color: 'orange', textAlign: 'center', marginBottom: 8 }}>Сохранено!</div>}
       {/* Форма генерации и кнопка мои чеклисты */}
       {!result && !loading && !showChecklists && (
         <>
@@ -242,6 +276,12 @@ function App() {
       {/* Чеклист */}
       {result && !loading && !showChecklists && (
         <div className="result">
+          {/* Кнопка сохранить чеклист */}
+          {isTg && tgUser && (
+            <button className="main-btn" style={{ width: '100%', marginBottom: 16, background: '#444', color: 'orange', border: '1.5px solid orange' }} onClick={handleSaveChecklist} disabled={saving}>
+              {saving ? 'Сохраняем...' : 'Сохранить в мои чеклисты'}
+            </button>
+          )}
           {/* Чеклист */}
           {(() => {
             let items = (result.items || []).filter(item => !removedItems.includes(item));
