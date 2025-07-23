@@ -362,7 +362,7 @@ function App() {
           ) : (
             <ul style={{ listStyle: 'none', padding: 0 }}>
               {myChecklists.map((cl) => (
-                <li key={cl.slug} style={{ position: 'relative', marginBottom: 12, background: '#222', borderRadius: 8, padding: 12, boxShadow: '0 0 8px #ffae4222' }}>
+                <li key={cl.slug} style={{ position: 'relative', marginBottom: 12, background: '#222', borderRadius: 8, padding: '8px 12px 12px 12px', boxShadow: '0 0 8px #ffae4222' }}>
                   <div style={{ fontWeight: 600, color: 'orange' }}>{cl.city}</div>
                   <div style={{ fontSize: 13, color: '#aaa' }}>{cl.start_date} — {cl.end_date}</div>
                   <button className="main-btn" style={{ marginTop: 8, width: '100%' }} onClick={() => handleOpenChecklist(cl)}>
@@ -371,15 +371,16 @@ function App() {
                   <button
                     style={{
                       position: 'absolute',
-                      top: 8,
+                      top: 2,
                       right: 8,
                       background: 'none',
                       border: 'none',
-                      color: '#aaa', 
+                      color: '#aaa',
                       fontSize: 22,
                       cursor: 'pointer',
                       padding: 0,
                       lineHeight: 1,
+                      zIndex: 2,
                     }}
                     title="Удалить чеклист"
                     onClick={() => handleDeleteChecklist(cl.slug)}
