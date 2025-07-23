@@ -139,11 +139,19 @@ function App() {
 
   // --- ОБНОВЛЯЕМ handleRemoveItem ---
   const handleRemoveItem = (item) => {
-    setRemovedItems(prev => {
-      const updated = [...prev, item];
-      setIsDirty(true);
+    setResult(prev => {
+      if (!prev) return prev;
+      // Удаляем вещь из списка items и из added_items (если есть)
+      const newItems = prev.items.filter(i => i !== item);
+      const newAdded = (prev.added_items || []).filter(i => i !== item);
+      return { ...prev, items: newItems, added_items: newAdded };
+    });
+    setCheckedItems(prev => {
+      const updated = { ...prev };
+      delete updated[item];
       return updated;
     });
+    setIsDirty(true);
   };
 
   // --- ОБНОВЛЯЕМ handleRestoreAll ---
@@ -449,11 +457,6 @@ function App() {
                 />
                 <button className="checklist-reset-btn" style={{padding: "0.3rem 1.1rem"}} onClick={handleAddItem}>ОК</button>
               </>
-            )}
-            {removedItems.length > 0 && (
-              <button className="checklist-reset-btn" onClick={handleRestoreAll}>
-                Восстановить вещи
-              </button>
             )}
           </div>
           {/* Прогноз погоды */}
