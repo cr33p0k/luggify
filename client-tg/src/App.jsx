@@ -174,9 +174,31 @@ function App() {
   };
 
   // Открыть выбранный чеклист
-  const handleOpenChecklist = (checklist) => {
+  const handleOpenChecklist = async (checklist) => {
     setResult(checklist);
     setShowChecklists(false);
+    // Подгружаем актуальный прогноз погоды
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("https://luggify.onrender.com/generate-packing-list", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          city: checklist.city,
+          start_date: checklist.start_date,
+          end_date: checklist.end_date,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setResult(prev => prev ? { ...prev, daily_forecast: data.daily_forecast } : prev);
+      }
+    } catch {
+      // Не показываем ошибку, если не удалось получить прогноз
+    } finally {
+      setLoading(false);
+    }
   };
 
   // Сохранить текущий чеклист в мои чеклисты
