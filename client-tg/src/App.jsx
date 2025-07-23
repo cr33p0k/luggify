@@ -233,6 +233,27 @@ function App() {
     }
   };
 
+  // Добавляю функцию для удаления чеклиста
+  const handleDeleteChecklist = async (slug) => {
+    if (!tgUser || !tgUser.id) return;
+    setChecklistsLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`https://luggify.onrender.com/checklist/${slug}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        setMyChecklists((prev) => prev.filter((cl) => cl.slug !== slug));
+      } else {
+        setError('Ошибка при удалении чеклиста');
+      }
+    } catch {
+      setError('Ошибка при удалении чеклиста');
+    } finally {
+      setChecklistsLoading(false);
+    }
+  };
+
   return (
     <div className={`container large ${result ? "expanded" : ""}`}
       style={{ maxWidth: 600, margin: "0 auto", padding: 16 }}>
@@ -266,11 +287,30 @@ function App() {
           ) : (
             <ul style={{ listStyle: 'none', padding: 0 }}>
               {myChecklists.map((cl) => (
-                <li key={cl.slug} style={{ marginBottom: 12, background: '#222', borderRadius: 8, padding: 12, boxShadow: '0 0 8px #ffae4222' }}>
+                <li key={cl.slug} style={{ position: 'relative', marginBottom: 12, background: '#222', borderRadius: 8, padding: 12, boxShadow: '0 0 8px #ffae4222' }}>
                   <div style={{ fontWeight: 600, color: 'orange' }}>{cl.city}</div>
                   <div style={{ fontSize: 13, color: '#aaa' }}>{cl.start_date} — {cl.end_date}</div>
                   <button className="main-btn" style={{ marginTop: 8, width: '100%' }} onClick={() => handleOpenChecklist(cl)}>
                     Открыть
+                  </button>
+                  <button
+                    style={{
+                      position: 'absolute',
+                      top: 8,
+                      right: 8,
+                      background: 'none',
+                      border: 'none',
+                      color: '#ff4d00',
+                      fontSize: 22,
+                      cursor: 'pointer',
+                      padding: 0,
+                      lineHeight: 1,
+                    }}
+                    title="Удалить чеклист"
+                    onClick={() => handleDeleteChecklist(cl.slug)}
+                    disabled={checklistsLoading}
+                  >
+                    ×
                   </button>
                 </li>
               ))}
