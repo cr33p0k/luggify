@@ -21,6 +21,8 @@ function App() {
   const [showChecklists, setShowChecklists] = useState(false);
   const [myChecklists, setMyChecklists] = useState([]);
   const [checklistsLoading, setChecklistsLoading] = useState(false);
+  const [isDirty, setIsDirty] = useState(false);
+  const [saveStateSuccess, setSaveStateSuccess] = useState(false);
 
   useEffect(() => {
     // Telegram WebApp API
@@ -129,6 +131,7 @@ function App() {
   const handleCheck = (item) => {
     setCheckedItems(prev => {
       const updated = { ...prev, [item]: !prev[item] };
+      setIsDirty(true);
       if (result && result.slug) {
         syncChecklistState(result.slug, updated, removedItems, result.added_items || []);
       }
@@ -140,6 +143,7 @@ function App() {
   const handleRemoveItem = (item) => {
     setRemovedItems(prev => {
       const updated = [...prev, item];
+      setIsDirty(true);
       if (result && result.slug) {
         syncChecklistState(result.slug, checkedItems, updated, result.added_items || []);
       }
@@ -150,6 +154,7 @@ function App() {
   // --- ОБНОВЛЯЕМ handleRestoreAll ---
   const handleRestoreAll = () => {
     setRemovedItems([]);
+    setIsDirty(true);
     if (result && result.slug) {
       syncChecklistState(result.slug, checkedItems, [], result.added_items || []);
     }
@@ -174,6 +179,7 @@ function App() {
         items: [...prev.items, newItem.trim()],
         added_items: [...(prev.added_items || []), newItem.trim()],
       };
+      setIsDirty(true);
       if (prev && prev.slug) {
         syncChecklistState(prev.slug, checkedItems, removedItems, updated.added_items);
       }
@@ -302,6 +308,25 @@ function App() {
     } finally {
       setChecklistsLoading(false);
     }
+  };
+
+  // --- handleSaveChecklistState ---
+  const handleSaveChecklistState = async () => {
+    if (!result || !result.slug) return;
+    try {
+      await fetch(`https://luggify.onrender.com/checklist/${result.slug}/state`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          checked_items: Object.keys(checkedItems).filter(k => checkedItems[k]),
+          removed_items: removedItems,
+          added_items: result.added_items || [],
+        }),
+      });
+      setIsDirty(false);
+      setSaveStateSuccess(true);
+      setTimeout(() => setSaveStateSuccess(false), 1500);
+    } catch {}
   };
 
   return (
@@ -461,6 +486,12 @@ function App() {
               </div>
             </div>
           )}
+          {isDirty && (
+            <button className="main-btn" style={{ width: '100%', marginTop: 16, background: '#444', color: 'orange', border: '1.5px solid orange' }} onClick={handleSaveChecklistState}>
+              Сохранить изменения
+            </button>
+          )}
+          {saveStateSuccess && <div style={{ color: 'orange', textAlign: 'center', marginTop: 8 }}>Изменения сохранены!</div>}
         </div>
       )}
     </div>
