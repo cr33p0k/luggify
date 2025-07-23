@@ -46,21 +46,7 @@ function App() {
     }
   }, [result]);
 
-  // Загрузка чеклиста по tg_user_id при старте
-  useEffect(() => {
-    if (isTg && tgUser && tgUser.id) {
-      setLoading(true);
-      fetch(`https://luggify.onrender.com/tg-checklist/${String(tgUser.id)}`)
-        .then(async (res) => {
-          if (res.ok) {
-            const data = await res.json();
-            setResult(data);
-          }
-        })
-        .catch(() => {})
-        .finally(() => setLoading(false));
-    }
-  }, [isTg, tgUser]);
+  // Удалён useEffect, который автоматически подгружал чеклист по tg_user_id при старте
 
   useEffect(() => {
     const handleResize = () => {
