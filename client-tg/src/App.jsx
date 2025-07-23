@@ -50,7 +50,7 @@ function App() {
   useEffect(() => {
     if (isTg && tgUser && tgUser.id) {
       setLoading(true);
-      fetch(`https://luggify.onrender.com/tg-checklist/${tgUser.id}`)
+      fetch(`https://luggify.onrender.com/tg-checklist/${String(tgUser.id)}`)
         .then(async (res) => {
           if (res.ok) {
             const data = await res.json();
@@ -111,7 +111,7 @@ function App() {
             items: data.items,
             avg_temp: data.avg_temp,
             conditions: data.conditions,
-            tg_user_id: tgUser.id,
+            tg_user_id: String(tgUser.id),
           }),
         })
           .then(() => setSaving(false))
@@ -171,7 +171,7 @@ function App() {
     setShowChecklists(true);
     setError(null);
     try {
-      const res = await fetch(`https://luggify.onrender.com/tg-checklists/${tgUser.id}`);
+      const res = await fetch(`https://luggify.onrender.com/tg-checklists/${String(tgUser.id)}`);
       if (!res.ok) {
         setError("Ошибка при загрузке чеклистов");
         setMyChecklists([]);
@@ -209,7 +209,7 @@ function App() {
           items: result.items,
           avg_temp: result.avg_temp,
           conditions: result.conditions,
-          tg_user_id: tgUser.id,
+          tg_user_id: String(tgUser.id),
         }),
       });
       if (res.ok) {
