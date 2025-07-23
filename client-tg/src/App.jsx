@@ -374,7 +374,7 @@ function App() {
           {/* Кнопка сохранить чеклист перенесена вниз */}
           {isTg && tgUser && (
             <button className="main-btn" style={{ width: '100%', marginTop: 24, background: '#444', color: 'orange', border: '1.5px solid orange' }} onClick={handleSaveChecklist} disabled={saving}>
-              {saving ? 'Сохраняем...' : 'Сохранить в мои чеклисты'}
+              Сохранить в мои чеклисты
             </button>
           )}
         </div>
