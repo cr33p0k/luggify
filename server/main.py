@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
 import crud, models, schemas
-from database import SessionLocal, engine
+from database import SessionLocal, async_engine
 
 load_dotenv()
 
