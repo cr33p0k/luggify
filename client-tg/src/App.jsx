@@ -362,32 +362,37 @@ function App() {
           ) : (
             <ul style={{ listStyle: 'none', padding: 0 }}>
               {myChecklists.map((cl) => (
-                <li key={cl.slug} style={{ position: 'relative', marginBottom: 12, background: '#222', borderRadius: 8, padding: '8px 12px 12px 12px', boxShadow: '0 0 8px #ffae4222' }}>
+                <li key={cl.slug} style={{ position: 'relative', marginBottom: 12, background: '#222', borderRadius: 8, padding: '12px 12px 12px 12px', boxShadow: '0 0 8px #ffae4222', display: 'flex', flexDirection: 'column', alignItems: 'stretch' }}>
                   <div style={{ fontWeight: 600, color: 'orange' }}>{cl.city}</div>
                   <div style={{ fontSize: 13, color: '#aaa' }}>{cl.start_date} — {cl.end_date}</div>
-                  <button className="main-btn" style={{ marginTop: 8, width: '100%' }} onClick={() => handleOpenChecklist(cl)}>
-                    Открыть
-                  </button>
-                  <button
-                    style={{
-                      position: 'absolute',
-                      top: 2,
-                      right: 8,
-                      background: 'none',
-                      border: 'none',
-                      color: '#aaa',
-                      fontSize: 22,
-                      cursor: 'pointer',
-                      padding: 0,
-                      lineHeight: 1,
-                      zIndex: 2,
-                    }}
-                    title="Удалить чеклист"
-                    onClick={() => handleDeleteChecklist(cl.slug)}
-                    disabled={checklistsLoading}
-                  >
-                    ×
-                  </button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+                    <button className="main-btn" style={{ flex: 1 }} onClick={() => handleOpenChecklist(cl)}>
+                      Открыть
+                    </button>
+                    <button
+                      style={{
+                        background: '#333',
+                        border: '1.5px solid #aaa',
+                        color: '#aaa',
+                        fontSize: 18,
+                        borderRadius: 6,
+                        width: 32,
+                        height: 32,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        cursor: 'pointer',
+                        padding: 0,
+                        lineHeight: 1,
+                        marginLeft: 4,
+                      }}
+                      title="Удалить чеклист"
+                      onClick={() => handleDeleteChecklist(cl.slug)}
+                      disabled={checklistsLoading}
+                    >
+                      ×
+                    </button>
+                  </div>
                 </li>
               ))}
             </ul>
