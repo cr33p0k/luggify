@@ -262,12 +262,6 @@ function App() {
       {/* Чеклист */}
       {result && !loading && !showChecklists && (
         <div className="result">
-          {/* Кнопка сохранить чеклист */}
-          {isTg && tgUser && (
-            <button className="main-btn" style={{ width: '100%', marginBottom: 16, background: '#444', color: 'orange', border: '1.5px solid orange' }} onClick={handleSaveChecklist} disabled={saving}>
-              {saving ? 'Сохраняем...' : 'Сохранить в мои чеклисты'}
-            </button>
-          )}
           {/* Чеклист */}
           {(() => {
             let items = (result.items || []).filter(item => !removedItems.includes(item));
@@ -354,6 +348,12 @@ function App() {
                 ))}
               </div>
             </div>
+          )}
+          {/* Кнопка сохранить чеклист перенесена вниз */}
+          {isTg && tgUser && (
+            <button className="main-btn" style={{ width: '100%', marginTop: 24, background: '#444', color: 'orange', border: '1.5px solid orange' }} onClick={handleSaveChecklist} disabled={saving}>
+              {saving ? 'Сохраняем...' : 'Сохранить в мои чеклисты'}
+            </button>
           )}
         </div>
       )}
