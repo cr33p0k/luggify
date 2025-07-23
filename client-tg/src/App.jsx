@@ -114,7 +114,7 @@ function App() {
 
   // --- ХЕЛПЕРЫ ДЛЯ СИНХРОНИЗАЦИИ СОСТОЯНИЯ ЧЕКЛИСТА ---
   // syncChecklistState больше не вызывается из обработчиков изменений, только из handleSaveChecklistState
-  const syncChecklistState = async (slug, checked, removed, added) => {
+  const syncChecklistState = async (slug, checked, removed, added, items) => {
     try {
       await fetch(`https://luggify.onrender.com/checklist/${slug}/state`, {
         method: 'PATCH',
@@ -123,6 +123,7 @@ function App() {
           checked_items: Object.keys(checked).filter(k => checked[k]),
           removed_items: removed,
           added_items: added,
+          items: items,
         }),
       });
     } catch {}
@@ -315,7 +316,8 @@ function App() {
         result.slug,
         checkedItems,
         removedItems,
-        result.added_items || []
+        result.added_items || [],
+        result.items // <-- отправляем актуальный список вещей
       );
       setIsDirty(false);
       setSaveStateSuccess(true);
@@ -459,6 +461,12 @@ function App() {
               </>
             )}
           </div>
+          {isDirty && (
+            <button className="main-btn" style={{ width: '100%', marginTop: 16, background: '#444', color: 'orange', border: '1.5px solid orange' }} onClick={handleSaveChecklistState}>
+              Сохранить изменения
+            </button>
+          )}
+          {saveStateSuccess && <div style={{ color: 'orange', textAlign: 'center', marginTop: 8 }}>Изменения сохранены!</div>}
           {/* Прогноз погоды */}
           {result.daily_forecast && (
             <div className="forecast" style={{ marginTop: 24 }}>
@@ -481,12 +489,6 @@ function App() {
               </div>
             </div>
           )}
-          {isDirty && (
-            <button className="main-btn" style={{ width: '100%', marginTop: 16, background: '#444', color: 'orange', border: '1.5px solid orange' }} onClick={handleSaveChecklistState}>
-              Сохранить изменения
-            </button>
-          )}
-          {saveStateSuccess && <div style={{ color: 'orange', textAlign: 'center', marginTop: 8 }}>Изменения сохранены!</div>}
         </div>
       )}
     </div>

@@ -49,7 +49,7 @@ async def save_or_update_tg_checklist(db: AsyncSession, data: schemas.ChecklistC
     # Всегда создаём новый чеклист
     return await create_checklist(db, data)
 
-async def update_checklist_state(db: AsyncSession, slug: str, checked_items=None, removed_items=None, added_items=None):
+async def update_checklist_state(db: AsyncSession, slug: str, checked_items=None, removed_items=None, added_items=None, items=None):
     result = await db.execute(select(models.Checklist).where(models.Checklist.slug == slug))
     checklist = result.scalar_one_or_none()
     if not checklist:
@@ -60,6 +60,8 @@ async def update_checklist_state(db: AsyncSession, slug: str, checked_items=None
         checklist.removed_items = removed_items
     if added_items is not None:
         checklist.added_items = added_items
+    if items is not None:
+        checklist.items = items
     await db.commit()
     await db.refresh(checklist)
     return checklist

@@ -129,6 +129,7 @@ class ChecklistStateUpdate(BaseModel):
     checked_items: list[str] | None = None
     removed_items: list[str] | None = None
     added_items: list[str] | None = None
+    items: list[str] | None = None
 
 @app.get("/geo/cities-autocomplete")
 async def cities_autocomplete(namePrefix: str = Query(..., min_length=1)):
@@ -497,6 +498,7 @@ async def update_checklist_state(slug: str, state: ChecklistStateUpdate = Body(.
         checked_items=state.checked_items,
         removed_items=state.removed_items,
         added_items=state.added_items,
+        items=state.items,
     )
     if not checklist:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
