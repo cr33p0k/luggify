@@ -199,8 +199,6 @@ function App() {
       {isTg && tgUser && (
         <div className="tg-user">Привет, {tgUser.first_name}!</div>
       )}
-      {loading && <div className="error">Загрузка...</div>}
-      {saving && <div className="error">Сохраняем чеклист...</div>}
       {error && <div className="error">{error}</div>}
       {/* Форма генерации и кнопка мои чеклисты */}
       {!result && !loading && !showChecklists && (
@@ -221,9 +219,7 @@ function App() {
       {showChecklists && (
         <div style={{ marginTop: 24 }}>
           <h2 style={{ color: 'orange', marginBottom: 12, textAlign: 'center' }}>Мои чеклисты</h2>
-          {checklistsLoading ? (
-            <div className="error">Загрузка чеклистов...</div>
-          ) : myChecklists.length === 0 ? (
+          {checklistsLoading ? null : myChecklists.length === 0 ? (
             <div style={{ color: '#ccc', textAlign: 'center' }}>Нет сохранённых чеклистов</div>
           ) : (
             <ul style={{ listStyle: 'none', padding: 0 }}>
