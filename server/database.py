@@ -21,10 +21,13 @@ else:
     # Проверяем и исправляем формат URL для Render
     original_url = DATABASE_URL
     
-    # Render может предоставлять postgres:// вместо postgresql+asyncpg://
+    # Render может предоставлять postgres:// или postgresql:// вместо postgresql+asyncpg://
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
         print(f"INFO: Преобразовали DATABASE_URL: postgres:// -> postgresql+asyncpg://")
+    elif DATABASE_URL.startswith("postgresql://") and "+asyncpg" not in DATABASE_URL:
+        DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+        print(f"INFO: Преобразовали DATABASE_URL: postgresql:// -> postgresql+asyncpg://")
     elif not DATABASE_URL.startswith("postgresql"):
         print(f"WARNING: Неожиданный формат DATABASE_URL: {DATABASE_URL[:50]}...")
     
