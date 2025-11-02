@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Luggify</string>
+    <string name="generate_list">Сгенерировать список</string>
+    <string name="select_city">Выберите город</string>
+    <string name="select_dates">Выберите даты поездки</string>
+    <string name="fill_all_fields">Заполните все поля!</string>
+    <string name="trip_period_exceeded">Период поездки не может превышать 16 дней</string>
+    <string name="error_loading">Ошибка при загрузке</string>
+    <string name="reset_marks">Сбросить отметки</string>
+    <string name="add_item">Добавить вещь</string>
+    <string name="cancel">Отмена</string>
+    <string name="weather_forecast">Прогноз погоды</string>
+    <string name="checklist_saved">Чеклист сохранён!</string>
+    <string name="copy_link">Копировать ссылку</string>
+    <string name="link_copied">Ссылка скопирована!</string>
+    <string name="remove_item">Удалить из чеклиста</string>
+    <string name="new_item">Новая вещь</string>
+    <string name="save_changes">Сохранить изменения</string>
+    <string name="changes_saved">Изменения сохранены!</string>
+</resources>
+
