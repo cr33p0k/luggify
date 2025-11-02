@@ -4,18 +4,10 @@ import "./CitySelect.css";
 
 
 const fetchCitiesWithCountry = async (inputValue) => {
-  if (!inputValue || inputValue.length < 2) return [];
+  if (!inputValue) return [];
   try {
     const res = await fetch(`https://luggify.onrender.com/geo/cities-autocomplete?namePrefix=${inputValue}`);
-    if (!res.ok) {
-      console.error("Ошибка при загрузке городов:", res.status, res.statusText);
-      return [];
-    }
     const data = await res.json();
-    if (!Array.isArray(data)) {
-      console.error("Неверный формат данных от сервера");
-      return [];
-    }
     return data.map((city) => ({
       label: city.fullName,
       value: city,
