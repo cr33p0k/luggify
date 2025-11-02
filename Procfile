@@ -1,2 +1,3 @@
+release: cd server && alembic upgrade head
 web: cd server && uvicorn main:app --host 0.0.0.0 --port $PORT
 
