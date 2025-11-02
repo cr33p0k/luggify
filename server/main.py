@@ -26,14 +26,11 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://localhost:5174",
-        "https://luggify.vercel.app",
-        "https://www.luggify.vercel.app",
+        "https://luggify.vercel.app", 
     ],
-    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
 
 # Словарь переводов погодных условий
@@ -110,14 +107,8 @@ weather_translations = {
 }
 
 async def get_db():
-    if SessionLocal is None:
-        raise HTTPException(status_code=503, detail="База данных не настроена. Проверьте переменную окружения DATABASE_URL")
     async with SessionLocal() as session:
-        try:
-            yield session
-        except Exception as e:
-            await session.rollback()
-            raise HTTPException(status_code=503, detail=f"Ошибка подключения к базе данных: {str(e)}")
+        yield session
 
 class PackingRequest(BaseModel):
     city: str
@@ -525,58 +516,3 @@ async def delete_checklist(slug: str, db: AsyncSession = Depends(get_db)):
 @app.get("/")
 async def root():
     return {"message": "Luggify backend is running"}
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint - проверяет доступность сервера и подключение к БД"""
-    try:
-        # Проверяем наличие переменных окружения
-        db_url = os.getenv("DATABASE_URL")
-        db_status = "configured" if db_url else "missing"
-        api_key_status = "ok" if os.getenv("OPENWEATHER_API_KEY") else "missing"
-        
-        # Пытаемся подключиться к БД если она настроена
-        db_connection = "unknown"
-        db_error_details = None
-        if db_url and SessionLocal:
-            try:
-                from sqlalchemy import text
-                async with SessionLocal() as session:
-                    await session.execute(text("SELECT 1"))
-                db_connection = "ok"
-            except Exception as e:
-                error_msg = str(e)
-                db_connection = "error"
-                db_error_details = error_msg[:200]
-                # Детальная диагностика
-                if "Name or service not known" in error_msg:
-                    db_error_details += " | Возможно неправильный хост или нужно использовать Internal Database URL на Render"
-                elif "could not translate host name" in error_msg.lower():
-                    db_error_details += " | Проверьте формат DATABASE_URL, возможно нужен Internal URL"
-        elif not db_url:
-            db_connection = "not_configured"
-        
-        result = {
-            "status": "ok",
-            "database_url": "configured" if db_url else "missing",
-            "database_connection": db_connection,
-            "api_key": api_key_status,
-            "message": "Server is running"
-        }
-        if db_error_details:
-            result["database_error"] = db_error_details
-        if db_url:
-            # Показываем хост из URL (без пароля)
-            try:
-                from urllib.parse import urlparse
-                parsed = urlparse(db_url)
-                result["database_host"] = parsed.hostname
-                result["database_port"] = parsed.port
-            except:
-                pass
-        return result
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e)
-        }

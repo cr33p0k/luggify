@@ -27,141 +27,118 @@ const App = () => {
     const fetchChecklistAndForecast = async () => {
       try {
         const res = await fetch(`https://luggify.onrender.com/checklist/${id}`);
-        if (!res.ok) {
-          const errorText = await res.text();
-          let errorMessage = "Чеклист не найден";
-          try {
-            const errorData = JSON.parse(errorText);
-            errorMessage = errorData.detail || errorMessage;
-          } catch (e) {
-            // Используем стандартное сообщение если не удалось распарсить
-          }
-          throw new Error(errorMessage);
-        }
+        if (!res.ok) throw new Error("Чеклист не найден");
 
         const data = await res.json();
         setCity({ fullName: data.city });
         setDates({ start: data.start_date, end: data.end_date });
 
         // Получаем координаты
-        let daily_forecast = [];
-        try {
-          const geoRes = await fetch(
-            `https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(
-              data.city
-            )}&limit=1&appid=${import.meta.env.VITE_WEATHER_API_KEY}`
-          );
-          if (!geoRes.ok) {
-            console.warn("Не удалось получить координаты города");
-          } else {
-            const geoData = await geoRes.json();
-            if (geoData.length > 0) {
-              const { lat, lon } = geoData[0];
+        const geoRes = await fetch(
+          `https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(
+            data.city
+          )}&limit=1&appid=${import.meta.env.VITE_WEATHER_API_KEY}`
+        );
+        const geoData = await geoRes.json();
+        if (!geoData.length) throw new Error("Город не найден");
 
-              // Получаем прогноз через 16-дневный API
-              const start = new Date(data.start_date);
-              const end = new Date(data.end_date);
-              const daysCount = Math.min(
-                Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1,
-                16
-              );
-              const forecastRes = await fetch(
-                `https://api.openweathermap.org/data/2.5/forecast/daily?lat=${lat}&lon=${lon}&cnt=${daysCount}&units=metric&appid=${import.meta.env.VITE_WEATHER_API_KEY}`
-              );
-              if (forecastRes.ok) {
-                const forecastData = await forecastRes.json();
+        const { lat, lon } = geoData[0];
 
-                const translated = {
-                  // Thunderstorm
-                  "thunderstorm with light rain": "Гроза с небольшим дождём",
-                  "thunderstorm with rain": "Гроза с дождём",
-                  "thunderstorm with heavy rain": "Гроза с сильным дождём",
-                  "light thunderstorm": "Слабая гроза",
-                  "thunderstorm": "Гроза",
-                  "heavy thunderstorm": "Сильная гроза",
-                  "ragged thunderstorm": "Местами гроза",
-                  "thunderstorm with light drizzle": "Гроза с небольшим моросящим дождём",
-                  "thunderstorm with drizzle": "Гроза с моросящим дождём",
-                  "thunderstorm with heavy drizzle": "Гроза с сильным моросящим дождём",
-                  // Drizzle
-                  "light intensity drizzle": "Лёгкая морось",
-                  "drizzle": "Морось",
-                  "heavy intensity drizzle": "Сильная морось",
-                  "light intensity drizzle rain": "Лёгкий моросящий дождь",
-                  "drizzle rain": "Моросящий дождь",
-                  "heavy intensity drizzle rain": "Сильный моросящий дождь",
-                  "shower rain and drizzle": "Ливень и морось",
-                  "heavy shower rain and drizzle": "Сильный ливень и морось",
-                  "shower drizzle": "Моросящий ливень",
-                  // Rain
-                  "light rain": "Лёгкий дождь",
-                  "moderate rain": "Умеренный дождь",
-                  "heavy intensity rain": "Сильный дождь",
-                  "very heavy rain": "Очень сильный дождь",
-                  "extreme rain": "Экстремальный дождь",
-                  "freezing rain": "Ледяной дождь",
-                  "light intensity shower rain": "Лёгкий ливневый дождь",
-                  "shower rain": "Ливневый дождь",
-                  "heavy intensity shower rain": "Сильный ливневый дождь",
-                  "ragged shower rain": "Местами ливневый дождь",
-                  // Snow
-                  "light snow": "Лёгкий снег",
-                  "snow": "Снег",
-                  "heavy snow": "Сильный снег",
-                  "sleet": "Дождь со снегом",
-                  "light shower sleet": "Лёгкий ливневый дождь со снегом",
-                  "shower sleet": "Ливневый дождь со снегом",
-                  "light rain and snow": "Лёгкий дождь и снег",
-                  "rain and snow": "Дождь и снег",
-                  "light shower snow": "Лёгкий ливневый снег",
-                  "shower snow": "Ливневый снег",
-                  "heavy shower snow": "Сильный ливневый снег",
-                  // Atmosphere
-                  "mist": "Туман",
-                  "smoke": "Дымка",
-                  "haze": "Мгла",
-                  "sand/dust whirls": "Песчаные/пылевые вихри",
-                  "fog": "Туман",
-                  "sand": "Песок",
-                  "dust": "Пыль",
-                  "volcanic ash": "Вулканический пепел",
-                  "squalls": "Шквалы",
-                  "tornado": "Торнадо",
-                  // Clear
-                  "clear sky": "Ясно",
-                  // Clouds
-                  "few clouds": "Малооблачно",
-                  "scattered clouds": "Облачно",
-                  "broken clouds": "Пасмурно",
-                  "overcast clouds": "Пасмурно",
-                  "sky is clear": "Ясно",
-                };
+        // Получаем прогноз через 16-дневный API
+        const start = new Date(data.start_date);
+        const end = new Date(data.end_date);
+        const daysCount = Math.min(
+          Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1,
+          16
+        );
+        const forecastRes = await fetch(
+          `https://api.openweathermap.org/data/2.5/forecast/daily?lat=${lat}&lon=${lon}&cnt=${daysCount}&units=metric&appid=${import.meta.env.VITE_WEATHER_API_KEY}`
+        );
+        const forecastData = await forecastRes.json();
 
-                // Формируем daily_forecast из 16-дневного API
-                daily_forecast = (forecastData.list || []).map((entry) => {
-                  const date = new Date(entry.dt * 1000);
-                  return {
-                    date: date.toISOString().split("T")[0],
-                    temp_min: entry.temp.min,
-                    temp_max: entry.temp.max,
-                    conditions:
-                      translated[entry.weather[0].description.toLowerCase()] ??
-                      entry.weather[0].description,
-                    icon: entry.weather[0].icon,
-                  };
-                }).filter(day => {
-                  // Оставляем только дни в выбранном диапазоне
-                  const d = new Date(day.date);
-                  return d >= start && d <= end;
-                });
-              } else {
-                console.warn("Не удалось получить прогноз погоды");
-              }
-            }
-          }
-        } catch (e) {
-          console.warn("Ошибка при получении прогноза погоды:", e);
-        }
+        const translated = {
+          // Thunderstorm
+          "thunderstorm with light rain": "Гроза с небольшим дождём",
+          "thunderstorm with rain": "Гроза с дождём",
+          "thunderstorm with heavy rain": "Гроза с сильным дождём",
+          "light thunderstorm": "Слабая гроза",
+          "thunderstorm": "Гроза",
+          "heavy thunderstorm": "Сильная гроза",
+          "ragged thunderstorm": "Местами гроза",
+          "thunderstorm with light drizzle": "Гроза с небольшим моросящим дождём",
+          "thunderstorm with drizzle": "Гроза с моросящим дождём",
+          "thunderstorm with heavy drizzle": "Гроза с сильным моросящим дождём",
+          // Drizzle
+          "light intensity drizzle": "Лёгкая морось",
+          "drizzle": "Морось",
+          "heavy intensity drizzle": "Сильная морось",
+          "light intensity drizzle rain": "Лёгкий моросящий дождь",
+          "drizzle rain": "Моросящий дождь",
+          "heavy intensity drizzle rain": "Сильный моросящий дождь",
+          "shower rain and drizzle": "Ливень и морось",
+          "heavy shower rain and drizzle": "Сильный ливень и морось",
+          "shower drizzle": "Моросящий ливень",
+          // Rain
+          "light rain": "Лёгкий дождь",
+          "moderate rain": "Умеренный дождь",
+          "heavy intensity rain": "Сильный дождь",
+          "very heavy rain": "Очень сильный дождь",
+          "extreme rain": "Экстремальный дождь",
+          "freezing rain": "Ледяной дождь",
+          "light intensity shower rain": "Лёгкий ливневый дождь",
+          "shower rain": "Ливневый дождь",
+          "heavy intensity shower rain": "Сильный ливневый дождь",
+          "ragged shower rain": "Местами ливневый дождь",
+          // Snow
+          "light snow": "Лёгкий снег",
+          "snow": "Снег",
+          "heavy snow": "Сильный снег",
+          "sleet": "Дождь со снегом",
+          "light shower sleet": "Лёгкий ливневый дождь со снегом",
+          "shower sleet": "Ливневый дождь со снегом",
+          "light rain and snow": "Лёгкий дождь и снег",
+          "rain and snow": "Дождь и снег",
+          "light shower snow": "Лёгкий ливневый снег",
+          "shower snow": "Ливневый снег",
+          "heavy shower snow": "Сильный ливневый снег",
+          // Atmosphere
+          "mist": "Туман",
+          "smoke": "Дымка",
+          "haze": "Мгла",
+          "sand/dust whirls": "Песчаные/пылевые вихри",
+          "fog": "Туман",
+          "sand": "Песок",
+          "dust": "Пыль",
+          "volcanic ash": "Вулканический пепел",
+          "squalls": "Шквалы",
+          "tornado": "Торнадо",
+          // Clear
+          "clear sky": "Ясно",
+          // Clouds
+          "few clouds": "Малооблачно",
+          "scattered clouds": "Облачно",
+          "broken clouds": "Пасмурно",
+          "overcast clouds": "Пасмурно",
+          "sky is clear": "Ясно",
+        };
+
+        // Формируем daily_forecast из 16-дневного API
+        const daily_forecast = (forecastData.list || []).map((entry) => {
+          const date = new Date(entry.dt * 1000);
+          return {
+            date: date.toISOString().split("T")[0],
+            temp_min: entry.temp.min,
+            temp_max: entry.temp.max,
+            conditions:
+              translated[entry.weather[0].description.toLowerCase()] ??
+              entry.weather[0].description,
+            icon: entry.weather[0].icon,
+          };
+        }).filter(day => {
+          // Оставляем только дни в выбранном диапазоне
+          const d = new Date(day.date);
+          return d >= start && d <= end;
+        });
 
         setResult({
           ...data,
@@ -254,15 +231,8 @@ const App = () => {
       });
 
       if (!res.ok) {
-        let errorMessage = "Ошибка при генерации списка";
-        try {
-          const errorData = await res.json();
-          errorMessage = errorData.detail || errorMessage;
-        } catch (e) {
-          // Если не удалось распарсить JSON, используем стандартное сообщение
-          errorMessage = `Ошибка ${res.status}: ${res.statusText}`;
-        }
-        setError(errorMessage);
+        const errorData = await res.json();
+        setError(errorData.detail || "Ошибка при генерации списка");
         return;
       }
 
@@ -438,7 +408,6 @@ const App = () => {
           </div> */}
 
           {/* Прогноз погоды */}
-          {result.daily_forecast && result.daily_forecast.length > 0 && (
           <div className="forecast">
             <h3>Прогноз погоды</h3>
             <div className="forecast-grid">
@@ -458,7 +427,6 @@ const App = () => {
               ))}
             </div>
           </div>
-          )}
 
           {savedSlug && (
             <div className="share-box">

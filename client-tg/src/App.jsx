@@ -80,14 +80,7 @@ function App() {
         }),
       });
       if (!res.ok) {
-        let errorMessage = "Ошибка при генерации списка";
-        try {
-          const errorData = await res.json();
-          errorMessage = errorData.detail || errorMessage;
-        } catch (e) {
-          errorMessage = `Ошибка ${res.status}: ${res.statusText}`;
-        }
-        setError(errorMessage);
+        setError("Ошибка при генерации списка");
         setLoading(false);
         return;
       }
@@ -211,23 +204,15 @@ function App() {
     try {
       const res = await fetch(`https://luggify.onrender.com/tg-checklists/${String(tgUser.id)}`);
       if (!res.ok) {
-        let errorMessage = "Ошибка при загрузке чеклистов";
-        try {
-          const errorData = await res.json();
-          errorMessage = errorData.detail || errorMessage;
-        } catch (e) {
-          errorMessage = `Ошибка ${res.status}: ${res.statusText}`;
-        }
-        setError(errorMessage);
+        setError("Ошибка при загрузке чеклистов");
         setMyChecklists([]);
       } else {
         const data = await res.json();
-        setMyChecklists(Array.isArray(data) ? data : []);
+        setMyChecklists(data);
       }
-    } catch (e) {
+    } catch {
       setError("Ошибка при загрузке чеклистов");
       setMyChecklists([]);
-      console.error(e);
     } finally {
       setChecklistsLoading(false);
     }
@@ -314,18 +299,10 @@ function App() {
       if (res.ok) {
         setMyChecklists((prev) => prev.filter((cl) => cl.slug !== slug));
       } else {
-        let errorMessage = 'Ошибка при удалении чеклиста';
-        try {
-          const errorData = await res.json();
-          errorMessage = errorData.detail || errorMessage;
-        } catch (e) {
-          errorMessage = `Ошибка ${res.status}: ${res.statusText}`;
-        }
-        setError(errorMessage);
+        setError('Ошибка при удалении чеклиста');
       }
-    } catch (e) {
+    } catch {
       setError('Ошибка при удалении чеклиста');
-      console.error(e);
     } finally {
       setChecklistsLoading(false);
     }
