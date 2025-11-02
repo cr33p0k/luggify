@@ -537,6 +537,7 @@ async def health_check():
         
         # Пытаемся подключиться к БД если она настроена
         db_connection = "unknown"
+        db_error_details = None
         if db_url and SessionLocal:
             try:
                 from sqlalchemy import text
@@ -544,17 +545,36 @@ async def health_check():
                     await session.execute(text("SELECT 1"))
                 db_connection = "ok"
             except Exception as e:
-                db_connection = f"error: {str(e)[:100]}"
+                error_msg = str(e)
+                db_connection = "error"
+                db_error_details = error_msg[:200]
+                # Детальная диагностика
+                if "Name or service not known" in error_msg:
+                    db_error_details += " | Возможно неправильный хост или нужно использовать Internal Database URL на Render"
+                elif "could not translate host name" in error_msg.lower():
+                    db_error_details += " | Проверьте формат DATABASE_URL, возможно нужен Internal URL"
         elif not db_url:
             db_connection = "not_configured"
         
-        return {
+        result = {
             "status": "ok",
             "database_url": "configured" if db_url else "missing",
             "database_connection": db_connection,
             "api_key": api_key_status,
             "message": "Server is running"
         }
+        if db_error_details:
+            result["database_error"] = db_error_details
+        if db_url:
+            # Показываем хост из URL (без пароля)
+            try:
+                from urllib.parse import urlparse
+                parsed = urlparse(db_url)
+                result["database_host"] = parsed.hostname
+                result["database_port"] = parsed.port
+            except:
+                pass
+        return result
     except Exception as e:
         return {
             "status": "error",

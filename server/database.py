@@ -18,6 +18,32 @@ if not DATABASE_URL:
     sync_engine = None
     SessionLocal = None
 else:
+    # Проверяем и исправляем формат URL для Render
+    original_url = DATABASE_URL
+    
+    # Render может предоставлять postgres:// вместо postgresql+asyncpg://
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+        print(f"INFO: Преобразовали DATABASE_URL: postgres:// -> postgresql+asyncpg://")
+    elif not DATABASE_URL.startswith("postgresql"):
+        print(f"WARNING: Неожиданный формат DATABASE_URL: {DATABASE_URL[:50]}...")
+    
+    # Проверяем, не используется ли External URL на Render
+    # External URL обычно содержит внешний домен типа *.render.com
+    # Internal URL обычно содержит внутренний хост типа dpg-xxxxx-a
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(DATABASE_URL)
+        hostname = parsed.hostname or ""
+        
+        # Если используется внешний хост (содержит .render.com), предупреждаем
+        if ".render.com" in hostname and "dpg-" not in hostname:
+            print(f"WARNING: Похоже используется External Database URL. На Render используйте Internal Database URL!")
+            print(f"INFO: Хост базы данных: {hostname}")
+            print(f"INFO: Internal URL обычно начинается с 'postgresql://' и содержит 'dpg-xxxxx-a' в хосте")
+    except Exception as e:
+        print(f"WARNING: Не удалось проанализировать DATABASE_URL: {e}")
+    
     # Асинхронный движок для приложения
     async_engine = create_async_engine(DATABASE_URL, echo=True)
 
