@@ -110,8 +110,14 @@ weather_translations = {
 }
 
 async def get_db():
+    if SessionLocal is None:
+        raise HTTPException(status_code=503, detail="База данных не настроена. Проверьте переменную окружения DATABASE_URL")
     async with SessionLocal() as session:
-        yield session
+        try:
+            yield session
+        except Exception as e:
+            await session.rollback()
+            raise HTTPException(status_code=503, detail=f"Ошибка подключения к базе данных: {str(e)}")
 
 class PackingRequest(BaseModel):
     city: str
@@ -522,15 +528,30 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint - проверяет доступность сервера без подключения к БД"""
+    """Health check endpoint - проверяет доступность сервера и подключение к БД"""
     try:
         # Проверяем наличие переменных окружения
-        db_status = "ok" if os.getenv("DATABASE_URL") else "missing"
+        db_url = os.getenv("DATABASE_URL")
+        db_status = "configured" if db_url else "missing"
         api_key_status = "ok" if os.getenv("OPENWEATHER_API_KEY") else "missing"
+        
+        # Пытаемся подключиться к БД если она настроена
+        db_connection = "unknown"
+        if db_url and SessionLocal:
+            try:
+                from sqlalchemy import text
+                async with SessionLocal() as session:
+                    await session.execute(text("SELECT 1"))
+                db_connection = "ok"
+            except Exception as e:
+                db_connection = f"error: {str(e)[:100]}"
+        elif not db_url:
+            db_connection = "not_configured"
         
         return {
             "status": "ok",
-            "database": db_status,
+            "database_url": "configured" if db_url else "missing",
+            "database_connection": db_connection,
             "api_key": api_key_status,
             "message": "Server is running"
         }
