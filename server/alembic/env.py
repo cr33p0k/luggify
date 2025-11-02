@@ -27,6 +27,9 @@ if not database_url:
 # Преобразуем URL для синхронного движка (psycopg2 вместо asyncpg)
 if database_url.startswith("postgresql+asyncpg://"):
     sync_database_url = database_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://", 1)
+elif database_url.startswith("postgresql://"):
+    # Если уже postgresql://, просто добавляем +psycopg2
+    sync_database_url = database_url.replace("postgresql://", "postgresql+psycopg2://", 1)
 elif database_url.startswith("postgres://"):
     sync_database_url = database_url.replace("postgres://", "postgresql+psycopg2://", 1)
 else:
