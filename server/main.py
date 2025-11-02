@@ -516,3 +516,23 @@ async def delete_checklist(slug: str, db: AsyncSession = Depends(get_db)):
 @app.get("/")
 async def root():
     return {"message": "Luggify backend is running"}
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint - проверяет доступность сервера без подключения к БД"""
+    try:
+        # Проверяем наличие переменных окружения
+        db_status = "ok" if os.getenv("DATABASE_URL") else "missing"
+        api_key_status = "ok" if os.getenv("OPENWEATHER_API_KEY") else "missing"
+        
+        return {
+            "status": "ok",
+            "database": db_status,
+            "api_key": api_key_status,
+            "message": "Server is running"
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e)
+        }
