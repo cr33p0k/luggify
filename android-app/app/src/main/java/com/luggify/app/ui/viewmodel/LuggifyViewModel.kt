@@ -2,6 +2,7 @@ package com.luggify.app.ui.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.luggify.app.data.datastore.UserPreferencesDataStore
 import com.luggify.app.data.models.City
 import com.luggify.app.data.models.Checklist
 import com.luggify.app.data.models.PackingRequest
@@ -38,11 +39,37 @@ data class UiState(
 
 class LuggifyViewModel(
     private val repository: LuggifyRepository = LuggifyRepository(),
-    private val userId: String = ""
+    private val userId: String = "",
+    private val userPreferencesDataStore: UserPreferencesDataStore? = null
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+    
+    init {
+        // Загружаем сохраненные данные при инициализации
+        loadSavedPreferences()
+    }
+    
+    private fun loadSavedPreferences() {
+        userPreferencesDataStore?.let { dataStore ->
+            viewModelScope.launch {
+                try {
+                    val savedCity = dataStore.getCity()
+                    val savedStartDate = dataStore.getStartDate()
+                    val savedEndDate = dataStore.getEndDate()
+                    
+                    _uiState.value = _uiState.value.copy(
+                        selectedCity = savedCity,
+                        startDate = savedStartDate,
+                        endDate = savedEndDate
+                    )
+                } catch (e: Exception) {
+                    // Игнорируем ошибки при загрузке сохраненных данных
+                }
+            }
+        }
+    }
 
     fun searchCities(query: String) {
         if (query.isEmpty()) {
@@ -79,6 +106,12 @@ class LuggifyViewModel(
             cities = emptyList(),
             isLoadingCities = false
         )
+        // Сохраняем выбранный город
+        userPreferencesDataStore?.let { dataStore ->
+            viewModelScope.launch {
+                dataStore.saveCity(city)
+            }
+        }
     }
     
     fun clearCity() {
@@ -87,14 +120,32 @@ class LuggifyViewModel(
             cities = emptyList(),
             isLoadingCities = false
         )
+        // Очищаем сохраненный город
+        userPreferencesDataStore?.let { dataStore ->
+            viewModelScope.launch {
+                dataStore.clearCity()
+            }
+        }
     }
 
     fun setStartDate(date: Date) {
         _uiState.value = _uiState.value.copy(startDate = date)
+        // Сохраняем дату начала
+        userPreferencesDataStore?.let { dataStore ->
+            viewModelScope.launch {
+                dataStore.saveStartDate(date)
+            }
+        }
     }
 
     fun setEndDate(date: Date) {
         _uiState.value = _uiState.value.copy(endDate = date)
+        // Сохраняем дату окончания
+        userPreferencesDataStore?.let { dataStore ->
+            viewModelScope.launch {
+                dataStore.saveEndDate(date)
+            }
+        }
     }
 
     fun generatePackingList() {

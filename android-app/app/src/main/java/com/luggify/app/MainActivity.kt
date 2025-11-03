@@ -7,6 +7,7 @@ import androidx.compose.runtime.Composable
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.luggify.app.data.datastore.UserPreferencesDataStore
 import com.luggify.app.ui.screens.ChecklistScreen
 import com.luggify.app.ui.screens.HomeScreen
 import com.luggify.app.ui.screens.MyChecklistsScreen
@@ -19,7 +20,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         
         val userId = UserIdHelper.getUserId(this)
-        val viewModel = LuggifyViewModel(userId = userId)
+        val userPreferencesDataStore = UserPreferencesDataStore(this)
+        val viewModel = LuggifyViewModel(
+            userId = userId,
+            userPreferencesDataStore = userPreferencesDataStore
+        )
         
         setContent {
             LuggifyTheme {
