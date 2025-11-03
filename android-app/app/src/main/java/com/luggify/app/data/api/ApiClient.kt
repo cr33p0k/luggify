@@ -10,6 +10,8 @@ object ApiClient {
     private const val BASE_URL = "https://luggify.onrender.com/"
 
     private val loggingInterceptor = HttpLoggingInterceptor().apply {
+        // Логирование всегда включено для отладки
+        // В продакшене можно изменить на Level.NONE
         level = HttpLoggingInterceptor.Level.BODY
     }
 

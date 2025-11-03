@@ -10,6 +10,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -130,78 +132,161 @@ fun DateRangePicker(
         )
     }
 
+    // Получаем текущую дату (сегодня) для ограничения минимальной даты
+    val today = remember {
+        val calendar = Calendar.getInstance()
+        calendar.set(Calendar.HOUR_OF_DAY, 0)
+        calendar.set(Calendar.MINUTE, 0)
+        calendar.set(Calendar.SECOND, 0)
+        calendar.set(Calendar.MILLISECOND, 0)
+        calendar.timeInMillis
+    }
+    
     // Диалог выбора даты начала
     if (showStartDatePicker) {
         val startDatePickerState = rememberDatePickerState(
             initialSelectedDateMillis = selectedStartDate.time
         )
-        AlertDialog(
+        Dialog(
             onDismissRequest = { showStartDatePicker = false },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        startDatePickerState.selectedDateMillis?.let {
-                            val date = Date(it)
-                            selectedStartDate = date
-                            startDateText = dateFormat.format(date)
-                            onStartDateSelected(date)
-                            showStartDatePicker = false
-                            focusManager.clearFocus()
-                        } ?: run {
-                            showStartDatePicker = false
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false
+            )
+        ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth(0.95f)
+                    .wrapContentHeight(),
+                shape = MaterialTheme.shapes.extraLarge
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp)
+                ) {
+                    Text(
+                        text = "Выберите дату отправления",
+                        style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                    
+                    DatePicker(
+                        state = startDatePickerState,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(onClick = { showStartDatePicker = false }) {
+                            Text("Отмена")
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        TextButton(
+                            onClick = {
+                                startDatePickerState.selectedDateMillis?.let {
+                                    val date = Date(it)
+                                    // Проверяем, что дата не раньше сегодняшней
+                                    if (date.time >= today) {
+                                        selectedStartDate = date
+                                        startDateText = dateFormat.format(date)
+                                        onStartDateSelected(date)
+                                        showStartDatePicker = false
+                                        focusManager.clearFocus()
+                                    } else {
+                                        // Можно показать сообщение об ошибке, но пока просто закрываем
+                                        showStartDatePicker = false
+                                    }
+                                } ?: run {
+                                    showStartDatePicker = false
+                                }
+                            }
+                        ) {
+                            Text("Выбрать")
                         }
                     }
-                ) {
-                    Text("Выбрать")
                 }
-            },
-            dismissButton = {
-                TextButton(onClick = { showStartDatePicker = false }) {
-                    Text("Отмена")
-                }
-            },
-            title = { Text("Выберите дату отправления") },
-            text = {
-                DatePicker(state = startDatePickerState)
             }
-        )
+        }
     }
 
     // Диалог выбора даты окончания
     if (showEndDatePicker) {
+        // Минимальная дата для окончания - либо дата начала, либо сегодня (если дата начала не выбрана)
+        val minEndDate = remember(selectedStartDate, today) {
+            if (selectedStartDate.time >= today) {
+                selectedStartDate.time
+            } else {
+                today
+            }
+        }
+        
         val endDatePickerState = rememberDatePickerState(
             initialSelectedDateMillis = selectedEndDate.time
         )
-        AlertDialog(
+        Dialog(
             onDismissRequest = { showEndDatePicker = false },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        endDatePickerState.selectedDateMillis?.let {
-                            val date = Date(it)
-                            selectedEndDate = date
-                            endDateText = dateFormat.format(date)
-                            onEndDateSelected(date)
-                            showEndDatePicker = false
-                            focusManager.clearFocus()
-                        } ?: run {
-                            showEndDatePicker = false
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false
+            )
+        ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth(0.95f)
+                    .wrapContentHeight(),
+                shape = MaterialTheme.shapes.extraLarge
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp)
+                ) {
+                    Text(
+                        text = "Выберите дату возвращения",
+                        style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.padding(bottom = 12.dp)
+                    )
+                    
+                    DatePicker(
+                        state = endDatePickerState,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    
+                    Spacer(modifier = Modifier.height(16.dp))
+                    
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(onClick = { showEndDatePicker = false }) {
+                            Text("Отмена")
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        TextButton(
+                            onClick = {
+                                endDatePickerState.selectedDateMillis?.let {
+                                    val date = Date(it)
+                                    // Проверяем, что дата не раньше минимальной (дата начала или сегодня)
+                                    if (date.time >= minEndDate) {
+                                        selectedEndDate = date
+                                        endDateText = dateFormat.format(date)
+                                        onEndDateSelected(date)
+                                        showEndDatePicker = false
+                                        focusManager.clearFocus()
+                                    } else {
+                                        // Можно показать сообщение об ошибке, но пока просто закрываем
+                                        showEndDatePicker = false
+                                    }
+                                } ?: run {
+                                    showEndDatePicker = false
+                                }
+                            }
+                        ) {
+                            Text("Выбрать")
                         }
                     }
-                ) {
-                    Text("Выбрать")
                 }
-            },
-            dismissButton = {
-                TextButton(onClick = { showEndDatePicker = false }) {
-                    Text("Отмена")
-                }
-            },
-            title = { Text("Выберите дату возвращения") },
-            text = {
-                DatePicker(state = endDatePickerState)
             }
-        )
+        }
     }
 }
 

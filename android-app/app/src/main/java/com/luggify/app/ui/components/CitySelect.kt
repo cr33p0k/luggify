@@ -33,6 +33,13 @@ fun CitySelect(
     }
     var showDropdown by remember { mutableStateOf(false) }
     
+    // Функция для очистки города
+    fun clearCity() {
+        searchQuery = ""
+        showDropdown = false
+        onCityCleared()
+    }
+    
     // Debounce для поиска
     LaunchedEffect(searchQuery) {
         if (searchQuery != selectedCity?.fullName && searchQuery.isNotEmpty()) {
@@ -56,8 +63,7 @@ fun CitySelect(
             onValueChange = { query ->
                 searchQuery = query
                 if (query.isEmpty()) {
-                    showDropdown = false
-                    onCityCleared()
+                    clearCity()
                 }
             },
             label = { Text("Введите город") },
@@ -71,11 +77,7 @@ fun CitySelect(
             trailingIcon = {
                 if (searchQuery.isNotEmpty()) {
                     IconButton(
-                        onClick = {
-                            searchQuery = ""
-                            showDropdown = false
-                            onCityCleared()
-                        }
+                        onClick = { clearCity() }
                     ) {
                         Icon(
                             imageVector = Icons.Default.Clear,

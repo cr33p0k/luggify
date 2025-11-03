@@ -20,15 +20,18 @@ class LuggifyRepository {
     ): Result<T> {
         return try {
             val response = call()
-            if (response.isSuccessful && response.body() != null) {
-                Result.success(response.body()!!)
-            } else {
-                val errorBody = try {
-                    response.errorBody()?.string() ?: "Неизвестная ошибка"
-                } catch (e: Exception) {
-                    "Ошибка чтения ответа"
+            when {
+                response.isSuccessful && response.body() != null -> {
+                    Result.success(response.body()!!)
                 }
-                Result.failure(Exception("$errorMessage (${response.code()}): $errorBody"))
+                else -> {
+                    val errorBody = try {
+                        response.errorBody()?.string() ?: "Неизвестная ошибка"
+                    } catch (e: Exception) {
+                        "Ошибка чтения ответа"
+                    }
+                    Result.failure(Exception("$errorMessage (${response.code()}): $errorBody"))
+                }
             }
         } catch (e: SocketTimeoutException) {
             Result.failure(Exception("Таймаут соединения. Сервер не отвечает. Попробуйте позже."))
@@ -37,38 +40,20 @@ class LuggifyRepository {
         } catch (e: IOException) {
             Result.failure(Exception("Ошибка сети: ${e.message}"))
         } catch (e: Exception) {
-            Result.failure(Exception("Неожиданная ошибка: ${e.message}"))
+            Result.failure(Exception("$errorMessage: ${e.message}"))
         }
     }
 
     suspend fun getCities(query: String): Result<List<City>> {
-        return try {
-            val trimmedQuery = query.trim()
-            if (trimmedQuery.isEmpty()) {
-                return Result.success(emptyList())
-            }
-            
-            val response = api.getCities(trimmedQuery)
-            if (response.isSuccessful) {
-                val cities = response.body() ?: emptyList()
-                Result.success(cities)
-            } else {
-                val errorBody = try {
-                    response.errorBody()?.string() ?: "Неизвестная ошибка"
-                } catch (e: Exception) {
-                    "Ошибка чтения ответа"
-                }
-                Result.failure(Exception("Ошибка загрузки городов (${response.code()}): $errorBody"))
-            }
-        } catch (e: java.net.SocketTimeoutException) {
-            Result.failure(Exception("Таймаут соединения. Сервер не отвечает. Попробуйте позже."))
-        } catch (e: java.net.UnknownHostException) {
-            Result.failure(Exception("Не удалось подключиться к серверу. Проверьте интернет соединение."))
-        } catch (e: java.io.IOException) {
-            Result.failure(Exception("Ошибка сети: ${e.message}"))
-        } catch (e: Exception) {
-            Result.failure(Exception("Неожиданная ошибка: ${e.message}"))
+        val trimmedQuery = query.trim()
+        if (trimmedQuery.isEmpty()) {
+            return Result.success(emptyList())
         }
+        
+        return handleApiCall(
+            call = { api.getCities(trimmedQuery) },
+            errorMessage = "Ошибка загрузки городов"
+        )
     }
 
     suspend fun generatePackingList(request: PackingRequest): Result<Checklist> {
@@ -98,32 +83,12 @@ class LuggifyRepository {
             if (response.isSuccessful) {
                 Result.success(Unit)
             } else {
-                Result.failure(Exception("Ошибка удаления: ${response.code()}"))
-            }
-        } catch (e: SocketTimeoutException) {
-            Result.failure(Exception("Таймаут соединения. Сервер не отвечает. Попробуйте позже."))
-        } catch (e: UnknownHostException) {
-            Result.failure(Exception("Не удалось подключиться к серверу. Проверьте интернет соединение."))
-        } catch (e: IOException) {
-            Result.failure(Exception("Ошибка сети: ${e.message}"))
-        } catch (e: Exception) {
-            Result.failure(Exception("Неожиданная ошибка: ${e.message}"))
-        }
-    }
-
-    suspend fun getMyChecklists(userId: String): Result<List<Checklist>> {
-        return try {
-            val response = api.getMyChecklists(userId)
-            if (response.isSuccessful) {
-                val checklists = response.body() ?: emptyList()
-                Result.success(checklists)
-            } else {
                 val errorBody = try {
                     response.errorBody()?.string() ?: "Неизвестная ошибка"
                 } catch (e: Exception) {
                     "Ошибка чтения ответа"
                 }
-                Result.failure(Exception("Ошибка загрузки чеклистов (${response.code()}): $errorBody"))
+                Result.failure(Exception("Ошибка удаления (${response.code()}): $errorBody"))
             }
         } catch (e: SocketTimeoutException) {
             Result.failure(Exception("Таймаут соединения. Сервер не отвечает. Попробуйте позже."))
@@ -132,8 +97,15 @@ class LuggifyRepository {
         } catch (e: IOException) {
             Result.failure(Exception("Ошибка сети: ${e.message}"))
         } catch (e: Exception) {
-            Result.failure(Exception("Неожиданная ошибка: ${e.message}"))
+            Result.failure(Exception("Ошибка удаления: ${e.message}"))
         }
+    }
+
+    suspend fun getMyChecklists(userId: String): Result<List<Checklist>> {
+        return handleApiCall(
+            call = { api.getMyChecklists(userId) },
+            errorMessage = "Ошибка загрузки чеклистов"
+        )
     }
 
     suspend fun saveChecklist(checklist: ChecklistCreate): Result<Checklist> {

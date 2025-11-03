@@ -2,14 +2,12 @@ package com.luggify.app.ui.theme
 
 import android.app.Activity
 import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
-import androidx.core.view.WindowCompat
 
 private val DarkColorScheme = darkColorScheme(
     primary = Primary,
@@ -27,7 +25,6 @@ private val DarkColorScheme = darkColorScheme(
 
 @Composable
 fun LuggifyTheme(
-    darkTheme: Boolean = true, // Всегда темная тема
     content: @Composable () -> Unit
 ) {
     val colorScheme = DarkColorScheme
@@ -41,9 +38,6 @@ fun LuggifyTheme(
                 var flags = window.decorView.systemUiVisibility
                 flags = flags or android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
                 window.decorView.systemUiVisibility = flags
-            } else {
-                // Для версий ниже M просто устанавливаем цвет
-                window.statusBarColor = colorScheme.primary.toArgb()
             }
         }
     }

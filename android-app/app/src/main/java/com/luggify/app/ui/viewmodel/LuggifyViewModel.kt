@@ -221,9 +221,7 @@ class LuggifyViewModel(
 
     fun toggleItemChecked(item: String) {
         val currentChecked = _uiState.value.checkedItems.toMutableSet()
-        if (item in currentChecked) {
-            currentChecked.remove(item)
-        } else {
+        if (currentChecked.remove(item).not()) {
             currentChecked.add(item)
         }
         _uiState.value = _uiState.value.copy(
@@ -323,10 +321,7 @@ class LuggifyViewModel(
                         saveStateSuccess = true
                     )
                     // Скрываем сообщение через 1.5 секунды
-                    viewModelScope.launch {
-                        kotlinx.coroutines.delay(1500)
-                        _uiState.value = _uiState.value.copy(saveStateSuccess = false)
-                    }
+                    hideMessageAfterDelay { copy(saveStateSuccess = false) }
                 },
                 onFailure = { error ->
                     _uiState.value = _uiState.value.copy(
@@ -407,10 +402,7 @@ class LuggifyViewModel(
                     )
                     loadMyChecklists() // Обновляем список чеклистов
                     // Скрываем сообщение через 1.5 секунды
-                    viewModelScope.launch {
-                        kotlinx.coroutines.delay(1500)
-                        _uiState.value = _uiState.value.copy(saveSuccess = false)
-                    }
+                    hideMessageAfterDelay { copy(saveSuccess = false) }
                 },
                 onFailure = { error ->
                     _uiState.value = _uiState.value.copy(
@@ -475,6 +467,13 @@ class LuggifyViewModel(
                     // Игнорируем ошибки при загрузке прогноза, основной чеклист уже загружен
                 }
             )
+        }
+    }
+    
+    private fun hideMessageAfterDelay(update: UiState.() -> UiState) {
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(1500)
+            _uiState.value = _uiState.value.update()
         }
     }
 }
