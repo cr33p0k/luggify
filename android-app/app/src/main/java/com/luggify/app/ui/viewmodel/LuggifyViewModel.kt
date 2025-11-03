@@ -233,15 +233,31 @@ class LuggifyViewModel(
     }
 
     fun removeItem(item: String) {
-        val currentRemoved = _uiState.value.removedItems.toMutableSet()
-        currentRemoved.add(item)
         val currentChecked = _uiState.value.checkedItems.toMutableSet()
         currentChecked.remove(item)
-        _uiState.value = _uiState.value.copy(
-            removedItems = currentRemoved,
-            checkedItems = currentChecked,
-            isDirty = true
-        )
+        
+        // Если элемент был добавлен пользователем, удаляем его из addedItems
+        val currentAddedItems = _uiState.value.addedItems.toMutableList()
+        val isAddedByUser = currentAddedItems.contains(item)
+        
+        if (isAddedByUser) {
+            // Удаляем из списка добавленных пользователем вещей
+            currentAddedItems.remove(item)
+            _uiState.value = _uiState.value.copy(
+                addedItems = currentAddedItems,
+                checkedItems = currentChecked,
+                isDirty = true
+            )
+        } else {
+            // Если это оригинальная вещь из чеклиста, добавляем в removedItems
+            val currentRemoved = _uiState.value.removedItems.toMutableSet()
+            currentRemoved.add(item)
+            _uiState.value = _uiState.value.copy(
+                removedItems = currentRemoved,
+                checkedItems = currentChecked,
+                isDirty = true
+            )
+        }
     }
 
     fun resetCheckedItems() {

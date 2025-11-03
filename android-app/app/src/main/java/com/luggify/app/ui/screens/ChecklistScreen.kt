@@ -8,6 +8,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
@@ -143,17 +144,20 @@ fun ChecklistScreen(
                                         )
                                     } else {
                                         visibleItems.forEachIndexed { index, item ->
-                                            ChecklistItem(
-                                                item = item,
-                                                isChecked = uiState.checkedItems.contains(item),
-                                                onCheckedChange = { viewModel.toggleItemChecked(item) },
-                                                onRemove = { viewModel.removeItem(item) }
-                                            )
-                                            if (index < visibleItems.size - 1) {
-                                                Divider(
-                                                    modifier = Modifier.padding(vertical = 4.dp),
-                                                    color = MaterialTheme.colorScheme.outlineVariant
+                                            key(item) {
+                                                ChecklistItem(
+                                                    item = item,
+                                                    isChecked = uiState.checkedItems.contains(item),
+                                                    onCheckedChange = { viewModel.toggleItemChecked(item) },
+                                                    onRemove = { viewModel.removeItem(item) },
+                                                    modifier = Modifier.fillMaxWidth()
                                                 )
+                                                if (index < visibleItems.size - 1) {
+                                                    Divider(
+                                                        modifier = Modifier.padding(vertical = 4.dp),
+                                                        color = MaterialTheme.colorScheme.outlineVariant
+                                                    )
+                                                }
                                             }
                                         }
                                     }

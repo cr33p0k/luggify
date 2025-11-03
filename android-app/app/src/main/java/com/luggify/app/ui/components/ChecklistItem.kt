@@ -1,11 +1,13 @@
 package com.luggify.app.ui.components
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -19,9 +21,7 @@ fun ChecklistItem(
     modifier: Modifier = Modifier
 ) {
     Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .clickable { onCheckedChange() },
+        modifier = modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
         shape = MaterialTheme.shapes.small
     ) {
@@ -44,7 +44,13 @@ fun ChecklistItem(
             
             Text(
                 text = item,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable(
+                        onClick = { onCheckedChange() },
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() }
+                    ),
                 style = MaterialTheme.typography.bodyLarge.copy(
                     color = if (isChecked) {
                         MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
@@ -53,6 +59,8 @@ fun ChecklistItem(
                     }
                 )
             )
+            
+            Spacer(modifier = Modifier.width(4.dp))
             
             IconButton(
                 onClick = onRemove,
