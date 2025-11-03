@@ -16,7 +16,6 @@ import com.luggify.app.R
 import com.luggify.app.ui.components.CitySelect
 import com.luggify.app.ui.components.DateRangePicker
 import com.luggify.app.ui.viewmodel.LuggifyViewModel
-import com.luggify.app.ui.viewmodel.UiState
 
 @Composable
 fun HomeScreen(

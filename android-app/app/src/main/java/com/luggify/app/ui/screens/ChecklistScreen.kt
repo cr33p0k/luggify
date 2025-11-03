@@ -20,7 +20,6 @@ import com.luggify.app.R
 import com.luggify.app.ui.components.ChecklistItem
 import com.luggify.app.ui.components.WeatherForecast
 import com.luggify.app.ui.viewmodel.LuggifyViewModel
-import com.luggify.app.ui.viewmodel.UiState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

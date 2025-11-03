@@ -221,7 +221,9 @@ class LuggifyViewModel(
 
     fun toggleItemChecked(item: String) {
         val currentChecked = _uiState.value.checkedItems.toMutableSet()
-        if (currentChecked.remove(item).not()) {
+        if (item in currentChecked) {
+            currentChecked.remove(item)
+        } else {
             currentChecked.add(item)
         }
         _uiState.value = _uiState.value.copy(

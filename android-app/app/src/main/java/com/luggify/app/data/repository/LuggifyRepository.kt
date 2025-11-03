@@ -78,26 +78,16 @@ class LuggifyRepository {
     }
 
     suspend fun deleteChecklist(slug: String): Result<Unit> {
-        return try {
-            val response = api.deleteChecklist(slug)
-            if (response.isSuccessful) {
-                Result.success(Unit)
-            } else {
-                val errorBody = try {
-                    response.errorBody()?.string() ?: "Неизвестная ошибка"
-                } catch (e: Exception) {
-                    "Ошибка чтения ответа"
-                }
-                Result.failure(Exception("Ошибка удаления (${response.code()}): $errorBody"))
+        val response = api.deleteChecklist(slug)
+        return if (response.isSuccessful) {
+            Result.success(Unit)
+        } else {
+            val errorBody = try {
+                response.errorBody()?.string() ?: "Неизвестная ошибка"
+            } catch (e: Exception) {
+                "Ошибка чтения ответа"
             }
-        } catch (e: SocketTimeoutException) {
-            Result.failure(Exception("Таймаут соединения. Сервер не отвечает. Попробуйте позже."))
-        } catch (e: UnknownHostException) {
-            Result.failure(Exception("Не удалось подключиться к серверу. Проверьте интернет соединение."))
-        } catch (e: IOException) {
-            Result.failure(Exception("Ошибка сети: ${e.message}"))
-        } catch (e: Exception) {
-            Result.failure(Exception("Ошибка удаления: ${e.message}"))
+            Result.failure(Exception("Ошибка удаления (${response.code()}): $errorBody"))
         }
     }
 
