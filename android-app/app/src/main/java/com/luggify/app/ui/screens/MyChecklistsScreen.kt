@@ -1,5 +1,6 @@
 package com.luggify.app.ui.screens
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -11,8 +12,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.luggify.app.R
 import com.luggify.app.data.models.Checklist
 import com.luggify.app.ui.viewmodel.LuggifyViewModel
 
@@ -38,7 +42,20 @@ fun MyChecklistsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Мои чеклисты") },
+                title = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Image(
+                            painter = painterResource(id = R.drawable.ic_luggify_logo),
+                            contentDescription = null,
+                            modifier = Modifier.size(28.dp),
+                            colorFilter = ColorFilter.tint(MaterialTheme.colorScheme.primary)
+                        )
+                        Text("Мои чеклисты")
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(
@@ -93,8 +110,16 @@ fun MyChecklistsScreen(
                     ) {
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
+                            Image(
+                                painter = painterResource(id = R.drawable.ic_luggify_logo),
+                                contentDescription = null,
+                                modifier = Modifier.size(64.dp),
+                                colorFilter = ColorFilter.tint(
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                                )
+                            )
                             Text(
                                 text = "Нет сохранённых чеклистов",
                                 style = MaterialTheme.typography.bodyLarge,

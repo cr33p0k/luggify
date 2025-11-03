@@ -1,5 +1,6 @@
 package com.luggify.app.ui.screens
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -7,8 +8,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.luggify.app.R
 import com.luggify.app.ui.components.CitySelect
 import com.luggify.app.ui.components.DateRangePicker
 import com.luggify.app.ui.viewmodel.LuggifyViewModel
@@ -37,12 +41,23 @@ fun HomeScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Text(
-            text = "Luggify",
-            style = MaterialTheme.typography.headlineLarge,
-            color = MaterialTheme.colorScheme.primary,
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier.padding(vertical = 24.dp)
-        )
+        ) {
+            Image(
+                painter = painterResource(id = R.drawable.ic_luggify_logo),
+                contentDescription = "Luggify Logo",
+                modifier = Modifier.size(80.dp),
+                colorFilter = ColorFilter.tint(MaterialTheme.colorScheme.primary)
+            )
+            Text(
+                text = "Luggify",
+                style = MaterialTheme.typography.headlineLarge,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
 
         CitySelect(
             selectedCity = uiState.selectedCity,

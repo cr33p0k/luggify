@@ -1,0 +1,76 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="120dp"
+    android:height="120dp"
+    android:viewportWidth="120"
+    android:viewportHeight="120">
+    
+    <!-- Основной корпус чемодана -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFF9800"
+        android:strokeWidth="3.5"
+        android:pathData="M25,30 Q25,25 30,25 L90,25 Q95,25 95,30 L95,85 Q95,90 90,90 L30,90 Q25,90 25,85 Z"/>
+    
+    <!-- Ручка чемодана сверху -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFF9800"
+        android:strokeWidth="3"
+        android:pathData="M48,25 L48,15 L72,15 L72,25"/>
+    
+    <!-- Телескопическая ручка -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFF9800"
+        android:strokeWidth="2.5"
+        android:pathData="M52,15 L52,5 M68,15 L68,5"/>
+    
+    <!-- Верхняя перекладина ручки -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFF9800"
+        android:strokeWidth="2.5"
+        android:pathData="M52,5 L68,5"/>
+    
+    <!-- Левое колёсико -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFF9800"
+        android:strokeWidth="3"
+        android:pathData="M30,90 Q30,95 35,97 Q40,95 40,90"/>
+    
+    <!-- Правое колёсико -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFF9800"
+        android:strokeWidth="3"
+        android:pathData="M80,90 Q80,95 85,97 Q90,95 90,90"/>
+    
+    <!-- Боковой элемент слева (U-образная форма) -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFF9800"
+        android:strokeWidth="2.5"
+        android:pathData="M30,40 Q30,45 35,47 Q30,49 30,54"/>
+    
+    <!-- Первый квадрат справа (контур) -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFF9800"
+        android:strokeWidth="2.5"
+        android:pathData="M78,35 L88,35 L88,43 L78,43 Z"/>
+    
+    <!-- Второй квадрат справа (контур) -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FFFF9800"
+        android:strokeWidth="2.5"
+        android:pathData="M78,50 L88,50 L88,58 L78,58 Z"/>
+    
+    <!-- Третий квадрат справа (заполненный) -->
+    <path
+        android:fillColor="#FFFFAE42"
+        android:strokeColor="#FFFF9800"
+        android:strokeWidth="2.5"
+        android:pathData="M78,65 L88,65 L88,73 L78,73 Z"/>
+</vector>

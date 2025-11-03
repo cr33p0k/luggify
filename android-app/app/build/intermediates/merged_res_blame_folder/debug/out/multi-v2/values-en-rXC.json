@@ -1,7 +1,7 @@
 {
     "logs": [
         {
-            "outputFile": "com.luggify.app-mergeDebugResources-52:/values-en-rXC/values-en-rXC.xml",
+            "outputFile": "com.luggify.app-mergeDebugResources-54:/values-en-rXC/values-en-rXC.xml",
             "map": [
                 {
                     "source": "C:\\Users\\maxbo\\.gradle\\caches\\transforms-3\\1e86732be0c269d1390d8db31326b9c8\\transformed\\jetified-ui-release\\res\\values-en-rXC\\values-en-rXC.xml",

@@ -1,7 +1,7 @@
 {
     "logs": [
         {
-            "outputFile": "com.luggify.app-mergeDebugResources-52:/values-et/values-et.xml",
+            "outputFile": "com.luggify.app-mergeDebugResources-54:/values-et/values-et.xml",
             "map": [
                 {
                     "source": "C:\\Users\\maxbo\\.gradle\\caches\\transforms-3\\d4667ec241475206a5f58787744262c8\\transformed\\jetified-material3-1.1.2\\res\\values-et\\values-et.xml",

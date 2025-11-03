@@ -1,5 +1,6 @@
 package com.luggify.app.ui.screens
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -11,8 +12,11 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.luggify.app.R
 import com.luggify.app.ui.components.ChecklistItem
 import com.luggify.app.ui.components.WeatherForecast
 import com.luggify.app.ui.viewmodel.LuggifyViewModel
@@ -36,7 +40,20 @@ fun ChecklistScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Luggify") },
+                title = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Image(
+                            painter = painterResource(id = R.drawable.ic_luggify_logo),
+                            contentDescription = null,
+                            modifier = Modifier.size(32.dp),
+                            colorFilter = ColorFilter.tint(MaterialTheme.colorScheme.primary)
+                        )
+                        Text("Luggify")
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(
@@ -133,15 +150,28 @@ fun ChecklistScreen(
                                     verticalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
                                     if (visibleItems.isEmpty()) {
-                                        Text(
-                                            text = "Чеклист пуст",
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.spacedBy(12.dp),
                                             modifier = Modifier
                                                 .fillMaxWidth()
-                                                .padding(16.dp),
-                                            textAlign = TextAlign.Center
-                                        )
+                                                .padding(24.dp)
+                                        ) {
+                                            Image(
+                                                painter = painterResource(id = R.drawable.ic_luggify_logo),
+                                                contentDescription = null,
+                                                modifier = Modifier.size(48.dp),
+                                                colorFilter = ColorFilter.tint(
+                                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.4f)
+                                                )
+                                            )
+                                            Text(
+                                                text = "Чеклист пуст",
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                                textAlign = TextAlign.Center
+                                            )
+                                        }
                                     } else {
                                         visibleItems.forEachIndexed { index, item ->
                                             key(item) {

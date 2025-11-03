@@ -1,7 +1,7 @@
 {
     "logs": [
         {
-            "outputFile": "com.luggify.app-mergeDebugResources-52:/values-tr/values-tr.xml",
+            "outputFile": "com.luggify.app-mergeDebugResources-54:/values-tr/values-tr.xml",
             "map": [
                 {
                     "source": "C:\\Users\\maxbo\\.gradle\\caches\\transforms-3\\4d13162283d09b9c9bedcbf64eea8d38\\transformed\\core-1.12.0\\res\\values-tr\\values-tr.xml",
