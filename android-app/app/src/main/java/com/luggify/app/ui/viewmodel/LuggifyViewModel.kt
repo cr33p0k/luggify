@@ -34,7 +34,8 @@ data class UiState(
     val isDirty: Boolean = false,
     val saveStateSuccess: Boolean = false,
     val saveSuccess: Boolean = false,
-    val isFromMyChecklists: Boolean = false
+    val isFromMyChecklists: Boolean = false,
+    val defaultItems: List<String> = emptyList()
 )
 
 class LuggifyViewModel(
@@ -58,11 +59,13 @@ class LuggifyViewModel(
                     val savedCity = dataStore.getCity()
                     val savedStartDate = dataStore.getStartDate()
                     val savedEndDate = dataStore.getEndDate()
+                    val savedDefaultItems = dataStore.getDefaultItems()
                     
                     _uiState.value = _uiState.value.copy(
                         selectedCity = savedCity,
                         startDate = savedStartDate,
-                        endDate = savedEndDate
+                        endDate = savedEndDate,
+                        defaultItems = savedDefaultItems
                     )
                 } catch (e: Exception) {
                     // Игнорируем ошибки при загрузке сохраненных данных
@@ -170,14 +173,16 @@ class LuggifyViewModel(
 
             repository.generatePackingList(request).fold(
                 onSuccess = { checklist ->
+                    // Автоматически добавляем вещи по умолчанию в новый чеклист
+                    val defaultItems = _uiState.value.defaultItems
                     _uiState.value = _uiState.value.copy(
                         isLoading = false,
                         checklist = checklist,
                         error = null,
                         checkedItems = emptySet(),
                         removedItems = emptySet(),
-                        addedItems = emptyList(),
-                        isDirty = false,
+                        addedItems = defaultItems, // Добавляем вещи по умолчанию
+                        isDirty = defaultItems.isNotEmpty(), // Если есть вещи по умолчанию, помечаем как измененный
                         isFromMyChecklists = false // Новый чеклист
                     )
                 },
@@ -476,6 +481,31 @@ class LuggifyViewModel(
         viewModelScope.launch {
             kotlinx.coroutines.delay(1500)
             _uiState.value = _uiState.value.update()
+        }
+    }
+    
+    // Методы для управления вещами по умолчанию
+    fun addDefaultItem(item: String) {
+        val currentDefaultItems = _uiState.value.defaultItems.toMutableList()
+        if (!currentDefaultItems.contains(item)) {
+            currentDefaultItems.add(item)
+            _uiState.value = _uiState.value.copy(defaultItems = currentDefaultItems)
+            userPreferencesDataStore?.let { dataStore ->
+                viewModelScope.launch {
+                    dataStore.saveDefaultItems(currentDefaultItems)
+                }
+            }
+        }
+    }
+    
+    fun removeDefaultItem(item: String) {
+        val currentDefaultItems = _uiState.value.defaultItems.toMutableList()
+        currentDefaultItems.remove(item)
+        _uiState.value = _uiState.value.copy(defaultItems = currentDefaultItems)
+        userPreferencesDataStore?.let { dataStore ->
+            viewModelScope.launch {
+                dataStore.saveDefaultItems(currentDefaultItems)
+            }
         }
     }
 }

@@ -19,6 +19,7 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 private val CITY_KEY = stringPreferencesKey("selected_city")
 private val START_DATE_KEY = longPreferencesKey("start_date")
 private val END_DATE_KEY = longPreferencesKey("end_date")
+private val DEFAULT_ITEMS_KEY = stringPreferencesKey("default_items")
 
 // Простой класс для работы с сохраненными данными
 class UserPreferencesDataStore(private val context: Context) {
@@ -73,6 +74,27 @@ class UserPreferencesDataStore(private val context: Context) {
     suspend fun clearCity() {
         context.dataStore.edit { preferences ->
             preferences.remove(CITY_KEY)
+        }
+    }
+    
+    // Получить список вещей по умолчанию
+    suspend fun getDefaultItems(): List<String> {
+        val preferences = context.dataStore.data.first()
+        return preferences[DEFAULT_ITEMS_KEY]?.let { itemsJson ->
+            try {
+                // Используем Gson для десериализации списка строк
+                val type = object : com.google.gson.reflect.TypeToken<List<String>>() {}.type
+                gson.fromJson<List<String>>(itemsJson, type) ?: emptyList()
+            } catch (e: Exception) {
+                emptyList()
+            }
+        } ?: emptyList()
+    }
+    
+    // Сохранить список вещей по умолчанию
+    suspend fun saveDefaultItems(items: List<String>) {
+        context.dataStore.edit { preferences ->
+            preferences[DEFAULT_ITEMS_KEY] = gson.toJson(items)
         }
     }
 }

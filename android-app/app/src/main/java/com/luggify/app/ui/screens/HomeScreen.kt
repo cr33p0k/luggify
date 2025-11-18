@@ -15,6 +15,7 @@ import androidx.compose.ui.unit.dp
 import com.luggify.app.R
 import com.luggify.app.ui.components.CitySelect
 import com.luggify.app.ui.components.DateRangePicker
+import com.luggify.app.ui.components.DefaultItemsManager
 import com.luggify.app.ui.viewmodel.LuggifyViewModel
 
 @Composable
@@ -113,6 +114,14 @@ fun HomeScreen(
         ) {
             Text("Мои чеклисты")
         }
+
+        // Кнопка управления вещами по умолчанию
+        DefaultItemsManager(
+            defaultItems = uiState.defaultItems,
+            onAddItem = { viewModel.addDefaultItem(it) },
+            onRemoveItem = { viewModel.removeDefaultItem(it) },
+            modifier = Modifier.fillMaxWidth()
+        )
 
         uiState.error?.let { error ->
             Spacer(modifier = Modifier.height(8.dp))
