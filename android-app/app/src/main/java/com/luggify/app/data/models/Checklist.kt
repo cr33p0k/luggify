@@ -12,7 +12,9 @@ data class Checklist(
     val daily_forecast: List<DailyForecast>? = null,
     val checked_items: List<String>? = null,
     val removed_items: List<String>? = null,
-    val added_items: List<String>? = null
+    val added_items: List<String>? = null,
+    // Флаг: требуется синхронизация с сервером (изменения были внесены оффлайн)
+    val needsSync: Boolean = false
 )
 
 data class PackingRequest(

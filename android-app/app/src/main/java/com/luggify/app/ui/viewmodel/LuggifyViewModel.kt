@@ -1,5 +1,6 @@
 package com.luggify.app.ui.viewmodel
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.luggify.app.data.datastore.UserPreferencesDataStore
@@ -7,6 +8,7 @@ import com.luggify.app.data.models.City
 import com.luggify.app.data.models.Checklist
 import com.luggify.app.data.models.PackingRequest
 import com.luggify.app.data.repository.LuggifyRepository
+import com.luggify.app.utils.NetworkUtils
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -35,20 +37,22 @@ data class UiState(
     val saveStateSuccess: Boolean = false,
     val saveSuccess: Boolean = false,
     val isFromMyChecklists: Boolean = false,
-    val defaultItems: List<String> = emptyList()
+    val defaultItems: List<String> = emptyList(),
+    val isOfflineMode: Boolean = false
 )
 
 class LuggifyViewModel(
-    private val repository: LuggifyRepository = LuggifyRepository(),
+    context: Context,
     private val userId: String = "",
     private val userPreferencesDataStore: UserPreferencesDataStore? = null
 ) : ViewModel() {
+    private val repository: LuggifyRepository = LuggifyRepository(context)
+    private val appContext: Context = context.applicationContext
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
     
     init {
-        // Загружаем сохраненные данные при инициализации
         loadSavedPreferences()
     }
     
@@ -68,7 +72,7 @@ class LuggifyViewModel(
                         defaultItems = savedDefaultItems
                     )
                 } catch (e: Exception) {
-                    // Игнорируем ошибки при загрузке сохраненных данных
+                    // Игнорируем ошибки
                 }
             }
         }
@@ -76,10 +80,7 @@ class LuggifyViewModel(
 
     fun searchCities(query: String) {
         if (query.isEmpty()) {
-            _uiState.value = _uiState.value.copy(
-                cities = emptyList(),
-                isLoadingCities = false
-            )
+            _uiState.value = _uiState.value.copy(cities = emptyList(), isLoadingCities = false)
             return
         }
         viewModelScope.launch {
@@ -87,16 +88,12 @@ class LuggifyViewModel(
             repository.getCities(query).fold(
                 onSuccess = { cities ->
                     _uiState.value = _uiState.value.copy(
-                        cities = cities,
-                        isLoadingCities = false,
-                        error = null
+                        cities = cities, isLoadingCities = false, error = null
                     )
                 },
                 onFailure = { error ->
                     _uiState.value = _uiState.value.copy(
-                        error = error.message,
-                        cities = emptyList(),
-                        isLoadingCities = false
+                        error = error.message, cities = emptyList(), isLoadingCities = false
                     )
                 }
             )
@@ -104,50 +101,30 @@ class LuggifyViewModel(
     }
 
     fun selectCity(city: City) {
-        _uiState.value = _uiState.value.copy(
-            selectedCity = city,
-            cities = emptyList(),
-            isLoadingCities = false
-        )
-        // Сохраняем выбранный город
+        _uiState.value = _uiState.value.copy(selectedCity = city, cities = emptyList(), isLoadingCities = false)
         userPreferencesDataStore?.let { dataStore ->
-            viewModelScope.launch {
-                dataStore.saveCity(city)
-            }
+            viewModelScope.launch { dataStore.saveCity(city) }
         }
     }
     
     fun clearCity() {
-        _uiState.value = _uiState.value.copy(
-            selectedCity = null,
-            cities = emptyList(),
-            isLoadingCities = false
-        )
-        // Очищаем сохраненный город
+        _uiState.value = _uiState.value.copy(selectedCity = null, cities = emptyList(), isLoadingCities = false)
         userPreferencesDataStore?.let { dataStore ->
-            viewModelScope.launch {
-                dataStore.clearCity()
-            }
+            viewModelScope.launch { dataStore.clearCity() }
         }
     }
 
     fun setStartDate(date: Date) {
         _uiState.value = _uiState.value.copy(startDate = date)
-        // Сохраняем дату начала
         userPreferencesDataStore?.let { dataStore ->
-            viewModelScope.launch {
-                dataStore.saveStartDate(date)
-            }
+            viewModelScope.launch { dataStore.saveStartDate(date) }
         }
     }
 
     fun setEndDate(date: Date) {
         _uiState.value = _uiState.value.copy(endDate = date)
-        // Сохраняем дату окончания
         userPreferencesDataStore?.let { dataStore ->
-            viewModelScope.launch {
-                dataStore.saveEndDate(date)
-            }
+            viewModelScope.launch { dataStore.saveEndDate(date) }
         }
     }
 
@@ -173,7 +150,6 @@ class LuggifyViewModel(
 
             repository.generatePackingList(request).fold(
                 onSuccess = { checklist ->
-                    // Автоматически добавляем вещи по умолчанию в новый чеклист
                     val defaultItems = _uiState.value.defaultItems
                     _uiState.value = _uiState.value.copy(
                         isLoading = false,
@@ -181,9 +157,9 @@ class LuggifyViewModel(
                         error = null,
                         checkedItems = emptySet(),
                         removedItems = emptySet(),
-                        addedItems = defaultItems, // Добавляем вещи по умолчанию
-                        isDirty = defaultItems.isNotEmpty(), // Если есть вещи по умолчанию, помечаем как измененный
-                        isFromMyChecklists = false // Новый чеклист
+                        addedItems = defaultItems,
+                        isDirty = defaultItems.isNotEmpty(),
+                        isFromMyChecklists = false
                     )
                 },
                 onFailure = { error ->
@@ -197,22 +173,34 @@ class LuggifyViewModel(
     }
 
     fun loadChecklist(slug: String, fromMyChecklists: Boolean = false) {
+        // Если чеклист уже загружен, не загружаем заново
+        if (_uiState.value.checklist?.slug == slug && !_uiState.value.isLoading) {
+            return
+        }
+        
         _uiState.value = _uiState.value.copy(isLoading = true, error = null)
 
         viewModelScope.launch {
             repository.getChecklist(slug).fold(
                 onSuccess = { checklist ->
-                    val checkedItemsSet = checklist.checked_items?.toSet() ?: emptySet()
                     _uiState.value = _uiState.value.copy(
                         isLoading = false,
                         checklist = checklist,
                         error = null,
-                        checkedItems = checkedItemsSet,
+                        checkedItems = checklist.checked_items?.toSet() ?: emptySet(),
                         removedItems = checklist.removed_items?.toSet() ?: emptySet(),
                         addedItems = checklist.added_items ?: emptyList(),
                         isDirty = false,
-                        isFromMyChecklists = fromMyChecklists
+                        isFromMyChecklists = fromMyChecklists,
+                        saveStateSuccess = false  // Сбрасываем при загрузке
                     )
+                    // Автоматически загружаем погоду
+                    refreshWeatherForecast(checklist.city, checklist.start_date, checklist.end_date)
+                    
+                    // Если есть несинхронизированные изменения — пытаемся синхронизировать
+                    if (checklist.needsSync) {
+                        trySyncChecklist()
+                    }
                 },
                 onFailure = { error ->
                     _uiState.value = _uiState.value.copy(
@@ -226,50 +214,27 @@ class LuggifyViewModel(
 
     fun toggleItemChecked(item: String) {
         val currentChecked = _uiState.value.checkedItems.toMutableSet()
-        if (item in currentChecked) {
-            currentChecked.remove(item)
-        } else {
-            currentChecked.add(item)
-        }
-        _uiState.value = _uiState.value.copy(
-            checkedItems = currentChecked,
-            isDirty = true
-        )
+        if (item in currentChecked) currentChecked.remove(item) else currentChecked.add(item)
+        _uiState.value = _uiState.value.copy(checkedItems = currentChecked, isDirty = true)
     }
 
     fun removeItem(item: String) {
         val currentChecked = _uiState.value.checkedItems.toMutableSet()
         currentChecked.remove(item)
         
-        // Если элемент был добавлен пользователем, удаляем его из addedItems
         val currentAddedItems = _uiState.value.addedItems.toMutableList()
-        val isAddedByUser = currentAddedItems.contains(item)
-        
-        if (isAddedByUser) {
-            // Удаляем из списка добавленных пользователем вещей
+        if (currentAddedItems.contains(item)) {
             currentAddedItems.remove(item)
-            _uiState.value = _uiState.value.copy(
-                addedItems = currentAddedItems,
-                checkedItems = currentChecked,
-                isDirty = true
-            )
+            _uiState.value = _uiState.value.copy(addedItems = currentAddedItems, checkedItems = currentChecked, isDirty = true)
         } else {
-            // Если это оригинальная вещь из чеклиста, добавляем в removedItems
             val currentRemoved = _uiState.value.removedItems.toMutableSet()
             currentRemoved.add(item)
-            _uiState.value = _uiState.value.copy(
-                removedItems = currentRemoved,
-                checkedItems = currentChecked,
-                isDirty = true
-            )
+            _uiState.value = _uiState.value.copy(removedItems = currentRemoved, checkedItems = currentChecked, isDirty = true)
         }
     }
 
     fun resetCheckedItems() {
-        _uiState.value = _uiState.value.copy(
-            checkedItems = emptySet(),
-            isDirty = true
-        )
+        _uiState.value = _uiState.value.copy(checkedItems = emptySet(), isDirty = true)
     }
 
     fun showAddItemDialog() {
@@ -290,19 +255,13 @@ class LuggifyViewModel(
             val currentAddedItems = _uiState.value.addedItems.toMutableList()
             if (!currentAddedItems.contains(text)) {
                 currentAddedItems.add(text)
-                _uiState.value = _uiState.value.copy(
-                    addedItems = currentAddedItems,
-                    newItemText = "",
-                    showAddItemDialog = false,
-                    isDirty = true
-                )
+                _uiState.value = _uiState.value.copy(addedItems = currentAddedItems, newItemText = "", showAddItemDialog = false, isDirty = true)
             }
         }
     }
 
     fun saveChecklistState() {
         val checklist = _uiState.value.checklist ?: return
-        val slug = checklist.slug
 
         viewModelScope.launch {
             val state = com.luggify.app.data.models.ChecklistStateUpdate(
@@ -312,28 +271,21 @@ class LuggifyViewModel(
                 items = checklist.items
             )
 
-            repository.updateChecklistState(slug, state).fold(
+            repository.updateChecklistState(checklist.slug, state).fold(
                 onSuccess = { updatedChecklist ->
-                    // Сохраняем текущий прогноз погоды из состояния
                     val currentForecast = _uiState.value.checklist?.daily_forecast
-                    val checkedItemsSet = updatedChecklist.checked_items?.toSet() ?: emptySet()
                     _uiState.value = _uiState.value.copy(
-                        checklist = updatedChecklist.copy(
-                            daily_forecast = currentForecast // Сохраняем прогноз погоды
-                        ),
-                        checkedItems = checkedItemsSet,
+                        checklist = updatedChecklist.copy(daily_forecast = currentForecast),
+                        checkedItems = updatedChecklist.checked_items?.toSet() ?: emptySet(),
                         removedItems = updatedChecklist.removed_items?.toSet() ?: emptySet(),
                         addedItems = updatedChecklist.added_items ?: emptyList(),
                         isDirty = false,
                         saveStateSuccess = true
                     )
-                    // Скрываем сообщение через 1.5 секунды
                     hideMessageAfterDelay { copy(saveStateSuccess = false) }
                 },
                 onFailure = { error ->
-                    _uiState.value = _uiState.value.copy(
-                        error = error.message ?: "Ошибка при сохранении"
-                    )
+                    _uiState.value = _uiState.value.copy(error = error.message ?: "Ошибка при сохранении")
                 }
             )
         }
@@ -345,12 +297,9 @@ class LuggifyViewModel(
 
     fun navigateBack() {
         _uiState.value = _uiState.value.copy(
-            checklist = null,
-            checkedItems = emptySet(),
-            removedItems = emptySet(),
-            addedItems = emptyList(),
-            isDirty = false,
-            isFromMyChecklists = false
+            checklist = null, checkedItems = emptySet(), removedItems = emptySet(),
+            addedItems = emptyList(), isDirty = false, isFromMyChecklists = false,
+            saveStateSuccess = false, saveSuccess = false
         )
     }
 
@@ -358,21 +307,36 @@ class LuggifyViewModel(
         if (userId.isEmpty()) return
         
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isLoadingChecklists = true, error = null)
+            val localChecklists = repository.getLocalChecklists()
+            _uiState.value = _uiState.value.copy(
+                myChecklists = localChecklists,
+                isLoadingChecklists = false,
+                error = null,
+                isOfflineMode = false
+            )
+            
+            val isNetworkAvailable = NetworkUtils.isNetworkAvailable(appContext)
+            
+            if (!isNetworkAvailable) {
+                _uiState.value = _uiState.value.copy(isOfflineMode = true, error = null)
+                return@launch
+            }
+            
+            if (localChecklists.isEmpty()) {
+                _uiState.value = _uiState.value.copy(isLoadingChecklists = true)
+            }
             
             repository.getMyChecklists(userId).fold(
                 onSuccess = { checklists ->
                     _uiState.value = _uiState.value.copy(
                         myChecklists = checklists,
                         isLoadingChecklists = false,
-                        error = null
+                        error = null,
+                        isOfflineMode = false
                     )
                 },
-                onFailure = { error ->
-                    _uiState.value = _uiState.value.copy(
-                        isLoadingChecklists = false,
-                        error = error.message ?: "Ошибка при загрузке чеклистов"
-                    )
+                onFailure = { _ ->
+                    _uiState.value = _uiState.value.copy(isLoadingChecklists = false, isOfflineMode = true, error = null)
                 }
             )
         }
@@ -383,6 +347,8 @@ class LuggifyViewModel(
         if (userId.isEmpty()) return
 
         viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoading = true)
+            
             val checklistCreate = com.luggify.app.data.models.ChecklistCreate(
                 city = checklist.city,
                 start_date = checklist.start_date,
@@ -396,23 +362,26 @@ class LuggifyViewModel(
                 tg_user_id = userId
             )
 
-            repository.saveChecklist(checklistCreate).fold(
+            // Передаем старый slug для удаления дубликата
+            val oldSlug = checklist.slug
+            
+            repository.saveChecklist(checklistCreate, oldSlug).fold(
                 onSuccess = { savedChecklist ->
-                    // Сохраняем текущий прогноз погоды из состояния
                     val currentForecast = _uiState.value.checklist?.daily_forecast
                     _uiState.value = _uiState.value.copy(
-                        checklist = savedChecklist.copy(
-                            daily_forecast = currentForecast // Сохраняем прогноз погоды
-                        ),
+                        isLoading = false,
+                        checklist = savedChecklist.copy(daily_forecast = currentForecast),
                         error = null,
-                        saveSuccess = true
+                        saveSuccess = true,
+                        isFromMyChecklists = true,
+                        isDirty = false
                     )
-                    loadMyChecklists() // Обновляем список чеклистов
-                    // Скрываем сообщение через 1.5 секунды
+                    loadMyChecklists()
                     hideMessageAfterDelay { copy(saveSuccess = false) }
                 },
                 onFailure = { error ->
                     _uiState.value = _uiState.value.copy(
+                        isLoading = false,
                         error = error.message ?: "Ошибка при сохранении чеклиста"
                     )
                 }
@@ -422,19 +391,9 @@ class LuggifyViewModel(
 
     fun deleteChecklist(slug: String) {
         viewModelScope.launch {
-            repository.deleteChecklist(slug).fold(
-                onSuccess = {
-                    _uiState.value = _uiState.value.copy(
-                        myChecklists = _uiState.value.myChecklists.filter { it.slug != slug },
-                        error = null
-                    )
-                },
-                onFailure = { error ->
-                    _uiState.value = _uiState.value.copy(
-                        error = error.message ?: "Ошибка при удалении чеклиста"
-                    )
-                }
-            )
+            repository.deleteChecklist(slug)
+            val updatedChecklists = repository.getLocalChecklists()
+            _uiState.value = _uiState.value.copy(myChecklists = updatedChecklists, error = null)
         }
     }
 
@@ -445,34 +404,80 @@ class LuggifyViewModel(
             removedItems = checklist.removed_items?.toSet() ?: emptySet(),
             addedItems = checklist.added_items ?: emptyList(),
             isDirty = false,
-            isFromMyChecklists = true // Чеклист открыт из "Мои чеклисты"
+            isFromMyChecklists = true
         )
-        // Подгружаем актуальный прогноз погоды (как в TMA)
+        
+        // Если есть несинхронизированные изменения — пытаемся синхронизировать
+        if (checklist.needsSync) {
+            trySyncChecklist()
+        }
+    }
+    
+    /**
+     * Загрузить актуальную погоду для текущего чеклиста (если есть сеть)
+     * Всегда обновляет погоду при наличии интернета, даже если есть кэшированная
+     */
+    fun tryLoadWeather() {
+        val checklist = _uiState.value.checklist ?: return
         refreshWeatherForecast(checklist.city, checklist.start_date, checklist.end_date)
     }
     
-    private fun refreshWeatherForecast(city: String, startDate: String, endDate: String) {
-        val request = PackingRequest(
-            city = city,
-            start_date = startDate,
-            end_date = endDate
-        )
+    /**
+     * Синхронизировать текущее состояние чеклиста с сервером
+     * Вызывается автоматически при открытии чеклиста (если есть интернет и needsSync = true)
+     * НЕ показывает сообщение "изменения сохранены" - это тихая синхронизация
+     */
+    fun trySyncChecklist() {
+        val checklist = _uiState.value.checklist ?: return
+        
+        // Если синхронизация не требуется, пропускаем
+        if (!checklist.needsSync) return
+        
+        val isNetworkAvailable = NetworkUtils.isNetworkAvailable(appContext)
+        if (!isNetworkAvailable) return
         
         viewModelScope.launch {
-            repository.generatePackingList(request).fold(
-                onSuccess = { checklistWithForecast ->
-                    // Обновляем только daily_forecast, остальное не трогаем
-                    _uiState.value.checklist?.let { currentChecklist ->
+            repository.syncChecklist(checklist.slug)?.fold(
+                onSuccess = { syncedChecklist ->
+                    // Синхронизация прошла успешно — обновляем чеклист с needsSync = false
+                    val currentChecklist = _uiState.value.checklist
+                    if (currentChecklist != null) {
                         _uiState.value = _uiState.value.copy(
-                            checklist = currentChecklist.copy(
-                                daily_forecast = checklistWithForecast.daily_forecast
+                            checklist = syncedChecklist.copy(
+                                daily_forecast = currentChecklist.daily_forecast,
+                                needsSync = false
                             )
                         )
+                        // Обновляем список чеклистов чтобы убрать значок синхронизации
+                        loadMyChecklists()
                     }
                 },
-                onFailure = {
-                    // Игнорируем ошибки при загрузке прогноза, основной чеклист уже загружен
-                }
+                onFailure = { /* Не удалось синхронизировать, попробуем позже */ }
+            )
+        }
+    }
+    
+    private fun refreshWeatherForecast(city: String, startDate: String, endDate: String) {
+        val isNetworkAvailable = NetworkUtils.isNetworkAvailable(appContext)
+        if (!isNetworkAvailable) return
+        
+        val request = PackingRequest(city = city, start_date = startDate, end_date = endDate)
+        
+        viewModelScope.launch {
+            // saveLocally = false - НЕ сохраняем новый чеклист, только получаем погоду
+            repository.generatePackingList(request, saveLocally = false).fold(
+                onSuccess = { checklistWithForecast ->
+                    val currentChecklist = _uiState.value.checklist
+                    if (currentChecklist != null && checklistWithForecast.daily_forecast != null) {
+                        // Обновляем UI
+                        _uiState.value = _uiState.value.copy(
+                            checklist = currentChecklist.copy(daily_forecast = checklistWithForecast.daily_forecast)
+                        )
+                        // Сохраняем погоду локально для оффлайн доступа
+                        repository.saveWeatherLocally(currentChecklist.slug, checklistWithForecast.daily_forecast)
+                    }
+                },
+                onFailure = { _ -> /* Игнорируем ошибку */ }
             )
         }
     }
@@ -484,16 +489,13 @@ class LuggifyViewModel(
         }
     }
     
-    // Методы для управления вещами по умолчанию
     fun addDefaultItem(item: String) {
         val currentDefaultItems = _uiState.value.defaultItems.toMutableList()
         if (!currentDefaultItems.contains(item)) {
             currentDefaultItems.add(item)
             _uiState.value = _uiState.value.copy(defaultItems = currentDefaultItems)
             userPreferencesDataStore?.let { dataStore ->
-                viewModelScope.launch {
-                    dataStore.saveDefaultItems(currentDefaultItems)
-                }
+                viewModelScope.launch { dataStore.saveDefaultItems(currentDefaultItems) }
             }
         }
     }
@@ -503,10 +505,7 @@ class LuggifyViewModel(
         currentDefaultItems.remove(item)
         _uiState.value = _uiState.value.copy(defaultItems = currentDefaultItems)
         userPreferencesDataStore?.let { dataStore ->
-            viewModelScope.launch {
-                dataStore.saveDefaultItems(currentDefaultItems)
-            }
+            viewModelScope.launch { dataStore.saveDefaultItems(currentDefaultItems) }
         }
     }
 }
-
