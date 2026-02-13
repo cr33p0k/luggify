@@ -25,6 +25,8 @@ function App() {
   const [checklistsLoading, setChecklistsLoading] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const [saveStateSuccess, setSaveStateSuccess] = useState(false);
+  const [authUser, setAuthUser] = useState(null);
+  const [authToken, setAuthToken] = useState(null);
 
   useEffect(() => {
     // Telegram WebApp API
@@ -33,7 +35,27 @@ function App() {
       setIsTg(true);
       tg.ready();
       if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
-        setTgUser(tg.initDataUnsafe.user);
+        const tgUserData = tg.initDataUnsafe.user;
+        setTgUser(tgUserData);
+        // Авто-авторизация через Telegram
+        fetch(`${API_URL}/auth/telegram`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tg_id: String(tgUserData.id),
+            first_name: tgUserData.first_name,
+            last_name: tgUserData.last_name,
+            username: tgUserData.username,
+          }),
+        })
+          .then(res => res.json())
+          .then(data => {
+            if (data.access_token) {
+              setAuthToken(data.access_token);
+              setAuthUser(data.user);
+            }
+          })
+          .catch(err => console.error('Ошибка Telegram auth:', err));
       }
     }
   }, []);
@@ -72,9 +94,11 @@ function App() {
     }
     setLoading(true);
     try {
+      const headers = { "Content-Type": "application/json" };
+      if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
       const res = await fetch(`${API_URL}/generate-packing-list`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           city: city.fullName || city,
           start_date: dates.start,

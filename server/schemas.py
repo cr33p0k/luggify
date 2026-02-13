@@ -16,10 +16,18 @@ class UserLogin(BaseModel):
     password: str
 
 
+class TelegramAuth(BaseModel):
+    tg_id: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    username: Optional[str] = None
+
+
 class UserOut(BaseModel):
     id: int
-    email: str
+    email: Optional[str] = None
     username: str
+    tg_id: Optional[str] = None
     created_at: Optional[datetime] = None
 
     class Config:

@@ -192,6 +192,26 @@ async def get_me(user=Depends(require_current_user)):
     return user
 
 
+@app.post("/auth/telegram", response_model=schemas.Token)
+async def telegram_auth(data: schemas.TelegramAuth, db: AsyncSession = Depends(get_db)):
+    """Авторизация через Telegram — автосоздание пользователя при первом входе"""
+    user = await crud.get_user_by_tg_id(db, data.tg_id)
+    if not user:
+        # Создаём нового пользователя из Telegram-данных
+        user = await crud.create_user_from_telegram(
+            db,
+            tg_id=data.tg_id,
+            username=data.username,
+            first_name=data.first_name,
+        )
+    access_token = create_access_token(data={"sub": str(user.id)})
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": schemas.UserOut.model_validate(user),
+    }
+
+
 @app.get("/my-checklists", response_model=List[schemas.ChecklistOut])
 async def get_my_checklists(
     user=Depends(require_current_user),

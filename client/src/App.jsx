@@ -2,8 +2,10 @@ import React, { useState, useEffect } from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
 import CitySelect from "./CitySelect";
 import DateRangePicker from "./DateRangePicker";
+import AuthModal from "./AuthModal";
 
 import "./App.css";
+import "./AuthModal.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -24,6 +26,30 @@ const App = () => {
   const [removedItems, setRemovedItems] = useState([]);
   const [addItemMode, setAddItemMode] = useState(false);
   const [newItem, setNewItem] = useState("");
+
+  // Auth state
+  const [user, setUser] = useState(() => {
+    const saved = localStorage.getItem("user");
+    return saved ? JSON.parse(saved) : null;
+  });
+  const [token, setToken] = useState(() => localStorage.getItem("token"));
+  const [showAuth, setShowAuth] = useState(false);
+
+  const handleAuth = (userData, accessToken) => {
+    setUser(userData);
+    setToken(accessToken);
+  };
+
+  const handleLogout = () => {
+    setUser(null);
+    setToken(null);
+    localStorage.removeItem("token");
+    localStorage.removeItem("user");
+  };
+
+  const authHeaders = token
+    ? { "Authorization": `Bearer ${token}` }
+    : {};
 
   useEffect(() => {
     const fetchChecklistAndForecast = async () => {
@@ -224,7 +250,7 @@ const App = () => {
     try {
       const res = await fetch(`${API_URL}/generate-packing-list`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...authHeaders },
         body: JSON.stringify({
           city: city.fullName,
           start_date: dates.start,
@@ -306,6 +332,25 @@ const App = () => {
 
   return (
     <div className={`container large ${result ? "expanded" : ""}`}>
+      {/* Auth header */}
+      <div className="user-header">
+        {user ? (
+          <>
+            <span className="user-greeting">👤 <strong>{user.username}</strong></span>
+            <button className="logout-btn" onClick={handleLogout}>Выйти</button>
+          </>
+        ) : (
+          <button className="auth-btn" onClick={() => setShowAuth(true)}>Войти</button>
+        )}
+      </div>
+
+      {showAuth && (
+        <AuthModal
+          onClose={() => setShowAuth(false)}
+          onAuth={handleAuth}
+        />
+      )}
+
       <h1
         style={{ cursor: "pointer", userSelect: "none" }}
         onClick={() => navigate("/")}

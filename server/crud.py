@@ -46,6 +46,31 @@ async def get_user_by_id(db: AsyncSession, user_id: int):
     return result.scalar_one_or_none()
 
 
+async def get_user_by_tg_id(db: AsyncSession, tg_id: str):
+    """Получение пользователя по Telegram ID"""
+    result = await db.execute(
+        select(models.User).where(models.User.tg_id == tg_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def create_user_from_telegram(db: AsyncSession, tg_id: str, username: str, first_name: str = None):
+    """Создание пользователя из Telegram данных"""
+    display_name = username or first_name or f"tg_{tg_id}"
+    # Проверяем уникальность username, добавляем суффикс если нужно
+    existing = await get_user_by_username(db, display_name)
+    if existing:
+        display_name = f"{display_name}_{tg_id[:6]}"
+    user = models.User(
+        username=display_name,
+        tg_id=tg_id,
+    )
+    db.add(user)
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
 # === Checklist CRUD ===
 
 async def create_checklist(db: AsyncSession, data: schemas.ChecklistCreate):
