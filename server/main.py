@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import httpx
 from fastapi import FastAPI, Query, Depends, HTTPException, Body, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,12 +17,43 @@ from auth import (
 
 load_dotenv()
 
-OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
-if not OPENWEATHER_API_KEY:
-    raise RuntimeError("Не найден ключ OPENWEATHER_API_KEY в .env файле")
 
-GEOCODING_API_URL = "http://api.openweathermap.org/geo/1.0/direct"
-FORECAST_DAILY_API_URL = "https://api.openweathermap.org/data/2.5/forecast/daily"
+# Open-Meteo API (бесплатный, без ключа)
+OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+OPEN_METEO_HISTORICAL_URL = "https://archive-api.open-meteo.com/v1/archive"
+
+# Nominatim (OpenStreetMap) — геокодинг с русским языком
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+
+# WMO Weather Codes -> русские описания + иконки
+WMO_CODES = {
+    0: ("Ясно", "01d"),
+    1: ("Преимущественно ясно", "02d"),
+    2: ("Переменная облачность", "03d"),
+    3: ("Пасмурно", "04d"),
+    45: ("Туман", "50d"),
+    48: ("Изморозь", "50d"),
+    51: ("Лёгкая морось", "09d"),
+    53: ("Умеренная морось", "09d"),
+    55: ("Сильная морось", "09d"),
+    61: ("Небольшой дождь", "10d"),
+    63: ("Умеренный дождь", "10d"),
+    65: ("Сильный дождь", "10d"),
+    66: ("Ледяной дождь", "13d"),
+    67: ("Сильный ледяной дождь", "13d"),
+    71: ("Небольшой снег", "13d"),
+    73: ("Умеренный снег", "13d"),
+    75: ("Сильный снег", "13d"),
+    77: ("Снежные зёрна", "13d"),
+    80: ("Лёгкий ливень", "09d"),
+    81: ("Умеренный ливень", "09d"),
+    82: ("Сильный ливень", "09d"),
+    85: ("Снегопад", "13d"),
+    86: ("Сильный снегопад", "13d"),
+    95: ("Гроза", "11d"),
+    96: ("Гроза с градом", "11d"),
+    99: ("Гроза с сильным градом", "11d"),
+}
 
 app = FastAPI()
 
@@ -138,6 +169,7 @@ class DailyForecastItem(BaseModel):
     temp_max: float
     condition: str
     icon: str
+    source: str = "forecast"  # "forecast" или "historical"
 
 class ChecklistResponse(schemas.ChecklistOut):
     daily_forecast: list[DailyForecastItem]
@@ -221,151 +253,396 @@ async def get_my_checklists(
     checklists = await crud.get_checklists_by_user_id(db, user.id)
     return checklists
 
-@app.get("/geo/cities-autocomplete")
-async def cities_autocomplete(namePrefix: str = Query(..., min_length=1)):
-    params = {
-        "q": namePrefix,
-        "limit": 10,
-        "appid": OPENWEATHER_API_KEY,
-    }
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(GEOCODING_API_URL, params=params)
-        resp.raise_for_status()
-        data = resp.json()
 
-    return [
-        {
-            "name": city["name"],
-            "country": city["country"],
-            "lat": city["lat"],
-            "lon": city["lon"],
-            "fullName": f"{city['name']}, {city['country']}"
+async def get_weather_forecast_data(city: str, start_date: datetime.date, end_date: datetime.date) -> List[DailyForecastItem]:
+    """Helper to fetch weather forecast for a checklist (used when viewing saved checklists)"""
+    async with httpx.AsyncClient() as client:
+        # 1. Geocoding
+        headers = {"User-Agent": "Luggify/1.0 (travel packing app)"}
+        try:
+            geo_resp = await client.get(NOMINATIM_URL, params={
+                "q": city.split(",")[0].strip(),
+                "format": "json",
+                "accept-language": "ru",
+                "limit": 1,
+            }, headers=headers)
+            if geo_resp.status_code != 200:
+                return []
+            geo_data = geo_resp.json()
+            if not geo_data:
+                return []
+            
+            lat = float(geo_data[0]["lat"])
+            lon = float(geo_data[0]["lon"])
+        except Exception:
+            return []
+
+        # Dates setup
+        # start_date/end_date passed as date objects
+        today = datetime.now().date()
+        forecast_limit = today + timedelta(days=15)
+        
+        daily_data = {}
+
+        # 2. Forecast (Open-Meteo)
+        if start_date <= forecast_limit:
+            forecast_end = min(end_date, forecast_limit)
+            try:
+                resp = await client.get(OPEN_METEO_FORECAST_URL, params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "daily": "temperature_2m_max,temperature_2m_min,weathercode",
+                    "timezone": "auto",
+                    "start_date": start_date.strftime("%Y-%m-%d"),
+                    "end_date": forecast_end.strftime("%Y-%m-%d"),
+                })
+                if resp.status_code == 200:
+                    d = resp.json().get("daily", {})
+                    times = d.get("time", [])
+                    maxs = d.get("temperature_2m_max", [])
+                    mins = d.get("temperature_2m_min", [])
+                    codes = d.get("weathercode", [])
+                    for i, t in enumerate(times):
+                        desc, icon = WMO_CODES.get(codes[i], ("Неизвестно", "01d"))
+                        daily_data[t] = {
+                            "temp_max": maxs[i],
+                            "temp_min": mins[i],
+                            "weathercode": codes[i],
+                            "condition": desc,
+                            "icon": icon,
+                            "source": "forecast"
+                        }
+            except Exception:
+                pass
+
+        # 3. Historical (if needed)
+        hist_start = max(start_date, forecast_limit + timedelta(days=1))
+        if hist_start <= end_date:
+            try:
+                # Use last year data
+                hist_start_ly = hist_start.replace(year=hist_start.year - 1)
+                hist_end_ly = end_date.replace(year=end_date.year - 1)
+                
+                resp = await client.get(OPEN_METEO_HISTORICAL_URL, params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "daily": "temperature_2m_max,temperature_2m_min,weathercode",
+                    "timezone": "auto",
+                    "start_date": hist_start_ly.strftime("%Y-%m-%d"),
+                    "end_date": hist_end_ly.strftime("%Y-%m-%d"),
+                })
+                if resp.status_code == 200:
+                    d = resp.json().get("daily", {})
+                    times = d.get("time", [])
+                    maxs = d.get("temperature_2m_max", [])
+                    mins = d.get("temperature_2m_min", [])
+                    codes = d.get("weathercode", [])
+                    
+                    # Compute invalid year diff to map back to requested dates
+                    # But simpler: just iterate and map to hist_start + i days
+                    current_hist_date = hist_start
+                    for i, _ in enumerate(times):
+                        if current_hist_date > end_date: break
+                        
+                        desc, icon = WMO_CODES.get(codes[i], ("Неизвестно", "01d"))
+                        date_str = current_hist_date.strftime("%Y-%m-%d")
+                        daily_data[date_str] = {
+                            "temp_max": maxs[i],
+                            "temp_min": mins[i],
+                            "weathercode": codes[i],
+                            "condition": desc,
+                            "icon": icon,
+                            "source": "historical"
+                        }
+                        current_hist_date += timedelta(days=1)
+            except Exception:
+                pass
+
+        # Convert to list
+        result = []
+        for date_str in sorted(daily_data.keys()):
+            item = daily_data[date_str]
+            result.append(DailyForecastItem(
+                date=date_str,
+                temp_min=item["temp_min"],
+                temp_max=item["temp_max"],
+                condition=item["condition"],
+                icon=item["icon"],
+                source=item["source"]
+            ))
+        return result
+
+
+@app.get("/geo/cities-autocomplete")
+async def autocomplete_cities(namePrefix: str = Query(..., min_length=2)):
+    """
+    Гибридный автокомплит: Open-Meteo (быстро, короткие префиксы) + Nominatim (точность, полные названия).
+    Объединяет результаты, убирает дубликаты.
+    """
+    results_open_meteo = []
+    results_nominatim = []
+
+    async def fetch_open_meteo():
+        url = "https://geocoding-api.open-meteo.com/v1/search"
+        params = {"name": namePrefix, "count": 5, "language": "ru", "format": "json"}
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url, params=params)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if "results" in data:
+                        return data["results"]
+        except Exception:
+            pass
+        return []
+
+    async def fetch_nominatim():
+        # Используем featuretype=city чтобы отсеять мусор, но это параметр reverse. 
+        # Для search используем ограничение по addressdetails, но Nominatim всё равно возвращает разное.
+        # Просто запрашиваем и потом фильтруем на клиенте (тут).
+        params = {
+            "q": namePrefix,
+            "format": "json",
+            "accept-language": "ru",
+            "limit": 5,
+            "addressdetails": 1,
         }
-        for city in data
-    ]
+        headers = {"User-Agent": "Luggify/1.0 (travel packing app)"}
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(NOMINATIM_URL, params=params, headers=headers)
+                if resp.status_code == 200:
+                    return resp.json()
+        except Exception:
+            pass
+        return []
+
+    # Запускаем параллельно
+    import asyncio
+    res_om, res_nom = await asyncio.gather(fetch_open_meteo(), fetch_nominatim())
+
+    final_results = []
+    seen = set()
+
+    # 1. Приоритет Open-Meteo (обычно релевантнее для префиксов)
+    for item in res_om:
+        city = item.get("name")
+        country = item.get("country_code", "").upper()
+        country_name = item.get("country", "")
+        admin1 = item.get("admin1")
+        
+        # Фикс для "Молотов" -> "Пермь" (если вдруг API возвращает старое название)
+        # Но массово это не исправить, надеемся на Nominatim
+        
+        key = f"{city}:{country}:{admin1}"
+        if key in seen: continue
+        seen.add(key)
+
+        parts = [city]
+        if admin1 and admin1 != city: parts.append(admin1)
+        if country_name: parts.append(country_name)
+        
+        final_results.append({
+            "name": city,
+            "country": country,
+            "country_name": country_name,
+            "admin1": admin1,
+            "lat": item.get("latitude"),
+            "lon": item.get("longitude"),
+            "fullName": ", ".join(parts),
+            "source": "om"
+        })
+
+    # 2. Добавляем Nominatim (если такого города ещё нет)
+    for item in res_nom:
+        addr = item.get("address", {})
+        # Извлекаем город
+        city = addr.get("city") or addr.get("town") or addr.get("village") or item.get("name")
+        if not city: continue
+        
+        country = addr.get("country_code", "").upper()
+        country_name = addr.get("country", "")
+        admin1 = addr.get("state", "")
+
+        # Пропускаем, если название совсем не похоже на запрос (Nominatim иногда ищет по улицам)
+        # if namePrefix.lower() not in city.lower(): continue # Слишком строго
+
+        key = f"{city}:{country}:{admin1}"
+        
+        # Nominatim часто возвращает дубли
+        if key in seen: continue
+        
+        # Если такого ключа нет, но координаты ОЧЕНЬ близко к уже найденному -> тоже дубль
+        is_duplicate_coord = False
+        lat, lon = float(item["lat"]), float(item["lon"])
+        for exist in final_results:
+            if abs(exist["lat"] - lat) < 0.1 and abs(exist["lon"] - lon) < 0.1:
+                is_duplicate_coord = True
+                break
+        
+        if is_duplicate_coord: continue
+
+        seen.add(key)
+        
+        parts = [city]
+        if admin1 and admin1 != city: parts.append(admin1)
+        if country_name: parts.append(country_name)
+
+        final_results.append({
+            "name": city,
+            "country": country,
+            "country_name": country_name,
+            "admin1": admin1,
+            "lat": lat,
+            "lon": lon,
+            "fullName": ", ".join(parts),
+            "source": "nom"
+        })
+
+    return final_results
 
 @app.post("/generate-packing-list", response_model=ChecklistResponse)
 async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db), current_user=Depends(get_current_user)):
-    geocode_params = {
-        "q": req.city,
-        "limit": 1,
-        "appid": OPENWEATHER_API_KEY,
-    }
+    # --- Геокодинг через Nominatim ---
     async with httpx.AsyncClient() as client:
-        geo_resp = await client.get(GEOCODING_API_URL, params=geocode_params)
+        headers = {"User-Agent": "Luggify/1.0 (travel packing app)"}
+        geo_resp = await client.get(NOMINATIM_URL, params={
+            "q": req.city.split(",")[0].strip(),
+            "format": "json",
+            "accept-language": "ru",
+            "limit": 1,
+            "addressdetails": 1,
+        }, headers=headers)
         geo_resp.raise_for_status()
         geo_data = geo_resp.json()
         if not geo_data:
             raise HTTPException(status_code=404, detail="Город не найден")
 
-        lat = geo_data[0]["lat"]
-        lon = geo_data[0]["lon"]
+        lat = float(geo_data[0]["lat"])
+        lon = float(geo_data[0]["lon"])
+        addr = geo_data[0].get("address", {})
+        country = addr.get("country_code", "").upper()
 
         start_dt = datetime.strptime(req.start_date, "%Y-%m-%d")
         end_dt = datetime.strptime(req.end_date, "%Y-%m-%d")
         days_count = (end_dt - start_dt).days + 1
+        today = datetime.now().date()
 
-        if days_count > 16:
-            raise HTTPException(status_code=400, detail="Период поездки не может превышать 16 дней")
+        # --- Гибридный прогноз: Forecast (≤16 дней) + Historical (>16 дней) ---
+        forecast_limit = today + timedelta(days=15)  # последний день прогноза
 
-        forecast_params = {
-            "lat": lat,
-            "lon": lon,
-            "cnt": 16,
-            "units": "metric",
-            "appid": OPENWEATHER_API_KEY,
-        }
-        forecast_resp = await client.get(FORECAST_DAILY_API_URL, params=forecast_params)
-        forecast_resp.raise_for_status()
-        forecast_data = forecast_resp.json()
+        daily_data = {}  # date_str -> {temp_min, temp_max, weathercode}
 
+        # 1) Open-Meteo Forecast (до 16 дней вперёд)
+        if start_dt.date() <= forecast_limit:
+            forecast_end = min(end_dt.date(), forecast_limit)
+            forecast_resp = await client.get(OPEN_METEO_FORECAST_URL, params={
+                "latitude": lat,
+                "longitude": lon,
+                "daily": "temperature_2m_max,temperature_2m_min,weathercode",
+                "timezone": "auto",
+                "start_date": start_dt.strftime("%Y-%m-%d"),
+                "end_date": forecast_end.strftime("%Y-%m-%d"),
+            })
+            forecast_resp.raise_for_status()
+            f_data = forecast_resp.json().get("daily", {})
+            times = f_data.get("time", [])
+            t_max = f_data.get("temperature_2m_max", [])
+            t_min = f_data.get("temperature_2m_min", [])
+            codes = f_data.get("weathercode", [])
+            for i, date_str in enumerate(times):
+                daily_data[date_str] = {
+                    "temp_max": t_max[i] if i < len(t_max) else 0,
+                    "temp_min": t_min[i] if i < len(t_min) else 0,
+                    "weathercode": codes[i] if i < len(codes) else 0,
+                    "source": "forecast",
+                }
+
+        # 2) Open-Meteo Historical (для дат за пределами 16-дневного прогноза)
+        hist_start = max(start_dt.date(), forecast_limit + timedelta(days=1))
+        if hist_start <= end_dt.date():
+            # Берём те же даты за прошлый год
+            hist_start_ly = hist_start.replace(year=hist_start.year - 1)
+            hist_end_ly = end_dt.date().replace(year=end_dt.year - 1)
+            hist_resp = await client.get(OPEN_METEO_HISTORICAL_URL, params={
+                "latitude": lat,
+                "longitude": lon,
+                "daily": "temperature_2m_max,temperature_2m_min,weathercode",
+                "timezone": "auto",
+                "start_date": hist_start_ly.strftime("%Y-%m-%d"),
+                "end_date": hist_end_ly.strftime("%Y-%m-%d"),
+            })
+            hist_resp.raise_for_status()
+            h_data = hist_resp.json().get("daily", {})
+            h_times = h_data.get("time", [])
+            h_t_max = h_data.get("temperature_2m_max", [])
+            h_t_min = h_data.get("temperature_2m_min", [])
+            h_codes = h_data.get("weathercode", [])
+            for i, date_str_ly in enumerate(h_times):
+                # Переносим дату на текущий год
+                d = datetime.strptime(date_str_ly, "%Y-%m-%d").date()
+                actual_date = d.replace(year=d.year + 1)
+                actual_date_str = actual_date.strftime("%Y-%m-%d")
+                if actual_date_str not in daily_data:  # не перезаписываем forecast
+                    daily_data[actual_date_str] = {
+                        "temp_max": h_t_max[i] if i < len(h_t_max) else 0,
+                        "temp_min": h_t_min[i] if i < len(h_t_min) else 0,
+                        "weathercode": h_codes[i] if i < len(h_codes) else 0,
+                        "source": "historical",
+                    }
+
+    # --- Обработка погодных данных ---
     items = set()
-    # Универсальные вещи
     items.update([
-        "Паспорт",
-        "Медицинская страховка",
-        "Зарядка для телефона",
-        "Телефон",
-        "Деньги/карта",
-        "Средства гигиены",
-        "Одежда на каждый день",
-        "Нижнее бельё",
-        "Носки",
-        "Зубная щётка и паста",
-        "Дезодорант",
-        "Личные лекарства",
-        "Сумка/рюкзак",
-        "Полотенце (если не предоставляется)",
-        "Бутылка для воды",
-        "Маска/антисептик",
+        "Паспорт", "Медицинская страховка", "Зарядка для телефона",
+        "Телефон", "Деньги/карта", "Средства гигиены",
+        "Одежда на каждый день", "Нижнее бельё", "Носки",
+        "Зубная щётка и паста", "Дезодорант", "Личные лекарства",
+        "Сумка/рюкзак", "Полотенце (если не предоставляется)",
+        "Бутылка для воды", "Маска/антисептик",
     ])
 
-    # Проверка визы (пример для стран Шенгена, США, Великобритании, Австралии)
-    visa_countries = [
-        "France", "Germany", "Italy", "Spain", "Greece", "Finland", "Sweden", "Norway", "Denmark",
-        "Netherlands", "Belgium", "Austria", "Switzerland", "Czechia", "Poland", "Hungary", "USA",
-        "United States", "United Kingdom", "UK", "Australia", "Canada", "Japan"
-    ]
-    # Получаем страну из geo_data
-    country = geo_data[0].get("country", "")
-    if country in visa_countries:
-        items.add("Оформить визу")
-
-    # Переходник для розеток (пример для Европы, США, Великобритании, Австралии)
-    adapter_countries = [
-        "USA", "United States", "United Kingdom", "UK", "Australia", "Japan", "China", "Switzerland"
-    ]
-    if country in adapter_countries:
-        items.add("Переходник для розеток")
-
-    # Длительная поездка (>7 дней)
-    if days_count > 7:
-        items.add("Средство для стирки одежды")
-
-    # Температурные условия и осадки
     temps = []
     conditions = set()
     daily_forecast = []
-    for day in forecast_data.get("list", []):
-        forecast_date = datetime.fromtimestamp(day["dt"]).date()
-        if start_dt.date() <= forecast_date <= end_dt.date():
-            temp_day = day["temp"]["day"]
-            temp_min = day["temp"]["min"]
-            temp_max = day["temp"]["max"]
-            weather = day["weather"][0]
-            cond = weather["description"].lower()
-            icon = weather["icon"]
 
-            cond_ru = weather_translations.get(cond, cond)
-            conditions.add(cond_ru)
-            temps.append(temp_day)
+    for date_str in sorted(daily_data.keys()):
+        d = daily_data[date_str]
+        temp_avg = (d["temp_max"] + d["temp_min"]) / 2
+        wmo_code = d["weathercode"]
+        cond_ru, icon = WMO_CODES.get(wmo_code, ("Неизвестно", "03d"))
+        source = d["source"]
 
-            # Одежда по температуре
-            if temp_day < 0:
-                items.update(["Тёплая куртка/пуховик", "Термобельё", "Шапка", "Шарф", "Перчатки", "Тёплые носки", "Зимние ботинки"])
-            elif temp_day < 10:
-                items.update(["Лёгкая куртка/ветровка", "Свитер/толстовка", "Джинсы/брюки", "Кроссовки/ботинки"])
-            elif temp_day < 20:
-                items.update(["Лёгкая кофта/свитшот", "Футболки", "Джинсы/брюки", "Кроссовки"])
-            else:
-                items.update(["Футболки", "Шорты/лёгкие платья", "Панама/кепка", "Солнцезащитные очки", "Легкая обувь"])
+        temps.append(temp_avg)
+        conditions.add(cond_ru)
 
-            # Осадки
-            if "rain" in cond or "дождь" in cond_ru:
-                items.add("Зонт или дождевик")
-                items.add("Водонепроницаемая обувь")
-            if "snow" in cond or "снег" in cond_ru:
-                items.add("Тёплая обувь")
-            if "sun" in cond or temp_day > 20:
-                items.add("Солнцезащитный крем")
+        # Одежда по температуре
+        if temp_avg < 0:
+            items.update(["Тёплая куртка/пуховик", "Термобельё", "Шапка", "Шарф", "Перчатки", "Тёплые носки", "Зимние ботинки"])
+        elif temp_avg < 10:
+            items.update(["Лёгкая куртка/ветровка", "Свитер/толстовка", "Джинсы/брюки", "Кроссовки/ботинки"])
+        elif temp_avg < 20:
+            items.update(["Лёгкая кофта/свитшот", "Футболки", "Джинсы/брюки", "Кроссовки"])
+        else:
+            items.update(["Футболки", "Шорты/лёгкие платья", "Панама/кепка", "Солнцезащитные очки", "Легкая обувь"])
 
-            daily_forecast.append(DailyForecastItem(
-                date=str(forecast_date),
-                temp_min=temp_min,
-                temp_max=temp_max,
-                condition=cond_ru,
-                icon=icon
-            ))
+        # Осадки по WMO-коду
+        if wmo_code in (51, 53, 55, 61, 63, 65, 66, 67, 80, 81, 82):
+            items.add("Зонт или дождевик")
+            items.add("Водонепроницаемая обувь")
+        if wmo_code in (71, 73, 75, 77, 85, 86):
+            items.add("Тёплая обувь")
+        if temp_avg > 20:
+            items.add("Солнцезащитный крем")
+
+        daily_forecast.append(DailyForecastItem(
+            date=date_str,
+            temp_min=d["temp_min"],
+            temp_max=d["temp_max"],
+            condition=cond_ru,
+            icon=icon,
+            source=source,
+        ))
 
     avg_temp = round(sum(temps) / len(temps), 1) if temps else None
 
@@ -413,7 +690,7 @@ async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db),
         # Прочие
         "TR"
     ]
-    country = geo_data[0].get("country", "")
+    # country уже установлен выше из geo_data[0].get("country_code")
     if country in visa_countries:
         categories["Важное"].append("Виза")
 
@@ -455,9 +732,9 @@ async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db),
 
     # Техника
     categories["Техника"].extend(["Телефон", "Зарядка", "Пауэрбанк"])
-    # Переходник для розеток
+    # Переходник для розеток (ISO-2)
     adapter_countries = [
-        "USA", "United States", "United Kingdom", "UK", "Australia", "Japan", "China", "Switzerland"
+        "US", "GB", "AU", "JP", "CN", "CH"
     ]
     if country in adapter_countries:
         categories["Техника"].append("Переходник для розеток")
@@ -525,11 +802,21 @@ async def get_tg_checklists(tg_user_id: str, db: AsyncSession = Depends(get_db))
     checklists = await crud.get_all_checklists_by_tg_user_id(db, tg_user_id)
     return checklists
 
-@app.get("/checklist/{slug}", response_model=schemas.ChecklistOut)
+@app.get("/checklist/{slug}", response_model=ChecklistResponse)
 async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):
     checklist = await crud.get_checklist_by_slug(db, slug)
     if not checklist:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
+
+    # Fetch fresh weather data
+    forecast = await get_weather_forecast_data(checklist.city, checklist.start_date, checklist.end_date)
+    
+    # Construct response manually (since ORM object doesn't have daily_forecast)
+    response = ChecklistResponse(
+        **{k: getattr(checklist, k) for k in checklist.__table__.columns.keys()},
+        daily_forecast=forecast
+    )
+    return response
 
     # Категории для чеклиста (для фронта)
     categories = {
@@ -615,8 +902,7 @@ async def health_check():
         # Проверяем наличие переменных окружения
         db_url = os.getenv("DATABASE_URL")
         db_status = "configured" if db_url else "missing"
-        api_key_status = "ok" if os.getenv("OPENWEATHER_API_KEY") else "missing"
-        
+
         # Пытаемся подключиться к БД если она настроена
         db_connection = "unknown"
         db_error_details = None
@@ -630,19 +916,17 @@ async def health_check():
                 error_msg = str(e)
                 db_connection = "error"
                 db_error_details = error_msg[:200]
-                # Детальная диагностика
                 if "Name or service not known" in error_msg:
-                    db_error_details += " | Возможно неправильный хост или нужно использовать Internal Database URL на Render"
+                    db_error_details += " | Возможно неправильный хост"
                 elif "could not translate host name" in error_msg.lower():
-                    db_error_details += " | Проверьте формат DATABASE_URL, возможно нужен Internal URL"
+                    db_error_details += " | Проверьте формат DATABASE_URL"
         elif not db_url:
             db_connection = "not_configured"
-        
+
         result = {
             "status": "ok",
-            "database_url": "configured" if db_url else "missing",
+            "database_url": db_status,
             "database_connection": db_connection,
-            "api_key": api_key_status,
             "message": "Server is running"
         }
         if db_error_details:

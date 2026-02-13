@@ -63,6 +63,9 @@ class ChecklistCreate(BaseModel):
     tg_user_id: Optional[str] = None
     user_id: Optional[int] = None
 
+    class Config:
+        from_attributes = True
+
 
 class ChecklistOut(ChecklistCreate):
     slug: str

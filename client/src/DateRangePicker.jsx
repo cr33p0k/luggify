@@ -29,26 +29,28 @@ const DateRangePicker = ({ onChange }) => {
 
   return (
     <div className="input-group">
-      <label>Период поездки</label>
-      <div className="date-field">
-        <DatePicker
-          selected={startDate}
-          onChange={handleStart}
-          dateFormat="dd.MM.yyyy"
-          placeholderText="Начало"
-          className="date-input"
-           minDate={new Date()}
-        />
-      </div>
-      <div className="date-field">
-        <DatePicker
-          selected={endDate}
-          onChange={handleEnd}
-          dateFormat="dd.MM.yyyy"
-          placeholderText="Конец"
-          className="date-input"
-           minDate={startDate || new Date()}
-        />
+      <label>Даты поездки</label>
+      <div className="date-row">
+        <div className="date-field">
+          <DatePicker
+            selected={startDate}
+            onChange={handleStart}
+            dateFormat="dd.MM.yyyy"
+            placeholderText="Начало"
+            className="date-input"
+            minDate={new Date()}
+          />
+        </div>
+        <div className="date-field">
+          <DatePicker
+            selected={endDate}
+            onChange={handleEnd}
+            dateFormat="dd.MM.yyyy"
+            placeholderText="Конец"
+            className="date-input"
+            minDate={startDate || new Date()}
+          />
+        </div>
       </div>
     </div>
   );

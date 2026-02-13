@@ -6,9 +6,9 @@ import "./CitySelect.css";
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 const fetchCitiesWithCountry = async (inputValue) => {
-  if (!inputValue) return [];
+  if (!inputValue || inputValue.length < 2) return [];
   try {
-    const res = await fetch(`${API_URL}/geo/cities-autocomplete?namePrefix=${inputValue}`);
+    const res = await fetch(`${API_URL}/geo/cities-autocomplete?namePrefix=${encodeURIComponent(inputValue)}`);
     const data = await res.json();
     return data.map((city) => ({
       label: city.fullName,
@@ -27,11 +27,12 @@ const CitySelect = ({ onSelect }) => (
       classNamePrefix="react-select"
       cacheOptions
       loadOptions={fetchCitiesWithCountry}
-      defaultOptions
       onChange={(option) => onSelect(option ? option.value : null)}
-      placeholder="Введите город"
+      placeholder="Начните вводить город..."
       noOptionsMessage={() => "Город не найден"}
+      loadingMessage={() => "Поиск..."}
       isClearable
+      menuPlacement="auto"
     />
   </div>
 );

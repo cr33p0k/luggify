@@ -1,5 +1,4 @@
 import React, { useState } from "react";
-import "./AuthModal.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -41,7 +40,6 @@ export default function AuthModal({ onClose, onAuth }) {
                 return;
             }
 
-            // Сохраняем токен и данные пользователя
             localStorage.setItem("token", data.access_token);
             localStorage.setItem("user", JSON.stringify(data.user));
             onAuth(data.user, data.access_token);
@@ -56,9 +54,11 @@ export default function AuthModal({ onClose, onAuth }) {
     return (
         <div className="auth-overlay" onClick={onClose}>
             <div className="auth-modal" onClick={(e) => e.stopPropagation()}>
-                <button className="auth-close" onClick={onClose}>
-                    ×
-                </button>
+                <button className="auth-close" onClick={onClose}>×</button>
+
+                <div className="auth-title">
+                    <span>🧳 Luggify</span>
+                </div>
 
                 <div className="auth-tabs">
                     <button
@@ -76,47 +76,34 @@ export default function AuthModal({ onClose, onAuth }) {
                 </div>
 
                 <form className="auth-form" onSubmit={handleSubmit}>
-                    <div className="auth-field">
-                        <label>Email</label>
-                        <input
-                            type="email"
-                            value={email}
-                            onChange={(e) => setEmail(e.target.value)}
-                            placeholder="example@mail.com"
-                            required
-                            autoComplete="email"
-                        />
-                    </div>
-
+                    <input
+                        className="auth-input"
+                        type="email"
+                        placeholder="Email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        required
+                        autoFocus
+                    />
                     {tab === "register" && (
-                        <div className="auth-field">
-                            <label>Имя пользователя</label>
-                            <input
-                                type="text"
-                                value={username}
-                                onChange={(e) => setUsername(e.target.value)}
-                                placeholder="username"
-                                required
-                                autoComplete="username"
-                            />
-                        </div>
-                    )}
-
-                    <div className="auth-field">
-                        <label>Пароль</label>
                         <input
-                            type="password"
-                            value={password}
-                            onChange={(e) => setPassword(e.target.value)}
-                            placeholder="••••••••"
+                            className="auth-input"
+                            type="text"
+                            placeholder="Имя пользователя"
+                            value={username}
+                            onChange={(e) => setUsername(e.target.value)}
                             required
-                            minLength={4}
-                            autoComplete={tab === "login" ? "current-password" : "new-password"}
                         />
-                    </div>
-
+                    )}
+                    <input
+                        className="auth-input"
+                        type="password"
+                        placeholder="Пароль"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        required
+                    />
                     {error && <div className="auth-error">{error}</div>}
-
                     <button className="auth-submit" type="submit" disabled={loading}>
                         {loading
                             ? "Загрузка..."

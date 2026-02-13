@@ -3,13 +3,14 @@ import { useParams, useNavigate, useLocation } from "react-router-dom";
 import CitySelect from "./CitySelect";
 import DateRangePicker from "./DateRangePicker";
 import AuthModal from "./AuthModal";
+import ProfilePage from "./ProfilePage";
 
 import "./App.css";
 import "./AuthModal.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
-const App = () => {
+const App = ({ page }) => {
   const { id } = useParams(); // slug из URL
   const navigate = useNavigate();
   const location = useLocation();
@@ -52,135 +53,23 @@ const App = () => {
     : {};
 
   useEffect(() => {
-    const fetchChecklistAndForecast = async () => {
+    const fetchChecklist = async () => {
       try {
         const res = await fetch(`${API_URL}/checklist/${id}`);
         if (!res.ok) throw new Error("Чеклист не найден");
-
         const data = await res.json();
         setCity({ fullName: data.city });
         setDates({ start: data.start_date, end: data.end_date });
-
-        // Получаем координаты
-        const geoRes = await fetch(
-          `https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(
-            data.city
-          )}&limit=1&appid=${import.meta.env.VITE_WEATHER_API_KEY}`
-        );
-        const geoData = await geoRes.json();
-        if (!geoData.length) throw new Error("Город не найден");
-
-        const { lat, lon } = geoData[0];
-
-        // Получаем прогноз через 16-дневный API
-        const start = new Date(data.start_date);
-        const end = new Date(data.end_date);
-        const daysCount = Math.min(
-          Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1,
-          16
-        );
-        const forecastRes = await fetch(
-          `https://api.openweathermap.org/data/2.5/forecast/daily?lat=${lat}&lon=${lon}&cnt=${daysCount}&units=metric&appid=${import.meta.env.VITE_WEATHER_API_KEY}`
-        );
-        const forecastData = await forecastRes.json();
-
-        const translated = {
-          // Thunderstorm
-          "thunderstorm with light rain": "Гроза с небольшим дождём",
-          "thunderstorm with rain": "Гроза с дождём",
-          "thunderstorm with heavy rain": "Гроза с сильным дождём",
-          "light thunderstorm": "Слабая гроза",
-          "thunderstorm": "Гроза",
-          "heavy thunderstorm": "Сильная гроза",
-          "ragged thunderstorm": "Местами гроза",
-          "thunderstorm with light drizzle": "Гроза с небольшим моросящим дождём",
-          "thunderstorm with drizzle": "Гроза с моросящим дождём",
-          "thunderstorm with heavy drizzle": "Гроза с сильным моросящим дождём",
-          // Drizzle
-          "light intensity drizzle": "Лёгкая морось",
-          "drizzle": "Морось",
-          "heavy intensity drizzle": "Сильная морось",
-          "light intensity drizzle rain": "Лёгкий моросящий дождь",
-          "drizzle rain": "Моросящий дождь",
-          "heavy intensity drizzle rain": "Сильный моросящий дождь",
-          "shower rain and drizzle": "Ливень и морось",
-          "heavy shower rain and drizzle": "Сильный ливень и морось",
-          "shower drizzle": "Моросящий ливень",
-          // Rain
-          "light rain": "Лёгкий дождь",
-          "moderate rain": "Умеренный дождь",
-          "heavy intensity rain": "Сильный дождь",
-          "very heavy rain": "Очень сильный дождь",
-          "extreme rain": "Экстремальный дождь",
-          "freezing rain": "Ледяной дождь",
-          "light intensity shower rain": "Лёгкий ливневый дождь",
-          "shower rain": "Ливневый дождь",
-          "heavy intensity shower rain": "Сильный ливневый дождь",
-          "ragged shower rain": "Местами ливневый дождь",
-          // Snow
-          "light snow": "Лёгкий снег",
-          "snow": "Снег",
-          "heavy snow": "Сильный снег",
-          "sleet": "Дождь со снегом",
-          "light shower sleet": "Лёгкий ливневый дождь со снегом",
-          "shower sleet": "Ливневый дождь со снегом",
-          "light rain and snow": "Лёгкий дождь и снег",
-          "rain and snow": "Дождь и снег",
-          "light shower snow": "Лёгкий ливневый снег",
-          "shower snow": "Ливневый снег",
-          "heavy shower snow": "Сильный ливневый снег",
-          // Atmosphere
-          "mist": "Туман",
-          "smoke": "Дымка",
-          "haze": "Мгла",
-          "sand/dust whirls": "Песчаные/пылевые вихри",
-          "fog": "Туман",
-          "sand": "Песок",
-          "dust": "Пыль",
-          "volcanic ash": "Вулканический пепел",
-          "squalls": "Шквалы",
-          "tornado": "Торнадо",
-          // Clear
-          "clear sky": "Ясно",
-          // Clouds
-          "few clouds": "Малооблачно",
-          "scattered clouds": "Облачно",
-          "broken clouds": "Пасмурно",
-          "overcast clouds": "Пасмурно",
-          "sky is clear": "Ясно",
-        };
-
-        // Формируем daily_forecast из 16-дневного API
-        const daily_forecast = (forecastData.list || []).map((entry) => {
-          const date = new Date(entry.dt * 1000);
-          return {
-            date: date.toISOString().split("T")[0],
-            temp_min: entry.temp.min,
-            temp_max: entry.temp.max,
-            conditions:
-              translated[entry.weather[0].description.toLowerCase()] ??
-              entry.weather[0].description,
-            icon: entry.weather[0].icon,
-          };
-        }).filter(day => {
-          // Оставляем только дни в выбранном диапазоне
-          const d = new Date(day.date);
-          return d >= start && d <= end;
-        });
-
-        setResult({
-          ...data,
-          daily_forecast,
-        });
+        setResult(data);
         setSavedSlug(id);
       } catch (e) {
         console.error(e);
-        setError("Ошибка при загрузке сохраненного чеклиста");
+        setError("Ошибка при загрузке чеклиста");
       }
     };
 
     if (id) {
-      fetchChecklistAndForecast();
+      fetchChecklist();
     }
   }, [id]);
 
@@ -242,10 +131,7 @@ const App = () => {
     const end = new Date(dates.end);
     const diffDays = (end - start) / (1000 * 60 * 60 * 24) + 1;
 
-    if (diffDays > 16) {
-      alert("Период поездки не может превышать 16 дней");
-      return;
-    }
+    // Без ограничения по дням — сервер использует прогноз + исторические данные
 
     try {
       const res = await fetch(`${API_URL}/generate-packing-list`, {
@@ -266,26 +152,28 @@ const App = () => {
 
       const data = await res.json();
 
-      if (!data.slug) {
-        setError("Сервер не вернул slug чеклиста");
-        return;
-      }
-
       setResult(data);
-      setSavedSlug(data.slug);
-      navigate(`/checklist/${data.slug}`);
+      setSavedSlug(data.slug || null);
     } catch (e) {
       setError("Ошибка при запросе к серверу");
     }
   };
 
-  const copyToClipboard = () => {
-    if (!savedSlug) return;
-    const url = `${window.location.origin}/checklist/${savedSlug}`;
-    navigator.clipboard
-      .writeText(url)
-      .then(() => alert("Ссылка скопирована!"))
-      .catch(() => alert("Не удалось скопировать ссылку"));
+  const [saveMsg, setSaveMsg] = useState(null);
+
+  const handleSaveToAccount = async () => {
+    if (!user || !token) {
+      setShowAuth(true);
+      return;
+    }
+    setSaveMsg(null);
+    try {
+      // Чеклист уже сохранён на сервере при генерации, просто показываем подтверждение
+      setSaveMsg("✅ Чеклист сохранён в вашем аккаунте!");
+      setTimeout(() => setSaveMsg(null), 3000);
+    } catch (e) {
+      setSaveMsg("❌ Ошибка сохранения");
+    }
   };
 
   const handleCheck = (item) => {
@@ -331,18 +219,48 @@ const App = () => {
   };
 
   return (
-    <div className={`container large ${result ? "expanded" : ""}`}>
-      {/* Auth header */}
-      <div className="user-header">
-        {user ? (
-          <>
-            <span className="user-greeting">👤 <strong>{user.username}</strong></span>
-            <button className="logout-btn" onClick={handleLogout}>Выйти</button>
-          </>
-        ) : (
-          <button className="auth-btn" onClick={() => setShowAuth(true)}>Войти</button>
-        )}
-      </div>
+    <>
+      {/* Navbar */}
+      <nav className="navbar">
+        <div className="navbar-logo" onClick={() => navigate("/")}>
+          <span>🧳</span> Luggify
+        </div>
+        <div className="navbar-user">
+          {user ? (
+            <>
+              <div className="navbar-profile" onClick={() => navigate("/profile")}>
+                <div className="navbar-avatar">
+                  {user.username.charAt(0).toUpperCase()}
+                </div>
+                <span className="navbar-username">{user.username}</span>
+              </div>
+              <button
+                className="navbar-logout-btn icon-btn"
+                onClick={handleLogout}
+                title="Выйти"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                  <polyline points="16 17 21 12 16 7"></polyline>
+                  <line x1="21" y1="12" x2="9" y2="12"></line>
+                </svg>
+              </button>
+            </>
+          ) : (
+            <button className="navbar-login-btn" onClick={() => setShowAuth(true)}>Войти</button>
+          )}
+        </div>
+      </nav>
 
       {showAuth && (
         <AuthModal
@@ -351,151 +269,146 @@ const App = () => {
         />
       )}
 
-      <h1
-        style={{ cursor: "pointer", userSelect: "none" }}
-        onClick={() => navigate("/")}
-      >
-        Luggify
-      </h1>
-
-      {!savedSlug && (
-        <>
-          <div className="input-group">
-            <CitySelect value={city} onSelect={setCity} />
-          </div>
-
-          <DateRangePicker onChange={(newDates) => setDates(newDates)} />
-
-          <button onClick={handleSubmit}>Сгенерировать список</button>
-        </>
-      )}
-
-      {error && <div className="error">{error}</div>}
-
-      {result && (
-        <div className="result">
-          {/* Многостолбцовый чеклист по категориям */}
-          {(() => {
-            const isMobile = window.innerWidth <= 700;
-            const isTablet = window.innerWidth > 700 && window.innerWidth <= 1100;
-            let items = (result.items || []).filter(item => !removedItems.includes(item));
-            let columns = 3;
-            if (isTablet) columns = 2;
-            if (isMobile) columns = 1;
-            const perCol = Math.ceil(items.length / columns);
-            const cols = Array.from({ length: columns }, (_, i) => items.slice(i * perCol, (i + 1) * perCol));
-            return (
+      <div className="page-wrapper">
+        {/* Profile Page */}
+        {page === "profile" ? (
+          <ProfilePage user={user} token={token} onLogout={handleLogout} />
+        ) : (
+          <>
+            {!result && (
               <>
-                <div className="checklist-multicolumn">
-                  {cols.map((col, idx) => (
-                    <div className="checklist-category" key={idx}>
-                      <div className="checklist">
-                        {col.map((item) => (
-                          <label
-                            key={item}
-                            className={`checklist-label${checkedItems[item] ? " checked" : ""}`}
-                          >
-                            <input
-                              type="checkbox"
-                              className="checklist-checkbox"
-                              checked={checkedItems[item] || false}
-                              onChange={() => handleCheck(item)}
-                            />
-                            {item}
-                            <button
-                              className="checklist-remove-btn"
-                              title="Удалить из чеклиста"
-                              onClick={e => { e.preventDefault(); handleRemoveItem(item); }}
-                              tabIndex={-1}
-                            >×</button>
-                          </label>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
+                <div className="hero">
+                  <h2>Куда собираемся?</h2>
+                  <p>Введите город и даты — мы соберём идеальный чеклист для вашей поездки</p>
                 </div>
-                <div className="checklist-actions">
-                  <button className="checklist-reset-btn" onClick={resetChecklist}>Сбросить отметки</button>
-                  <button className="checklist-reset-btn" onClick={() => setAddItemMode(v => !v)}>
-                    {addItemMode ? "Отмена" : "Добавить вещь"}
+
+                <div className="form-card">
+                  <div className="form-field">
+                    <CitySelect value={city} onSelect={setCity} />
+                  </div>
+                  <div className="form-field">
+                    <DateRangePicker onChange={(newDates) => setDates(newDates)} />
+                  </div>
+                  <button className="generate-btn" onClick={handleSubmit}>
+                    Сгенерировать ✨
                   </button>
-                  {addItemMode && (
-                    <>
-                      <input
-                        className="add-item-input"
-                        type="text"
-                        value={newItem}
-                        onChange={e => setNewItem(e.target.value)}
-                        placeholder="Новая вещь"
-                        onKeyDown={e => { if (e.key === "Enter") handleAddItem(); }}
-                        autoFocus
-                        style={{ marginLeft: 10, marginRight: 10, padding: "0.3rem 0.7rem", borderRadius: 8, border: "1.5px solid orange", fontSize: "1rem" }}
-                      />
-                      <button className="checklist-reset-btn" style={{ padding: "0.3rem 1.1rem" }} onClick={handleAddItem}>ОК</button>
-                    </>
-                  )}
-                  {removedItems.length > 0 && (
-                    <button className="checklist-reset-btn" onClick={handleRestoreAll}>
-                      Восстановить вещи
-                    </button>
-                  )}
                 </div>
               </>
-            );
-          })()}
-
-          {/* Кнопки управления чеклистом */}
-          {/* <div className="checklist-actions">
-            {removedItems.length > 0 && (
-              <button className="checklist-reset-btn" onClick={handleRestoreAll}>
-                Восстановить вещи
-              </button>
             )}
-            <button className="checklist-reset-btn" onClick={resetChecklist}>Сбросить отметки</button>
-          </div> */}
 
-          {/* Прогноз погоды */}
-          <div className="forecast">
-            <h3>Прогноз погоды</h3>
-            <div className="forecast-grid">
-              {result.daily_forecast.map((day) => (
-                <div key={day.date} className="forecast-card">
-                  <div className="forecast-date">{formatDate(day.date)}</div>
-                  <img
-                    src={`https://openweathermap.org/img/wn/${day.icon}@2x.png`}
-                    alt={day.conditions}
-                    className="forecast-icon"
-                  />
-                  <div className="forecast-conditions">{day.conditions}</div>
-                  <div className="forecast-temp">
-                    {day.temp_min.toFixed(1)}° / {day.temp_max.toFixed(1)}°C
+            {error && <div className="error-message">{error}</div>}
+
+            {result && (
+              <div className="results-section">
+                <h2>
+                  <span>{(result.city || city?.fullName).split(",")[0]}</span>
+                  <span className="checklist-dates">
+                    {new Date(result.start_date || dates.start).toLocaleDateString("ru-RU", { day: 'numeric', month: 'long' })}
+                    {" — "}
+                    {new Date(result.end_date || dates.end).toLocaleDateString("ru-RU", { day: 'numeric', month: 'long' })}
+                  </span>
+                </h2>
+
+                {/* Checklist Card */}
+                <div className="checklist-card">
+                  {(() => {
+                    const isMobile = window.innerWidth <= 600;
+                    const isTablet = window.innerWidth > 600 && window.innerWidth <= 900;
+                    let items = (result.items || []).filter(item => !removedItems.includes(item));
+                    let columns = 3;
+                    if (isTablet) columns = 2;
+                    if (isMobile) columns = 1;
+                    const perCol = Math.ceil(items.length / columns);
+                    const cols = Array.from({ length: columns }, (_, i) => items.slice(i * perCol, (i + 1) * perCol));
+                    return (
+                      <div className="checklist-multicolumn">
+                        {cols.map((col, idx) => (
+                          <div className="checklist-category" key={idx}>
+                            <div className="checklist">
+                              {col.map((item) => (
+                                <label
+                                  key={item}
+                                  className={`checklist-label${checkedItems[item] ? " checked" : ""}`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    className="checklist-checkbox"
+                                    checked={checkedItems[item] || false}
+                                    onChange={() => handleCheck(item)}
+                                  />
+                                  {item}
+                                  <button
+                                    className="checklist-remove-btn"
+                                    title="Удалить"
+                                    onClick={e => { e.preventDefault(); handleRemoveItem(item); }}
+                                    tabIndex={-1}
+                                  >×</button>
+                                </label>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+
+                  <div className="checklist-actions">
+                    <button className="action-btn" onClick={resetChecklist}>Сбросить отметки</button>
+                    <button className="action-btn" onClick={() => setAddItemMode(v => !v)}>
+                      {addItemMode ? "Отмена" : "+ Добавить вещь"}
+                    </button>
+                    {addItemMode && (
+                      <>
+                        <input
+                          className="add-item-input"
+                          type="text"
+                          value={newItem}
+                          onChange={e => setNewItem(e.target.value)}
+                          placeholder="Новая вещь"
+                          onKeyDown={e => { if (e.key === "Enter") handleAddItem(); }}
+                          autoFocus
+                        />
+                        <button className="action-btn primary" onClick={handleAddItem}>OK</button>
+                      </>
+                    )}
+                    {removedItems.length > 0 && (
+                      <button className="action-btn" onClick={handleRestoreAll}>
+                        Восстановить удалённые
+                      </button>
+                    )}
                   </div>
                 </div>
-              ))}
-            </div>
-          </div>
 
-          {savedSlug && (
-            <div className="share-box">
-              <p>Чеклист сохранён! Ваша ссылка:</p>
-              <div className="link-box">
-                <a
-                  href={`/checklist/${savedSlug}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {window.location.origin}/checklist/{savedSlug}
-                </a>
+                {/* Weather Forecast */}
+                <div className="forecast">
+                  <h3>🌤 <span>Прогноз погоды</span></h3>
+                  <div className="forecast-grid">
+                    {result.daily_forecast.map((day) => (
+                      <div key={day.date} className={`forecast-card${day.source === "historical" ? " forecast-historical" : ""}`}>
+                        <div className="forecast-date">{formatDate(day.date)}</div>
+
+                        <img
+                          src={`https://openweathermap.org/img/wn/${day.icon}@2x.png`}
+                          alt={day.condition}
+                          className="forecast-icon"
+                        />
+                        <div className="forecast-conditions">{day.condition}</div>
+                        <div className="forecast-temp">
+                          {day.temp_min.toFixed(1)}° / {day.temp_max.toFixed(1)}°C
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
               </div>
-              <button className="copy-button" onClick={copyToClipboard}>
-                Копировать ссылку
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+            )}
+          </>
+        )}
+      </div>
+    </>
   );
 };
 
 export default App;
+

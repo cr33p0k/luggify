@@ -1,0 +1,162 @@
+/* === ProfilePage === */
+.profile-page {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem;
+    animation: fadeInUp 0.5s ease;
+}
+
+.profile-header {
+    display: flex;
+    align-items: center;
+    gap: 1.2rem;
+    margin-bottom: 2rem;
+    padding: 1.5rem;
+    background: var(--bg-card, #141414);
+    border: 1px solid var(--border-subtle, rgba(255, 165, 0, 0.12));
+    border-radius: var(--radius-xl, 16px);
+}
+
+.profile-avatar {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--orange, #ff9900), var(--orange-light, #ffae42));
+    color: #0d0d0d;
+    font-size: 1.5rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.profile-info h2 {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: #f0f0f0;
+    margin: 0;
+}
+
+.profile-info p {
+    font-size: 0.85rem;
+    color: var(--text-secondary, #888);
+    margin: 0.2rem 0 0;
+}
+
+.profile-section-title {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: #f0f0f0;
+    margin-bottom: 1rem;
+}
+
+.profile-loading,
+.profile-error {
+    text-align: center;
+    padding: 2rem;
+    color: var(--text-secondary, #888);
+    font-size: 0.9rem;
+}
+
+.profile-error {
+    color: #ff4d4d;
+}
+
+.profile-empty,
+.profile-empty-list {
+    text-align: center;
+    padding: 3rem 1rem;
+}
+
+.profile-empty h2,
+.profile-empty-list p {
+    color: var(--text-secondary, #888);
+    margin-bottom: 1rem;
+}
+
+.profile-empty p {
+    color: #666;
+    font-size: 0.9rem;
+}
+
+/* Checklists grid */
+.checklists-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 1rem;
+}
+
+.checklist-preview-card {
+    background: var(--bg-card, #141414);
+    border: 1px solid var(--border-subtle, rgba(255, 165, 0, 0.12));
+    border-radius: var(--radius-lg, 14px);
+    padding: 1.2rem;
+    cursor: pointer;
+    transition: transform 0.15s, border-color 0.2s, box-shadow 0.2s;
+    position: relative;
+}
+
+.delete-btn {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: transparent;
+    border: none;
+    color: var(--text-secondary, #888);
+    font-size: 1.2rem;
+    cursor: pointer;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    opacity: 0;
+}
+
+.checklist-preview-card:hover .delete-btn {
+    opacity: 1;
+}
+
+.delete-btn:hover {
+    background: rgba(255, 77, 77, 0.15);
+    color: #ff4d4d;
+}
+
+.checklist-preview-card:hover {
+    transform: translateY(-3px);
+    border-color: var(--orange, #ff9900);
+    box-shadow: 0 8px 24px rgba(255, 153, 0, 0.12);
+}
+
+.preview-city {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #f0f0f0;
+    margin-bottom: 0.5rem;
+}
+
+.preview-dates {
+    font-size: 0.8rem;
+    color: var(--text-secondary, #888);
+    margin-bottom: 0.4rem;
+}
+
+.preview-temp {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--orange, #ff9900);
+    margin-bottom: 0.3rem;
+}
+
+.preview-items {
+    font-size: 0.78rem;
+    color: #666;
+}
+
+@media (max-width: 600px) {
+    .checklists-grid {
+        grid-template-columns: 1fr;
+    }
+}
