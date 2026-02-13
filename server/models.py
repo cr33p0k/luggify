@@ -1,6 +1,22 @@
-from sqlalchemy import Column, Integer, String, Date, Float, Text
+from sqlalchemy import Column, Integer, String, Date, Float, DateTime, ForeignKey, func
 from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.orm import relationship
+from datetime import datetime
 from database import Base
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    username = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+    # Связь с чеклистами
+    checklists = relationship("Checklist", back_populates="user")
+
 
 class Checklist(Base):
     __tablename__ = "checklists"
@@ -17,3 +33,7 @@ class Checklist(Base):
     checked_items = Column(ARRAY(String), nullable=True)
     removed_items = Column(ARRAY(String), nullable=True)
     added_items = Column(ARRAY(String), nullable=True)
+
+    # Привязка к пользователю (nullable — для обратной совместимости)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    user = relationship("User", back_populates="checklists")

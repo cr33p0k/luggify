@@ -1,6 +1,38 @@
 from typing import Optional, List
-from pydantic import BaseModel
-from datetime import date
+from pydantic import BaseModel, EmailStr
+from datetime import date, datetime
+
+
+# === User схемы ===
+
+class UserCreate(BaseModel):
+    email: str
+    username: str
+    password: str
+
+
+class UserLogin(BaseModel):
+    email: str
+    password: str
+
+
+class UserOut(BaseModel):
+    id: int
+    email: str
+    username: str
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserOut
+
+
+# === Checklist схемы ===
 
 class DailyForecast(BaseModel):
     date: date
@@ -8,6 +40,7 @@ class DailyForecast(BaseModel):
     icon: str
     temp_min: float
     temp_max: float
+
 
 class ChecklistCreate(BaseModel):
     city: str
@@ -20,6 +53,8 @@ class ChecklistCreate(BaseModel):
     removed_items: Optional[List[str]] = None
     added_items: Optional[List[str]] = None
     tg_user_id: Optional[str] = None
+    user_id: Optional[int] = None
+
 
 class ChecklistOut(ChecklistCreate):
     slug: str
