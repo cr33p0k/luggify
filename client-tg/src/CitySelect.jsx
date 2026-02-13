@@ -3,10 +3,12 @@ import AsyncSelect from "react-select/async";
 import "./CitySelect.css";
 
 
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
 const fetchCitiesWithCountry = async (inputValue) => {
   if (!inputValue) return [];
   try {
-    const res = await fetch(`https://luggify.onrender.com/geo/cities-autocomplete?namePrefix=${inputValue}`);
+    const res = await fetch(`${API_URL}/geo/cities-autocomplete?namePrefix=${inputValue}`);
     const data = await res.json();
     return data.map((city) => ({
       label: city.fullName,

@@ -1,0 +1,36 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: luggify-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: luggify
+      POSTGRES_PASSWORD: luggify
+      POSTGRES_DB: luggify_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - luggify_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U luggify -d luggify_db" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: luggify-server
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://luggify:luggify@db:5432/luggify_db
+      OPENWEATHER_API_KEY: ${OPENWEATHER_API_KEY}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  luggify_pgdata:

@@ -5,6 +5,8 @@ import DateRangePicker from "./DateRangePicker";
 
 import "./App.css";
 
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
 const App = () => {
   const { id } = useParams(); // slug из URL
   const navigate = useNavigate();
@@ -26,7 +28,7 @@ const App = () => {
   useEffect(() => {
     const fetchChecklistAndForecast = async () => {
       try {
-        const res = await fetch(`https://luggify.onrender.com/checklist/${id}`);
+        const res = await fetch(`${API_URL}/checklist/${id}`);
         if (!res.ok) throw new Error("Чеклист не найден");
 
         const data = await res.json();
@@ -220,7 +222,7 @@ const App = () => {
     }
 
     try {
-      const res = await fetch("https://luggify.onrender.com/generate-packing-list", {
+      const res = await fetch(`${API_URL}/generate-packing-list`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -384,7 +386,7 @@ const App = () => {
                         autoFocus
                         style={{ marginLeft: 10, marginRight: 10, padding: "0.3rem 0.7rem", borderRadius: 8, border: "1.5px solid orange", fontSize: "1rem" }}
                       />
-                      <button className="checklist-reset-btn" style={{padding: "0.3rem 1.1rem"}} onClick={handleAddItem}>ОК</button>
+                      <button className="checklist-reset-btn" style={{ padding: "0.3rem 1.1rem" }} onClick={handleAddItem}>ОК</button>
                     </>
                   )}
                   {removedItems.length > 0 && (

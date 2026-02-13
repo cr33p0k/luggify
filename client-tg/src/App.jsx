@@ -3,6 +3,8 @@ import CitySelect from "./CitySelect";
 import DateRangePicker from "./DateRangePicker";
 import "./App.css";
 
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
 function App() {
   const [city, setCity] = useState(null);
   const [dates, setDates] = useState({ start: null, end: null });
@@ -70,7 +72,7 @@ function App() {
     }
     setLoading(true);
     try {
-      const res = await fetch("https://luggify.onrender.com/generate-packing-list", {
+      const res = await fetch(`${API_URL}/generate-packing-list`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -89,7 +91,7 @@ function App() {
       // Сохраняем чеклист для Telegram пользователя
       if (isTg && tgUser && tgUser.id) {
         setSaving(true);
-        fetch("https://luggify.onrender.com/save-tg-checklist", {
+        fetch(`${API_URL}/save-tg-checklist`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -116,7 +118,7 @@ function App() {
   // syncChecklistState больше не вызывается из обработчиков изменений, только из handleSaveChecklistState
   const syncChecklistState = async (slug, checked, removed, added, items) => {
     try {
-      await fetch(`https://luggify.onrender.com/checklist/${slug}/state`, {
+      await fetch(`${API_URL}/checklist/${slug}/state`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -126,7 +128,7 @@ function App() {
           items: items,
         }),
       });
-    } catch {}
+    } catch { }
   };
 
   // --- ОБНОВЛЯЕМ handleCheck ---
@@ -202,7 +204,7 @@ function App() {
     setShowChecklists(true);
     setError(null);
     try {
-      const res = await fetch(`https://luggify.onrender.com/tg-checklists/${String(tgUser.id)}`);
+      const res = await fetch(`${API_URL}/tg-checklists/${String(tgUser.id)}`);
       if (!res.ok) {
         setError("Ошибка при загрузке чеклистов");
         setMyChecklists([]);
@@ -238,7 +240,7 @@ function App() {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("https://luggify.onrender.com/generate-packing-list", {
+      const res = await fetch(`${API_URL}/generate-packing-list`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -251,7 +253,7 @@ function App() {
         const data = await res.json();
         setResult(prev => prev ? { ...prev, daily_forecast: data.daily_forecast } : prev);
       }
-    } catch {}
+    } catch { }
     setLoading(false);
   };
 
@@ -261,7 +263,7 @@ function App() {
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch("https://luggify.onrender.com/save-tg-checklist", {
+      const res = await fetch(`${API_URL}/save-tg-checklist`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -293,7 +295,7 @@ function App() {
     setChecklistsLoading(true);
     setError(null);
     try {
-      const res = await fetch(`https://luggify.onrender.com/checklist/${slug}`, {
+      const res = await fetch(`${API_URL}/checklist/${slug}`, {
         method: 'DELETE',
       });
       if (res.ok) {
@@ -312,7 +314,7 @@ function App() {
   const handleSaveChecklistState = async () => {
     if (!result || !result.slug) return;
     try {
-      const response = await fetch(`https://luggify.onrender.com/checklist/${result.slug}/state`, {
+      const response = await fetch(`${API_URL}/checklist/${result.slug}/state`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -341,7 +343,7 @@ function App() {
         setSaveStateSuccess(true);
         setTimeout(() => setSaveStateSuccess(false), 1500);
       }
-    } catch {}
+    } catch { }
   };
 
   return (
@@ -476,7 +478,7 @@ function App() {
                   autoFocus
                   style={{ marginLeft: 10, marginRight: 10, padding: "0.3rem 0.7rem", borderRadius: 8, border: "1.5px solid orange", fontSize: "1rem" }}
                 />
-                <button className="checklist-reset-btn" style={{padding: "0.3rem 1.1rem"}} onClick={handleAddItem}>ОК</button>
+                <button className="checklist-reset-btn" style={{ padding: "0.3rem 1.1rem" }} onClick={handleAddItem}>ОК</button>
               </>
             )}
           </div>
