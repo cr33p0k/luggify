@@ -20,21 +20,41 @@ const fetchCitiesWithCountry = async (inputValue) => {
   }
 };
 
-const CitySelect = ({ onSelect }) => (
-  <div className="input-group">
-    <label>Город</label>
-    <AsyncSelect
-      classNamePrefix="react-select"
-      cacheOptions
-      loadOptions={fetchCitiesWithCountry}
-      onChange={(option) => onSelect(option ? option.value : null)}
-      placeholder="Начните вводить город..."
-      noOptionsMessage={() => "Город не найден"}
-      loadingMessage={() => "Поиск..."}
-      isClearable
-      menuPlacement="auto"
-    />
-  </div>
-);
+const TRANSLATIONS = {
+  ru: {
+    label: "Город",
+    placeholder: "Начните вводить город...",
+    notFound: "Город не найден",
+    loading: "Поиск...",
+  },
+  en: {
+    label: "City",
+    placeholder: "Start typing city...",
+    notFound: "City not found",
+    loading: "Searching...",
+  }
+};
+
+const CitySelect = ({ value, onSelect, lang = "ru" }) => {
+  const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
+
+  return (
+    <div className="input-group">
+      <label>{t.label}</label>
+      <AsyncSelect
+        classNamePrefix="react-select"
+        cacheOptions
+        loadOptions={fetchCitiesWithCountry}
+        onChange={(option) => onSelect(option ? option.value : null)}
+        value={value ? { label: value.label || value.fullName, value: value } : null}
+        placeholder={t.placeholder}
+        noOptionsMessage={() => t.notFound}
+        loadingMessage={() => t.loading}
+        isClearable
+        menuPlacement="auto"
+      />
+    </div>
+  );
+};
 
 export default CitySelect;

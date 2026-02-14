@@ -28,6 +28,7 @@ class UserOut(BaseModel):
     email: Optional[str] = None
     username: str
     tg_id: Optional[str] = None
+    is_stats_public: bool = True
     created_at: Optional[datetime] = None
 
     class Config:
@@ -55,13 +56,14 @@ class ChecklistCreate(BaseModel):
     start_date: date
     end_date: date
     items: List[str]
-    avg_temp: float
-    conditions: List[str]
+    avg_temp: Optional[float] = None
+    conditions: Optional[List[str]] = None
     checked_items: Optional[List[str]] = None
     removed_items: Optional[List[str]] = None
     added_items: Optional[List[str]] = None
     tg_user_id: Optional[str] = None
     user_id: Optional[int] = None
+    is_public: bool = True
 
     class Config:
         from_attributes = True

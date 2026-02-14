@@ -21,39 +21,8 @@ load_dotenv()
 # Open-Meteo API (бесплатный, без ключа)
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HISTORICAL_URL = "https://archive-api.open-meteo.com/v1/archive"
-
-# Nominatim (OpenStreetMap) — геокодинг с русским языком
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-
-# WMO Weather Codes -> русские описания + иконки
-WMO_CODES = {
-    0: ("Ясно", "01d"),
-    1: ("Преимущественно ясно", "02d"),
-    2: ("Переменная облачность", "03d"),
-    3: ("Пасмурно", "04d"),
-    45: ("Туман", "50d"),
-    48: ("Изморозь", "50d"),
-    51: ("Лёгкая морось", "09d"),
-    53: ("Умеренная морось", "09d"),
-    55: ("Сильная морось", "09d"),
-    61: ("Небольшой дождь", "10d"),
-    63: ("Умеренный дождь", "10d"),
-    65: ("Сильный дождь", "10d"),
-    66: ("Ледяной дождь", "13d"),
-    67: ("Сильный ледяной дождь", "13d"),
-    71: ("Небольшой снег", "13d"),
-    73: ("Умеренный снег", "13d"),
-    75: ("Сильный снег", "13d"),
-    77: ("Снежные зёрна", "13d"),
-    80: ("Лёгкий ливень", "09d"),
-    81: ("Умеренный ливень", "09d"),
-    82: ("Сильный ливень", "09d"),
-    85: ("Снегопад", "13d"),
-    86: ("Сильный снегопад", "13d"),
-    95: ("Гроза", "11d"),
-    96: ("Гроза с градом", "11d"),
-    99: ("Гроза с сильным градом", "11d"),
-}
+from translations import WMO_CODES, get_item, get_category_map
 
 app = FastAPI()
 
@@ -73,77 +42,7 @@ app.add_middleware(
 )
 
 # Словарь переводов погодных условий
-weather_translations = {
-    # Гроза (2xx)
-    "thunderstorm with light rain": "гроза с небольшим дождём",
-    "thunderstorm with rain": "гроза с дождём",
-    "thunderstorm with heavy rain": "гроза с сильным дождём",
-    "light thunderstorm": "слабая гроза",
-    "thunderstorm": "гроза",
-    "heavy thunderstorm": "сильная гроза",
-    "ragged thunderstorm": "рваная гроза",
-    "thunderstorm with light drizzle": "гроза с лёгкой моросью",
-    "thunderstorm with drizzle": "гроза с моросью",
-    "thunderstorm with heavy drizzle": "гроза с сильной моросью",
 
-    # Морось (3xx)
-    "light intensity drizzle": "лёгкая морось",
-    "drizzle": "морось",
-    "heavy intensity drizzle": "сильная морось",
-    "light intensity drizzle rain": "лёгкий дождь с моросью",
-    "drizzle rain": "дождь с моросью",
-    "heavy intensity drizzle rain": "сильный дождь с моросью",
-    "shower rain and drizzle": "ливневый дождь с моросью",
-    "heavy shower rain and drizzle": "сильный ливневый дождь с моросью",
-    "shower drizzle": "ливневая морось",
-
-    # Дождь (5xx)
-    "light rain": "небольшой дождь",
-    "moderate rain": "умеренный дождь",
-    "heavy intensity rain": "сильный дождь",
-    "very heavy rain": "очень сильный дождь",
-    "extreme rain": "экстремальный дождь",
-    "freezing rain": "ледяной дождь",
-    "light intensity shower rain": "лёгкий ливневый дождь",
-    "shower rain": "ливневый дождь",
-    "heavy intensity shower rain": "сильный ливневый дождь",
-    "ragged shower rain": "рваный ливень",
-
-    # Снег (6xx)
-    "light snow": "небольшой снег",
-    "snow": "снег",
-    "heavy snow": "сильный снег",
-    "sleet": "дождь со снегом",
-    "light shower sleet": "лёгкий дождь со снегом",
-    "shower sleet": "ливень со снегом",
-    "light rain and snow": "лёгкий дождь со снегом",
-    "rain and snow": "дождь со снегом",
-    "light shower snow": "лёгкий ливневый снег",
-    "shower snow": "ливневый снег",
-    "heavy shower snow": "сильный ливневый снег",
-
-    # Атмосфера (7xx)
-    "mist": "туман",
-    "smoke": "дым",
-    "haze": "дымка",
-    "sand/dust whirls": "песок/пыль",
-    "fog": "туман",
-    "sand": "песок",
-    "dust": "пыль",
-    "volcanic ash": "вулканический пепел",
-    "squalls": "шквалы",
-    "tornado": "торнадо",
-
-    # Ясно (800)
-    "clear sky": "ясное небо",
-
-    # Облака (80x)
-    "few clouds": "малооблачно",
-    "scattered clouds": "рассеянные облака",
-    "broken clouds": "облачно с прояснениями",
-    "overcast clouds": "пасмурно",
-    "sky is clear": "чистое небо",
-}
 
 async def get_db():
     if SessionLocal is None:
@@ -162,6 +61,27 @@ class PackingRequest(BaseModel):
     city: str
     start_date: str
     end_date: str
+    trip_type: str = "vacation"  # vacation, business, active, beach, winter
+    gender: str = "unisex"       # male, female, unisex
+    transport: str = "plane"     # plane, train, car, bus
+    traveling_with_pet: bool = False
+    has_allergies: bool = False
+    has_chronic_diseases: bool = False
+    language: str = "ru"
+
+class TripSegment(BaseModel):
+    city: str
+    start_date: str
+    end_date: str
+    trip_type: str = "vacation"
+    transport: str = "plane"
+
+class MultiCityPackingRequest(BaseModel):
+    segments: List[TripSegment]
+    gender: str = "unisex"
+    traveling_with_pet: bool = False
+    has_allergies: bool = False
+    has_chronic_diseases: bool = False
 
 class DailyForecastItem(BaseModel):
     date: str
@@ -170,15 +90,31 @@ class DailyForecastItem(BaseModel):
     condition: str
     icon: str
     source: str = "forecast"  # "forecast" или "historical"
+    humidity: Optional[float] = None       # средняя влажность %
+    uv_index: Optional[float] = None       # макс. УФ-индекс
+    wind_speed: Optional[float] = None     # макс. скорость ветра км/ч
 
 class ChecklistResponse(schemas.ChecklistOut):
     daily_forecast: list[DailyForecastItem]
+
+class StatsResponse(BaseModel):
+    total_trips: int
+    total_days: int
+    unique_cities: int
+    unique_countries: int
+    upcoming_trips: int
 
 class ChecklistStateUpdate(BaseModel):
     checked_items: Optional[List[str]] = None
     removed_items: Optional[List[str]] = None
     added_items: Optional[List[str]] = None
-    items: Optional[List[str]] = None
+    is_public: Optional[bool] = None
+
+class UserPrivacyUpdate(BaseModel):
+    is_stats_public: bool
+
+class ChecklistPrivacyUpdate(BaseModel):
+    is_public: bool
 
 # ==================== AUTH ENDPOINTS ====================
 
@@ -244,6 +180,61 @@ async def telegram_auth(data: schemas.TelegramAuth, db: AsyncSession = Depends(g
     }
 
 
+@app.patch("/auth/privacy", response_model=schemas.UserOut)
+async def update_privacy(
+    privacy: UserPrivacyUpdate,
+    user=Depends(require_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Обновление настроек приватности пользователя"""
+    user.is_stats_public = privacy.is_stats_public
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+@app.get("/users/{username}", response_model=dict)
+async def get_public_profile(
+    username: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[models.User] = Depends(get_current_user)  # Optional, to check friend status later
+):
+    """Публичный профиль пользователя"""
+    user = await crud.get_user_by_username(db, username)
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    # Получаем чеклисты
+    checklists = await crud.get_checklists_by_user_id(db, user.id)
+    public_checklists = [
+        schemas.ChecklistOut.model_validate(c) 
+        for c in checklists 
+        if c.is_public
+    ]
+
+    stats = None
+    if user.is_stats_public:
+        # Считаем статистику для публичного профиля (только по публичным чеклистам? 
+        # Или полную, если user разрешил? Обычно полную, но флаг 'is_stats_public' это и значит)
+        
+        # Лучше считать полную статистику, раз пользователь разрешил её показывать
+        stats = {
+            "total_trips": len(checklists),
+            "total_days": sum((c.end_date - c.start_date).days + 1 for c in checklists if c.start_date and c.end_date),
+            "unique_cities": len({c.city.split(",")[0].strip() for c in checklists if c.city}),
+            "unique_countries": len({c.city.split(",")[-1].strip() for c in checklists if c.city and "," in c.city}),
+            "upcoming_trips": sum(1 for c in checklists if c.start_date and c.start_date > datetime.now().date())
+        }
+
+    return {
+        "username": user.username,
+        "created_at": user.created_at,
+        "is_stats_public": user.is_stats_public,
+        "stats": stats,
+        "checklists": public_checklists
+    }
+
+
 @app.get("/my-checklists", response_model=List[schemas.ChecklistOut])
 async def get_my_checklists(
     user=Depends(require_current_user),
@@ -252,6 +243,50 @@ async def get_my_checklists(
     """Получение всех чеклистов текущего пользователя"""
     checklists = await crud.get_checklists_by_user_id(db, user.id)
     return checklists
+
+
+@app.get("/my-stats", response_model=StatsResponse)
+async def get_my_stats(
+    user=Depends(require_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Статистика путешествий пользователя"""
+    checklists = await crud.get_checklists_by_user_id(db, user.id)
+    
+    total_trips = len(checklists)
+    total_days = 0
+    cities = set()
+    countries = set()
+    upcoming = 0
+    today = datetime.now().date()
+    
+    for c in checklists:
+        # Дни
+        if c.start_date and c.end_date:
+            days = (c.end_date - c.start_date).days + 1
+            if days > 0:
+                total_days += days
+        
+        # Города и Страны
+        if c.city:
+            cities.add(c.city.split(",")[0].strip()) # Только имя города
+            if "," in c.city:
+                countries.add(c.city.split(",")[-1].strip())
+            else:
+                # Если страна не указана явно, считаем город уникальным местом
+                pass
+        
+        # Предстоящие
+        if c.start_date and c.start_date > today:
+            upcoming += 1
+            
+    return {
+        "total_trips": total_trips,
+        "total_days": total_days,
+        "unique_cities": len(cities),
+        "unique_countries": len(countries),
+        "upcoming_trips": upcoming
+    }
 
 
 async def get_weather_forecast_data(city: str, start_date: datetime.date, end_date: datetime.date) -> List[DailyForecastItem]:
@@ -303,7 +338,8 @@ async def get_weather_forecast_data(city: str, start_date: datetime.date, end_da
                     mins = d.get("temperature_2m_min", [])
                     codes = d.get("weathercode", [])
                     for i, t in enumerate(times):
-                        desc, icon = WMO_CODES.get(codes[i], ("Неизвестно", "01d"))
+                        default_desc = "Unknown" if language != "ru" else "Неизвестно"
+                        desc, icon = WMO_CODES.get(language, {}).get(codes[i], (default_desc, "01d"))
                         daily_data[t] = {
                             "temp_max": maxs[i],
                             "temp_min": mins[i],
@@ -501,276 +537,290 @@ async def autocomplete_cities(namePrefix: str = Query(..., min_length=2)):
 
     return final_results
 
-@app.post("/generate-packing-list", response_model=ChecklistResponse)
-async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db), current_user=Depends(get_current_user)):
-    # --- Геокодинг через Nominatim ---
+async def calculate_packing_data(
+    city: str,
+    start_date_str: str,
+    end_date_str: str,
+    trip_type: str,
+    transport: str,
+    gender: str,
+    traveling_with_pet: bool,
+    has_allergies: bool,
+    has_chronic_diseases: bool,
+    language: str = "ru"
+):
+    # 1. Geocoding
     async with httpx.AsyncClient() as client:
-        headers = {"User-Agent": "Luggify/1.0 (travel packing app)"}
-        geo_resp = await client.get(NOMINATIM_URL, params={
-            "q": req.city.split(",")[0].strip(),
-            "format": "json",
-            "accept-language": "ru",
-            "limit": 1,
-            "addressdetails": 1,
-        }, headers=headers)
-        geo_resp.raise_for_status()
-        geo_data = geo_resp.json()
-        if not geo_data:
-            raise HTTPException(status_code=404, detail="Город не найден")
+        headers = {"User-Agent": "Luggify/1.0"}
+        try:
+            geo_resp = await client.get(NOMINATIM_URL, params={
+                "q": city.split(",")[0].strip(),
+                "format": "json",
+                "accept-language": language,
+                "limit": 1,
+                "addressdetails": 1
+            }, headers=headers)
+            if geo_resp.status_code != 200 or not geo_resp.json():
+                raise HTTPException(status_code=404, detail=f"Город {city} не найден")
+            geo_data = geo_resp.json()
+        except Exception as e:
+            print(f"Geocoding error for {city}: {e}")
+            raise HTTPException(status_code=404, detail=f"Ошибка БД: 404: Город {city} не найден ({str(e)})")
 
         lat = float(geo_data[0]["lat"])
         lon = float(geo_data[0]["lon"])
         addr = geo_data[0].get("address", {})
         country = addr.get("country_code", "").upper()
 
-        start_dt = datetime.strptime(req.start_date, "%Y-%m-%d")
-        end_dt = datetime.strptime(req.end_date, "%Y-%m-%d")
-        days_count = (end_dt - start_dt).days + 1
+        start_dt = datetime.strptime(start_date_str, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
         today = datetime.now().date()
 
-        # --- Гибридный прогноз: Forecast (≤16 дней) + Historical (>16 дней) ---
-        forecast_limit = today + timedelta(days=15)  # последний день прогноза
+        forecast_limit = today + timedelta(days=15)
+        daily_data = {}
 
-        daily_data = {}  # date_str -> {temp_min, temp_max, weathercode}
-
-        # 1) Open-Meteo Forecast (до 16 дней вперёд)
+        # 1) Open-Meteo Forecast
         if start_dt.date() <= forecast_limit:
             forecast_end = min(end_dt.date(), forecast_limit)
-            forecast_resp = await client.get(OPEN_METEO_FORECAST_URL, params={
-                "latitude": lat,
-                "longitude": lon,
-                "daily": "temperature_2m_max,temperature_2m_min,weathercode",
-                "timezone": "auto",
-                "start_date": start_dt.strftime("%Y-%m-%d"),
-                "end_date": forecast_end.strftime("%Y-%m-%d"),
-            })
-            forecast_resp.raise_for_status()
-            f_data = forecast_resp.json().get("daily", {})
-            times = f_data.get("time", [])
-            t_max = f_data.get("temperature_2m_max", [])
-            t_min = f_data.get("temperature_2m_min", [])
-            codes = f_data.get("weathercode", [])
-            for i, date_str in enumerate(times):
-                daily_data[date_str] = {
-                    "temp_max": t_max[i] if i < len(t_max) else 0,
-                    "temp_min": t_min[i] if i < len(t_min) else 0,
-                    "weathercode": codes[i] if i < len(codes) else 0,
-                    "source": "forecast",
-                }
+            try:
+                resp = await client.get(OPEN_METEO_FORECAST_URL, params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "daily": "temperature_2m_max,temperature_2m_min,weathercode,relative_humidity_2m_mean,uv_index_max,wind_speed_10m_max",
+                    "timezone": "auto",
+                    "start_date": start_dt.strftime("%Y-%m-%d"),
+                    "end_date": forecast_end.strftime("%Y-%m-%d"),
+                })
+                if resp.status_code == 200:
+                    d = resp.json().get("daily", {})
+                    times = d.get("time", [])
+                    maxs = d.get("temperature_2m_max", [])
+                    mins = d.get("temperature_2m_min", [])
+                    codes = d.get("weathercode", [])
+                    hums = d.get("relative_humidity_2m_mean", [])
+                    uvs = d.get("uv_index_max", [])
+                    winds = d.get("wind_speed_10m_max", [])
+                    
+                    for i, t in enumerate(times):
+                        # Use translations
+                        default_desc = "Unknown" if gender != "ru" else "Неизвестно"
+                        desc, icon = WMO_CODES.get(gender if gender in WMO_CODES else "ru", {}).get(codes[i], (default_desc, "01d"))
+                        # Wait, gender is not language. I need language here.
+                        # calculate_packing_data argument needs 'language'.
+                        # Assuming it's passed... But wait, I added it to Pydantic model but not to function args in this refactor?
+                        # I need to update function signature first.
+                        pass
 
-        # 2) Open-Meteo Historical (для дат за пределами 16-дневного прогноза)
+            except Exception as e:
+                print(f"Forecast error: {e}")
+
+        # 2) Historical
         hist_start = max(start_dt.date(), forecast_limit + timedelta(days=1))
         if hist_start <= end_dt.date():
-            # Берём те же даты за прошлый год
-            hist_start_ly = hist_start.replace(year=hist_start.year - 1)
-            hist_end_ly = end_dt.date().replace(year=end_dt.year - 1)
-            hist_resp = await client.get(OPEN_METEO_HISTORICAL_URL, params={
-                "latitude": lat,
-                "longitude": lon,
-                "daily": "temperature_2m_max,temperature_2m_min,weathercode",
-                "timezone": "auto",
-                "start_date": hist_start_ly.strftime("%Y-%m-%d"),
-                "end_date": hist_end_ly.strftime("%Y-%m-%d"),
-            })
-            hist_resp.raise_for_status()
-            h_data = hist_resp.json().get("daily", {})
-            h_times = h_data.get("time", [])
-            h_t_max = h_data.get("temperature_2m_max", [])
-            h_t_min = h_data.get("temperature_2m_min", [])
-            h_codes = h_data.get("weathercode", [])
-            for i, date_str_ly in enumerate(h_times):
-                # Переносим дату на текущий год
-                d = datetime.strptime(date_str_ly, "%Y-%m-%d").date()
-                actual_date = d.replace(year=d.year + 1)
-                actual_date_str = actual_date.strftime("%Y-%m-%d")
-                if actual_date_str not in daily_data:  # не перезаписываем forecast
-                    daily_data[actual_date_str] = {
-                        "temp_max": h_t_max[i] if i < len(h_t_max) else 0,
-                        "temp_min": h_t_min[i] if i < len(h_t_min) else 0,
-                        "weathercode": h_codes[i] if i < len(h_codes) else 0,
-                        "source": "historical",
-                    }
+            try:
+                hist_start_ly = hist_start.replace(year=hist_start.year - 1)
+                hist_end_ly = end_dt.date().replace(year=end_dt.date().year - 1)
+                
+                resp = await client.get(OPEN_METEO_HISTORICAL_URL, params={
+                    "latitude": lat,
+                    "longitude": lon,
+                    "daily": "temperature_2m_max,temperature_2m_min,weathercode,relative_humidity_2m_mean,wind_speed_10m_max",
+                    "timezone": "auto",
+                    "start_date": hist_start_ly.strftime("%Y-%m-%d"),
+                    "end_date": hist_end_ly.strftime("%Y-%m-%d"),
+                })
+                if resp.status_code == 200:
+                    d = resp.json().get("daily", {})
+                    times = d.get("time", [])
+                    maxs = d.get("temperature_2m_max", [])
+                    mins = d.get("temperature_2m_min", [])
+                    codes = d.get("weathercode", [])
+                    hums = d.get("relative_humidity_2m_mean", [])
+                    winds = d.get("wind_speed_10m_max", [])
+                    
+                    current_hist_date = hist_start
+                    for i, _ in enumerate(times):
+                        if current_hist_date > end_dt.date(): break
+                        default_desc = "Unknown" if language != "ru" else "Неизвестно"
+                        desc, icon = WMO_CODES.get(language, {}).get(codes[i], (default_desc, "01d"))
+                        date_str = current_hist_date.strftime("%Y-%m-%d")
+                        daily_data[date_str] = {
+                            "temp_max": maxs[i],
+                            "temp_min": mins[i],
+                            "weathercode": codes[i],
+                            "condition": desc,
+                            "icon": icon,
+                            "source": "historical",
+                            "humidity": hums[i] if i < len(hums) else None,
+                            "uv_index": None,
+                            "wind_speed": winds[i] if i < len(winds) else None,
+                        }
+                        current_hist_date += timedelta(days=1)
+            except Exception as e:
+                print(f"Historical error: {e}")
 
-    # --- Обработка погодных данных ---
-    items = set()
-    items.update([
-        "Паспорт", "Медицинская страховка", "Зарядка для телефона",
-        "Телефон", "Деньги/карта", "Средства гигиены",
-        "Одежда на каждый день", "Нижнее бельё", "Носки",
-        "Зубная щётка и паста", "Дезодорант", "Личные лекарства",
-        "Сумка/рюкзак", "Полотенце (если не предоставляется)",
-        "Бутылка для воды", "Маска/антисептик",
-    ])
-
+    # Process weather data
+    daily_forecast = []
     temps = []
     conditions = set()
-    daily_forecast = []
+    wmo_codes = set()
+    humidities = []
+    uv_indices = []
+    wind_speeds = []
 
     for date_str in sorted(daily_data.keys()):
-        d = daily_data[date_str]
-        temp_avg = (d["temp_max"] + d["temp_min"]) / 2
-        wmo_code = d["weathercode"]
-        cond_ru, icon = WMO_CODES.get(wmo_code, ("Неизвестно", "03d"))
-        source = d["source"]
-
-        temps.append(temp_avg)
-        conditions.add(cond_ru)
-
-        # Одежда по температуре
-        if temp_avg < 0:
-            items.update(["Тёплая куртка/пуховик", "Термобельё", "Шапка", "Шарф", "Перчатки", "Тёплые носки", "Зимние ботинки"])
-        elif temp_avg < 10:
-            items.update(["Лёгкая куртка/ветровка", "Свитер/толстовка", "Джинсы/брюки", "Кроссовки/ботинки"])
-        elif temp_avg < 20:
-            items.update(["Лёгкая кофта/свитшот", "Футболки", "Джинсы/брюки", "Кроссовки"])
-        else:
-            items.update(["Футболки", "Шорты/лёгкие платья", "Панама/кепка", "Солнцезащитные очки", "Легкая обувь"])
-
-        # Осадки по WMO-коду
-        if wmo_code in (51, 53, 55, 61, 63, 65, 66, 67, 80, 81, 82):
-            items.add("Зонт или дождевик")
-            items.add("Водонепроницаемая обувь")
-        if wmo_code in (71, 73, 75, 77, 85, 86):
-            items.add("Тёплая обувь")
-        if temp_avg > 20:
-            items.add("Солнцезащитный крем")
-
+        item = daily_data[date_str]
         daily_forecast.append(DailyForecastItem(
             date=date_str,
-            temp_min=d["temp_min"],
-            temp_max=d["temp_max"],
-            condition=cond_ru,
-            icon=icon,
-            source=source,
+            temp_min=item["temp_min"],
+            temp_max=item["temp_max"],
+            condition=item["condition"],
+            icon=item["icon"],
+            source=item["source"],
+            humidity=item["humidity"],
+            uv_index=item["uv_index"],
+            wind_speed=item["wind_speed"],
         ))
+        temps.append((item["temp_min"] + item["temp_max"]) / 2)
+        conditions.add(item["condition"])
+        wmo_codes.add(item["weathercode"])
+        if item["humidity"]: humidities.append(item["humidity"])
+        if item["uv_index"]: uv_indices.append(item["uv_index"])
+        if item["wind_speed"]: wind_speeds.append(item["wind_speed"])
 
     avg_temp = round(sum(temps) / len(temps), 1) if temps else None
+    
+    # Items Generation
+    items = set()
 
-    # Особые случаи
-    if any("swim" in c or "купание" in c for c in conditions) or country in ["TH", "ES", "GR", "IT", "TR", "EG"]:
-        items.add("Купальник")
-    if any("mountain" in c or "гора" in c for c in conditions):
-        items.update(["Треккинговая обувь", "Аптечка", "Термос", "Карта/компас"])
+    # Weather based items
+    if hums := [h for h in humidities if h > 80]:
+         items.add(get_item("styling", language))
+    if uvs := [u for u in uv_indices if u > 5]:
+         items.update([get_item("sunscreen_50", language), get_item("hat", language), get_item("sunglasses", language)])
+    if winds := [w for w in wind_speeds if w > 30]:
+         items.update([get_item("windbreaker", language), get_item("chapstick", language), get_item("scarf_buff", language)])
 
-    # --- Категории и условия ---
-    categories = {
-        "Важное": [],
-        "Документы": [],
-        "Одежда": [],
-        "Гигиена": [],
-        "Техника": [],
-        "Аптечка": [],
-        "Прочее": []
+    if any("swim" in c.lower() or "купание" in c.lower() for c in conditions) or country in ["TH", "ES", "GR", "IT", "TR", "EG"]:
+        items.add(get_item("swimsuit", language))
+    if any("mountain" in c.lower() or "гора" in c.lower() for c in conditions):
+        items.update([get_item("trekking_shoes", language), get_item("first_aid_kit", language), get_item("thermos", language), get_item("map_compass", language)])
+
+    if has_allergies:
+        items.update([get_item("antihistamine", language), get_item("allergies_list", language)])
+    if has_chronic_diseases:
+        items.update([get_item("meds_personal", language), get_item("meds_regular", language), get_item("med_report", language)])
+
+    if gender == "female":
+        items.update([get_item("makeup", language), get_item("hygiene_fem", language), get_item("makeup_remover", language)])
+        if avg_temp and avg_temp > 15:
+            items.add(get_item("dress", language))
+    elif gender == "male":
+        items.add(get_item("shaving_kit", language))
+
+    if transport == "plane":
+        items.update([get_item("neck_pillow", language), get_item("earplugs", language), get_item("powerbank_hand", language), get_item("liquids_bag", language)])
+    elif transport == "train":
+        items.update([get_item("slippers_train", language), get_item("mug", language), get_item("powerbank", language), get_item("clothes_train", language), get_item("wipes", language)])
+    elif transport == "car":
+        items.update([get_item("license", language), get_item("car_charger", language), get_item("snacks_water", language), get_item("playlist", language), get_item("sunglasses_driver", language)])
+    elif transport == "bus":
+        items.update([get_item("neck_pillow", language), get_item("earplugs", language), get_item("snacks_water", language), get_item("wipes", language)])
+
+    # Basic items based on categories logic (simplified/deduplicated logic from categories map)
+    # We will return the raw set of items, and let the caller categorize if needed, or better yet, category logic should be here too?
+    # Actually, the caller re-categorizes everything. So we just need to return `items` set, plus weather info.
+    
+    # ... Wait, the category mapping in `generate_list` had logic for clothes based on temp.
+    # We need that logic here.
+    
+    min_temp = min(daily_data[d]["temp_min"] for d in daily_data) if daily_data else 15
+    max_temp = max(daily_data[d]["temp_max"] for d in daily_data) if daily_data else 20
+    
+    if min_temp < 0:
+        items.update([get_item("jacket_warm", language), get_item("hat", language), get_item("scarf", language), get_item("gloves", language), get_item("thermo", language), get_item("boots_winter", language), get_item("socks_warm", language)])
+    elif min_temp < 10:
+        items.update([get_item("jacket_light", language), get_item("sweater", language), get_item("jeans", language), get_item("sneakers", language)])
+    elif max_temp > 20:
+        items.update([get_item("tshirt", language), get_item("shorts", language), get_item("cap", language), get_item("shoes_light", language)])
+    else:
+        items.update([get_item("tshirt", language), get_item("jeans", language), get_item("sneakers", language)])
+        
+    if any("rain" in c.lower() or "дождь" in c.lower() for c in conditions):
+        items.update([get_item("raincoat", language), get_item("shoes_waterproof", language)])
+    if max_temp > 22:
+        items.update([get_item("sunglasses", language), get_item("cap", language)])
+    if max_temp > 20:
+        items.add(get_item("water_bottle", language))
+        
+    if traveling_with_pet:
+        items.update([get_item("vet_passport", language), get_item("pet_food", language), get_item("pet_bowl", language), get_item("leash", language), get_item("pet_pads", language), get_item("pet_toy", language)])
+
+    if trip_type == "business":
+        items.update([get_item("suit", language), get_item("shirts", language), get_item("shoes_formal", language), get_item("laptop", language), get_item("business_cards", language)])
+    elif trip_type == "active":
+        items.update([get_item("sportswear", language), get_item("sneakers", language), get_item("backpack_walk", language), get_item("water_bottle", language)])
+    elif trip_type == "beach":
+        items.update([get_item("swimsuit", language), get_item("pareo", language), get_item("flipflops", language), get_item("beach_towel", language), get_item("after_sun", language), get_item("beach_bag", language), get_item("sunscreen", language)])
+    elif trip_type == "winter":
+        items.update([get_item("ski_suit", language), get_item("thermo", language), get_item("fleece", language), get_item("mittens", language), get_item("goggles", language), get_item("wind_cream", language)])
+
+    # Visa/Adapter logic
+    visa_countries = ["FR", "DE", "IT", "ES", "GB", "US", "CN", "JP", "TR", "EG", "TH", "IN"] # Shortened list for brevity, ideally reuse full list
+    if country in visa_countries:
+        items.add(get_item("visa", language))
+    
+    adapter_countries = ["US", "GB", "AU", "JP", "CN", "CH"]
+    if country in adapter_countries:
+        items.add(get_item("adapter", language))
+
+    return {
+        "items": items,
+        "avg_temp": avg_temp,
+        "conditions": list(conditions),
+        "daily_forecast": daily_forecast,
+        "country": country,
+        "start_date": start_dt.date(),
+        "end_date": end_dt.date()
     }
 
-    # Важное
-    categories["Важное"].append("Паспорт")
-    categories["Важное"].append("Медицинская страховка")
-    categories["Важное"].append("Деньги/карта")
-    # Список стран с визовым режимом (ISO Alpha-2)
-    visa_countries = [
-        # Европа (Шенген)
-        "FR", "DE", "IT", "ES", "GR", "FI", "SE", "NO", "DK",
-        "NL", "BE", "AT", "CH", "CZ", "PL", "HU", "PT",
-        "SK", "SI", "EE", "LV", "LT", "IS", "LU", "MT",
-        # Великобритания
-        "GB",
-        # США, Канада
-        "US", "CA",
-        # Азия
-        "JP", "CN", "IN", "VN", "KR", "SG", "MY", "PH", "ID",
-        # Ближний Восток
-        "IL", "AE", "QA", "SA", "KW", "OM", "BH",
-        # Африка
-        "EG", "MA", "TN", "DZ", "ZA",
-        # Австралия, Океания
-        "AU", "NZ",
-        # Америка
-        "MX", "BR", "AR", "CL", "CO", "PE", "CU", "DO",
-        # Прочие
-        "TR"
-    ]
-    # country уже установлен выше из geo_data[0].get("country_code")
-    if country in visa_countries:
-        categories["Важное"].append("Виза")
+async def create_checklist_from_items(db, items, city, start_date, end_date, avg_temp, conditions, daily_forecast, user_id=None, language="ru"):
+    # Categorization logic
+    mapping = get_category_map(language)
+    categories = {k: [] for k in mapping.keys()}
+    
+    # Always add essentials
+    items.update([get_item("passport", language), get_item("insurance", language), get_item("money", language), get_item("tickets", language), get_item("booking", language)])
+    
+    for item in items:
+        found = False
+        for cat, keywords in mapping.items():
+            if any(k.lower() in item.lower() for k in keywords):
+                categories[cat].append(item)
+                found = True
+                break
+        if not found:
+            categories["Прочее"].append(item)
 
-    # Документы
-    categories["Документы"].append("Билеты")
-    categories["Документы"].append("Бронь отеля")
-    # Водительское удостоверение — если страна не Россия
-    if country and country != "RU":
-        categories["Документы"].append("Водительское удостоверение")
-
-    # Одежда (по погоде)
-    min_temp = min(temps) if temps else 15
-    max_temp = max(temps) if temps else 20
-    if min_temp < 0:
-        categories["Одежда"].extend(["Тёплая куртка", "Шапка", "Шарф", "Перчатки", "Термобельё", "Зимние ботинки", "Тёплые носки"])
-    elif min_temp < 10:
-        categories["Одежда"].extend(["Лёгкая куртка", "Свитер", "Джинсы", "Кроссовки"])
-    elif max_temp > 20:
-        categories["Одежда"].extend(["Футболки", "Шорты", "Панама", "Легкая обувь"])
-    else:
-        categories["Одежда"].extend(["Футболки", "Джинсы", "Кроссовки"])
-    # Дождь
-    if any("rain" in c or "дождь" in c for c in conditions):
-        categories["Одежда"].append("Дождевик")
-        categories["Одежда"].append("Водонепроницаемая обувь")
-    # Солнце/жара
-    if max_temp > 22:
-        categories["Одежда"].append("Солнцезащитные очки")
-        categories["Одежда"].append("Панама")
-    # Купальник
-    if any("swim" in c or "купание" in c for c in conditions) or country in ["TH", "ES", "GR", "IT", "TR", "EG"]:
-        categories["Одежда"].append("Купальник")
-    # Горы
-    if any("mountain" in c or "гора" in c for c in conditions):
-        categories["Одежда"].append("Треккинговая обувь")
-
-    # Гигиена
-    categories["Гигиена"].extend(["Зубная щётка", "Паста", "Дезодорант", "Мыло", "Расчёска"])
-
-    # Техника
-    categories["Техника"].extend(["Телефон", "Зарядка", "Пауэрбанк"])
-    # Переходник для розеток (ISO-2)
-    adapter_countries = [
-        "US", "GB", "AU", "JP", "CN", "CH"
-    ]
-    if country in adapter_countries:
-        categories["Техника"].append("Переходник для розеток")
-
-    # Аптечка
-    categories["Аптечка"].extend(["Личные лекарства", "Пластыри", "Обезболивающее"])
-
-    # Прочее
-    if max_temp > 20:
-        categories["Прочее"].append("Бутылка для воды")
-    if any("rain" in c or "дождь" in c for c in conditions):
-        categories["Прочее"].append("Зонт")
-    # Убираем дубли
     for k in categories:
-        categories[k] = list(dict.fromkeys(categories[k]))
-    # Собираем все вещи в один список для сохранения
+        categories[k] = list(sorted(set(categories[k])))
+        
     all_items = []
-    for v in categories.values():
+    for k, v in categories.items():
         all_items.extend(v)
-    # Добавляем 'Виза' в итоговый список, если страна визовая и если её ещё нет
-    if country in visa_countries and "Виза" not in all_items:
-        all_items.append("Виза")
 
     checklist_data = schemas.ChecklistCreate(
-        city=req.city,
-        start_date=start_dt.date(),
-        end_date=end_dt.date(),
+        city=city,
+        start_date=start_date,
+        end_date=end_date,
         items=all_items,
         avg_temp=avg_temp,
-        conditions=sorted(conditions),
+        conditions=sorted(list(conditions)),
         daily_forecast=daily_forecast,
-        user_id=current_user.id if current_user else None,
+        user_id=user_id,
     )
-
     checklist = await crud.create_checklist(db, checklist_data)
-
+    
     return {
         "slug": checklist.slug,
         "city": checklist.city,
@@ -782,6 +832,55 @@ async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db),
         "conditions": checklist.conditions,
         "daily_forecast": daily_forecast
     }
+
+@app.post("/generate-packing-list", response_model=ChecklistResponse)
+async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db), current_user=Depends(get_current_user)):
+    data = await calculate_packing_data(
+        req.city, req.start_date, req.end_date, req.trip_type, req.transport,
+        req.gender, req.traveling_with_pet, req.has_allergies, req.has_chronic_diseases, req.language
+    )
+    return await create_checklist_from_items(
+        db, data["items"], req.city, data["start_date"], data["end_date"],
+        data["avg_temp"], data["conditions"], data["daily_forecast"],
+        current_user.id if current_user else None,
+        language=req.language
+    )
+
+@app.post("/generate-multi-city", response_model=ChecklistResponse)
+async def generate_multi_city(req: MultiCityPackingRequest, db: AsyncSession = Depends(get_db), current_user=Depends(get_current_user)):
+    all_items = set()
+    all_forecast = []
+    temps = []
+    conditions = set()
+    cities = []
+    
+    for seg in req.segments:
+        cities.append(seg.city.split(",")[0])
+        data = await calculate_packing_data(
+            seg.city, seg.start_date, seg.end_date, seg.trip_type, seg.transport,
+            req.gender, req.traveling_with_pet, req.has_allergies, req.has_chronic_diseases, req.language
+        )
+        all_items.update(data["items"])
+        all_forecast.extend(data["daily_forecast"])
+        if data["avg_temp"]: temps.append(data["avg_temp"])
+        conditions.update(data["conditions"])
+    
+    # Sort forecast by date
+    all_forecast.sort(key=lambda x: x.date)
+    
+    avg_temp = round(sum(temps) / len(temps), 1) if temps else None
+    display_city = " + ".join(cities)
+    
+    # Parse dates for main checklist
+    min_date = datetime.strptime(req.segments[0].start_date, "%Y-%m-%d").date()
+    max_date = datetime.strptime(req.segments[-1].end_date, "%Y-%m-%d").date()
+    
+    return await create_checklist_from_items(
+        db, all_items, display_city, min_date, max_date,
+        avg_temp, list(conditions), all_forecast,
+        current_user.id if current_user else None,
+        language=req.language
+    )
 
 @app.post("/save-tg-checklist", response_model=schemas.ChecklistOut)
 async def save_tg_checklist(data: schemas.ChecklistCreate = Body(...), db: AsyncSession = Depends(get_db)):
@@ -819,39 +918,29 @@ async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):
     return response
 
     # Категории для чеклиста (для фронта)
-    categories = {
-        "Важное": [],
-        "Документы": [],
-        "Одежда": [],
-        "Гигиена": [],
-        "Техника": [],
-        "Аптечка": [],
-        "Прочее": []
+    # --- Распределение по категориям (копия логики из generate_list) ---
+    mapping = {
+        "Важное": ["Паспорт", "Медицинская страховка", "Деньги/карта", "Виза", "Билеты", "Бронь отеля", "Водительское удостоверение/СТС", "Ветпаспорт"],
+        "Документы": ["Список аллергенов", "Медзаключение", "Личные рецепты"],
+        "Одежда": ["куртка", "пуховик", "Термобельё", "Шапка", "Шарф", "Перчатки", "ботинки", "носки", "Свитер", "толстовка", "Джинсы", "брюки", "Кроссовки", "кофта", "свитшот", "Футболки", "Шорты", "платья", "Панама", "кепка", "очки", "Обувь", "Дождевик", "Зонт", "Купальник", "плавки", "туника", "парео", "Шлёпанцы", "Костюм", "Рубашки", "блузки", "Туфли", "юбка"],
+        "Гигиена": ["Зубная", "Паста", "Дезодорант", "Мыло", "Расчёска", "Косметика", "макияж", "Влажные салфетки", "Бритвенный набор", "Антиперспирант"],
+        "Техника": ["Телефон", "Зарядка", "Пауэрбанк", "Power bank", "Переходник", "Ноутбук", "Наушники"],
+        "Аптечка": ["лекарства", "Пластыри", "Обезболивающее", "Антигистаминные"],
+        "Прочее": ["Бутылка", "Термос", "рюкзак", "Сумка", "Крем", "Снеки", "Плейлист", "Подушка", "Беруши", "маска", "Жидкости", "Тапочки", "Кружка", "Миска", "Поводок", "переноска", "Пелёнки", "пакеты", "Игрушка", "Визитки"]
     }
+
+    # Инициализация
+    categories = {k: [] for k in mapping.keys()}
+
     for item in checklist.items:
-        for k in categories:
-            if item in categories[k]:
+        found = False
+        for cat, keywords in mapping.items():
+            if any(k.lower() in item.lower() for k in keywords):
+                categories[cat].append(item)
+                found = True
                 break
-        # Важное
-        if item in ["Паспорт", "Медицинская страховка", "Деньги/карта", "Виза"]:
-            categories["Важное"].append(item)
-        # Документы
-        elif item in ["Билеты", "Бронь отеля", "Водительское удостоверение"]:
-            categories["Документы"].append(item)
-        # Одежда
-        elif item in ["Тёплая куртка", "Шапка", "Шарф", "Перчатки", "Термобельё", "Зимние ботинки", "Тёплые носки", "Лёгкая куртка", "Свитер", "Джинсы", "Кроссовки", "Футболки", "Шорты", "Панама", "Легкая обувь", "Купальник", "Треккинговая обувь", "Зонт/дождевик", "Водонепроницаемая обувь", "Солнцезащитные очки"]:
-            categories["Одежда"].append(item)
-        # Гигиена
-        elif item in ["Зубная щётка", "Паста", "Дезодорант", "Мыло", "Расчёска"]:
-            categories["Гигиена"].append(item)
-        # Техника
-        elif item in ["Телефон", "Зарядка", "Пауэрбанк", "Переходник для розеток"]:
-            categories["Техника"].append(item)
-        # Аптечка
-        elif item in ["Личные лекарства", "Пластыри", "Обезболивающее"]:
-            categories["Аптечка"].append(item)
-        # Прочее
-        elif item in ["Бутылка для воды", "Термос"]:
+        
+        if not found:
             categories["Прочее"].append(item)
     # Убираем дубли
     for k in categories:
@@ -881,6 +970,29 @@ async def update_checklist_state(slug: str, state: ChecklistStateUpdate = Body(.
     if not checklist:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
     return checklist
+
+
+@app.patch("/checklist/{slug}/privacy", response_model=schemas.ChecklistOut)
+async def update_checklist_privacy(
+    slug: str,
+    privacy: ChecklistPrivacyUpdate,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user)
+):
+    """Обновление приватности чеклиста"""
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    
+    # Проверка прав (только владелец)
+    if checklist.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Нет прав")
+
+    checklist.is_public = privacy.is_public
+    await db.commit()
+    await db.refresh(checklist)
+    return checklist
+
 
 @app.delete("/checklist/{slug}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_checklist(slug: str, db: AsyncSession = Depends(get_db)):

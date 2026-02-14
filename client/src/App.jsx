@@ -10,13 +10,112 @@ import "./AuthModal.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
+const TRANSLATIONS = {
+  ru: {
+    heroTitle: "Куда собираемся?",
+    heroSubtitle: "Введите город и даты — мы соберём идеальный чеклист для вашей поездки",
+    addCity: "+ Добавить город",
+    generate: "🚀 Поехали!",
+    transport: "Транспорт:",
+    gender: "Пол:",
+    tripType: "Тип поездки:",
+    pet: "🐾 С питомцем",
+    allergies: "🤧 Аллергия",
+    meds: "💊 Лекарства",
+    forecast: "🌤 Прогноз погоды",
+    humidity: "Влажность",
+    uv: "УФ-индекс",
+    wind: "Ветер",
+    kmh: "км/ч",
+    errorChecklist: "Ошибка при загрузке чеклиста",
+    errorServer: "Ошибка при запросе к серверу",
+    fillAll: "Заполните все города и даты!",
+    login: "Войти",
+    logout: "Выйти",
+    saveSuccess: "✅ Чеклист сохранён в вашем аккаунте!",
+    saveError: "❌ Ошибка сохранения",
+    restore: "Восстановить удалённые",
+    reset: "Сбросить отметки",
+    addItem: "+ Добавить вещь",
+    cancel: "Отмена",
+    newItem: "Новая вещь",
+    // Options
+    plane: "✈️ Самолёт",
+    train: "🚆 Поезд",
+    car: "🚗 Авто",
+    bus: "🚌 Автобус",
+    unisex: "🚻 Любой",
+    male: "👨 Мужской",
+    female: "👩 Женский",
+    vacation: "🌴 Отдых",
+    business: "💼 Работа",
+    active: "🏃 Активный",
+    beach: "🏖 Пляж",
+    winter: "🎿 Зима",
+  },
+  en: {
+    heroTitle: "Where to?",
+    heroSubtitle: "Enter city and dates — we'll generate the perfect packing list for your trip",
+    addCity: "+ Add City",
+    generate: "🚀 Let's go!",
+    transport: "Transport:",
+    gender: "Gender:",
+    tripType: "Trip Type:",
+    pet: "🐾 With Pet",
+    allergies: "🤧 Allergies",
+    meds: "💊 Chronic Disease",
+    forecast: "🌤 Weather Forecast",
+    humidity: "Humidity",
+    uv: "UV Index",
+    wind: "Wind",
+    kmh: "km/h",
+    errorChecklist: "Error loading checklist",
+    errorServer: "Server connection error",
+    fillAll: "Please fill in all cities and dates!",
+    login: "Login",
+    logout: "Logout",
+    saveSuccess: "✅ Checklist saved to your account!",
+    saveError: "❌ Save error",
+    restore: "Restore removed items",
+    reset: "Reset checks",
+    addItem: "+ Add Item",
+    cancel: "Cancel",
+    newItem: "New item",
+    // Options
+    plane: "✈️ Plane",
+    train: "🚆 Train",
+    car: "🚗 Car",
+    bus: "🚌 Bus",
+    unisex: "🚻 Any",
+    male: "👨 Male",
+    female: "👩 Female",
+    vacation: "🌴 Vacation",
+    business: "💼 Business",
+    active: "🏃 Active",
+    beach: "🏖 Beach",
+    winter: "🎿 Winter",
+  }
+};
+
 const App = ({ page }) => {
   const { id } = useParams(); // slug из URL
   const navigate = useNavigate();
   const location = useLocation();
 
-  const [city, setCity] = useState(null);
-  const [dates, setDates] = useState({ start: null, end: null });
+  const [lang, setLang] = useState("ru");
+  const t = TRANSLATIONS[lang];
+
+  const [destinations, setDestinations] = useState([
+    { id: 1, city: null, dates: { start: null, end: null } }
+  ]);
+  const [options, setOptions] = useState({
+    trip_type: "vacation",
+    gender: "unisex", // new
+    transport: "plane", // new
+    traveling_with_pet: false,
+    has_allergies: false,
+    has_chronic_diseases: false,
+  });
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [savedSlug, setSavedSlug] = useState(null);
@@ -111,37 +210,65 @@ const App = ({ page }) => {
     if (location.pathname === "/") {
       setSavedSlug(null);
       setResult(null);
-      setCity(null);
-      setDates({ start: null, end: null });
+      setDestinations([{ id: 1, city: null, dates: { start: null, end: null } }]);
       setError(null);
     }
   }, [location.pathname]);
+
+  const handleAddDestination = () => {
+    setDestinations([
+      ...destinations,
+      { id: Date.now(), city: null, dates: { start: null, end: null } }
+    ]);
+  };
+
+  const handleRemoveDestination = (id) => {
+    if (destinations.length > 1) {
+      setDestinations(destinations.filter(d => d.id !== id));
+    }
+  };
+
+  const updateDestination = (id, field, value) => {
+    setDestinations(prev => prev.map(d => {
+      if (d.id === id) {
+        return { ...d, [field]: value };
+      }
+      return d;
+    }));
+  };
 
   const handleSubmit = async () => {
     setError(null);
     setResult(null);
     setSavedSlug(null);
 
-    if (!city || !dates.start || !dates.end) {
-      alert("Заполните все поля!");
+    // Валидация
+    const isValid = destinations.every(d => d.city && d.dates.start && d.dates.end);
+    if (!isValid) {
+      alert("Заполните все города и даты!");
       return;
     }
 
-    const start = new Date(dates.start);
-    const end = new Date(dates.end);
-    const diffDays = (end - start) / (1000 * 60 * 60 * 24) + 1;
-
-    // Без ограничения по дням — сервер использует прогноз + исторические данные
-
     try {
-      const res = await fetch(`${API_URL}/generate-packing-list`, {
+      const payload = {
+        segments: destinations.map(d => ({
+          city: d.city.fullName,
+          start_date: d.dates.start,
+          end_date: d.dates.end,
+          trip_type: options.trip_type, // Global for now
+          transport: options.transport, // Global for now
+        })),
+        gender: options.gender,
+        traveling_with_pet: options.traveling_with_pet,
+        has_allergies: options.has_allergies,
+        has_chronic_diseases: options.has_chronic_diseases,
+        language: lang,
+      };
+
+      const res = await fetch(`${API_URL}/generate-multi-city`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders },
-        body: JSON.stringify({
-          city: city.fullName,
-          start_date: dates.start,
-          end_date: dates.end,
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!res.ok) {
@@ -226,6 +353,16 @@ const App = ({ page }) => {
           <span>🧳</span> Luggify
         </div>
         <div className="navbar-user">
+          <div className="language-switcher">
+            <button
+              className={`lang-btn ${lang === "ru" ? "active" : ""}`}
+              onClick={() => setLang("ru")}
+            >RU</button>
+            <button
+              className={`lang-btn ${lang === "en" ? "active" : ""}`}
+              onClick={() => setLang("en")}
+            >EN</button>
+          </div>
           {user ? (
             <>
               <div className="navbar-profile" onClick={() => navigate("/profile")}>
@@ -237,7 +374,7 @@ const App = ({ page }) => {
               <button
                 className="navbar-logout-btn icon-btn"
                 onClick={handleLogout}
-                title="Выйти"
+                title={t.logout}
               >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
@@ -257,7 +394,7 @@ const App = ({ page }) => {
               </button>
             </>
           ) : (
-            <button className="navbar-login-btn" onClick={() => setShowAuth(true)}>Войти</button>
+            <button className="navbar-login-btn" onClick={() => setShowAuth(true)}>{t.login}</button>
           )}
         </div>
       </nav>
@@ -278,20 +415,147 @@ const App = ({ page }) => {
             {!result && (
               <>
                 <div className="hero">
-                  <h2>Куда собираемся?</h2>
-                  <p>Введите город и даты — мы соберём идеальный чеклист для вашей поездки</p>
+                  <h2>{t.heroTitle}</h2>
+                  <p>{t.heroSubtitle}</p>
                 </div>
 
                 <div className="form-card">
-                  <div className="form-field">
-                    <CitySelect value={city} onSelect={setCity} />
+                  {destinations.map((dest, index) => (
+                    <div key={dest.id} className="destination-row">
+                      <div className="destination-header">
+                        {destinations.length > 1 && <span className="destination-number">#{index + 1}</span>}
+                        {destinations.length > 1 && (
+                          <button
+                            className="remove-dest-btn"
+                            onClick={() => handleRemoveDestination(dest.id)}
+                            title="Удалить город"
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                      <div className="form-field">
+                        <CitySelect
+                          value={dest.city}
+                          onSelect={(val) => updateDestination(dest.id, "city", val)}
+                          lang={lang}
+                        />
+                      </div>
+                      <div className="form-field">
+                        <DateRangePicker
+                          value={dest.dates}
+                          onChange={(val) => updateDestination(dest.id, "dates", val)}
+                          lang={lang}
+                        />
+                      </div>
+                      {index < destinations.length - 1 && <div className="destination-divider">↓</div>}
+                    </div>
+                  ))}
+
+                  <div className="form-actions">
+                    <button className="add-city-btn" onClick={handleAddDestination}>
+                      {t.addCity}
+                    </button>
                   </div>
-                  <div className="form-field">
-                    <DateRangePicker onChange={(newDates) => setDates(newDates)} />
+                  {/* Options */}
+                  {/* Transport Selection */}
+                  <div className="trip-type-selector">
+                    <label className="section-label">Транспорт:</label>
+                    <div className="trip-types">
+                      {[
+                        { id: "plane", label: t.plane },
+                        { id: "train", label: t.train },
+                        { id: "car", label: t.car },
+                        { id: "bus", label: t.bus },
+                      ].map(type => (
+                        <div
+                          key={type.id}
+                          className={`trip-type-chip ${options.transport === type.id ? "active" : ""}`}
+                          onClick={() => setOptions({ ...options, transport: type.id })}
+                        >
+                          {type.label}
+                        </div>
+                      ))}
+                    </div>
                   </div>
-                  <button className="generate-btn" onClick={handleSubmit}>
-                    Сгенерировать ✨
-                  </button>
+
+                  {/* Gender Selection */}
+                  <div className="trip-type-selector">
+                    <label className="section-label">Пол:</label>
+                    <div className="trip-types">
+                      {[
+                        { id: "unisex", label: t.unisex },
+                        { id: "male", label: t.male },
+                        { id: "female", label: t.female },
+                      ].map(type => (
+                        <div
+                          key={type.id}
+                          className={`trip-type-chip ${options.gender === type.id ? "active" : ""}`}
+                          onClick={() => setOptions({ ...options, gender: type.id })}
+                        >
+                          {type.label}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="trip-type-selector">
+                    <label className="section-label">Тип поездки:</label>
+                    <div className="trip-types">
+                      {[
+                        { id: "vacation", label: t.vacation },
+                        { id: "business", label: t.business },
+                        { id: "active", label: t.active },
+                        { id: "beach", label: t.beach },
+                        { id: "winter", label: t.winter },
+                      ].map(type => (
+                        <div
+                          key={type.id}
+                          className={`trip-type-chip ${options.trip_type === type.id ? "active" : ""}`}
+                          onClick={() => setOptions({ ...options, trip_type: type.id })}
+                        >
+                          {type.label}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="options-grid">
+                    <label className={`option-chip ${options.traveling_with_pet ? "active" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={options.traveling_with_pet}
+                        onChange={e => setOptions({ ...options, traveling_with_pet: e.target.checked })}
+                      />
+                      {t.pet}
+                    </label>
+                    <label className={`option-chip ${options.has_allergies ? "active" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={options.has_allergies}
+                        onChange={e => setOptions({ ...options, has_allergies: e.target.checked })}
+                      />
+                      {t.allergies}
+                    </label>
+                    <label className={`option-chip ${options.has_chronic_diseases ? "active" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={options.has_chronic_diseases}
+                        onChange={e => setOptions({ ...options, has_chronic_diseases: e.target.checked })}
+                      />
+                      {t.meds}
+                    </label>
+                  </div>
+
+                  <div className="form-field generate-field">
+                    <button
+                      className="generate-btn"
+                      onClick={handleSubmit}
+                      disabled={false}
+                    >
+                      ✨ {t.generate}
+                    </button>
+                  </div>
                 </div>
               </>
             )}
@@ -301,15 +565,18 @@ const App = ({ page }) => {
             {result && (
               <div className="results-section">
                 <h2>
-                  <span>{(result.city || city?.fullName).split(",")[0]}</span>
-                  <span className="checklist-dates">
-                    {new Date(result.start_date || dates.start).toLocaleDateString("ru-RU", { day: 'numeric', month: 'long' })}
-                    {" — "}
-                    {new Date(result.end_date || dates.end).toLocaleDateString("ru-RU", { day: 'numeric', month: 'long' })}
-                  </span>
+                  <h2>
+                    <span>{result.city}</span>
+                    <span className="checklist-dates">
+                      {new Date(result.start_date || destinations[0].dates.start).toLocaleDateString("ru-RU", { day: 'numeric', month: 'long' })}
+                      {" — "}
+                      {new Date(result.end_date || destinations[destinations.length - 1].dates.end).toLocaleDateString("ru-RU", { day: 'numeric', month: 'long' })}
+                    </span>
+                  </h2>
+
                 </h2>
 
-                {/* Checklist Card */}
+                {/* Если это мульти-город, показываем маршрут визуально? Пока просто заголовок */}
                 <div className="checklist-card">
                   {(() => {
                     const isMobile = window.innerWidth <= 600;
@@ -381,7 +648,7 @@ const App = ({ page }) => {
 
                 {/* Weather Forecast */}
                 <div className="forecast">
-                  <h3>🌤 <span>Прогноз погоды</span></h3>
+                  <h3>🌤 <span>{t.forecast}</span></h3>
                   <div className="forecast-grid">
                     {result.daily_forecast.map((day) => (
                       <div key={day.date} className={`forecast-card${day.source === "historical" ? " forecast-historical" : ""}`}>
@@ -395,6 +662,11 @@ const App = ({ page }) => {
                         <div className="forecast-conditions">{day.condition}</div>
                         <div className="forecast-temp">
                           {day.temp_min.toFixed(1)}° / {day.temp_max.toFixed(1)}°C
+                        </div>
+                        <div className="forecast-details">
+                          {day.humidity !== null && <span title="Влажность">💧 {day.humidity}%</span>}
+                          {day.uv_index !== null && <span title="УФ-индекс">☀️ {day.uv_index.toFixed(0)}</span>}
+                          {day.wind_speed !== null && <span title="Ветер">💨 {day.wind_speed.toFixed(0)} км/ч</span>}
                         </div>
                       </div>
                     ))}
