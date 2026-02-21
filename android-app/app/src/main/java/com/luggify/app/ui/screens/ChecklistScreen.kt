@@ -30,12 +30,17 @@ fun ChecklistScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
 
+    // Загружаем чеклист если нужно
     LaunchedEffect(slug) {
         if (uiState.checklist?.slug != slug) {
             viewModel.loadChecklist(slug)
+        } else {
+            // Чеклист уже загружен - только синхронизируем и загружаем погоду
+            viewModel.trySyncChecklist()
+            viewModel.tryLoadWeather()
         }
     }
-
+    
     Scaffold(
         topBar = {
             TopAppBar(
@@ -75,7 +80,8 @@ fun ChecklistScreen(
                 .padding(16.dp)
         ) {
             when {
-                uiState.isLoading -> {
+                uiState.isLoading && uiState.checklist == null -> {
+                    // Показываем загрузку только если чеклист еще не загружен
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
@@ -84,7 +90,8 @@ fun ChecklistScreen(
                     }
                 }
 
-                uiState.error != null -> {
+                uiState.error != null && uiState.checklist == null -> {
+                    // Показываем ошибку только если чеклист не загружен
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         colors = CardDefaults.cardColors(

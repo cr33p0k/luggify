@@ -39,6 +39,8 @@ const TRANSLATIONS = {
     addItem: "+ Добавить вещь",
     cancel: "Отмена",
     newItem: "Новая вещь",
+    exportCalendar: "📅 В календарь",
+    print: "🖨 Печать",
     // Options
     plane: "✈️ Самолёт",
     train: "🚆 Поезд",
@@ -81,6 +83,8 @@ const TRANSLATIONS = {
     addItem: "+ Add Item",
     cancel: "Cancel",
     newItem: "New item",
+    exportCalendar: "📅 Add to Calendar",
+    print: "🖨 Print",
     // Options
     plane: "✈️ Plane",
     train: "🚆 Train",
@@ -96,6 +100,237 @@ const TRANSLATIONS = {
     winter: "🎿 Winter",
   }
 };
+
+// === Sub-components for travel services ===
+
+const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    if (!city) return;
+    setLoading(true);
+    setLoaded(false);
+    fetch(`${API_URL}/attractions?city=${encodeURIComponent(city)}&lang=${lang}&limit=${limit}`)
+      .then(r => r.json())
+      .then(d => setData(d.attractions || []))
+      .catch(() => setData([]))
+      .finally(() => { setLoading(false); setLoaded(true); });
+  }, [city, lang, limit]);
+
+  if (loaded && data.length === 0) return null;
+  if (!loaded && !loading) return null;
+
+  return (
+    <>
+      {loading ? (
+        <div className="section-loading">
+          <div className="skeleton-grid">
+            {Array.from({ length: limit }, (_, i) => <div key={i} className="skeleton-card" />)}
+          </div>
+        </div>
+      ) : (
+        <div className="attractions-grid">
+          {data.map((a, i) => (
+            <a key={i} href={a.link} target="_blank" rel="noopener noreferrer" className="attraction-card">
+              {a.image && <img src={a.image} alt={a.name} className="attraction-img" loading="lazy" />}
+              <div className="attraction-body">
+                <div className="attraction-name">{a.name}</div>
+              </div>
+            </a>
+          ))}
+        </div>
+      )}
+    </>
+  );
+});
+
+const AttractionsSection = React.memo(({ city, lang }) => {
+  if (!city) return null;
+
+  const cities = city.includes(" + ") ? city.split(" + ").map(c => c.trim()) : [city];
+  const isMulti = cities.length > 1;
+  const limit = isMulti ? 5 : 10;
+
+  return (
+    <div className="travel-section">
+      <h3 className="section-title">🏛 {lang === "ru" ? "Что посмотреть" : "What to See"}</h3>
+      {cities.map((c, idx) => (
+        <div key={c + idx}>
+          {isMulti && <h4 className="attractions-city-title">📍 {c}</h4>}
+          <AttractionsCityBlock city={c} lang={lang} limit={limit} />
+        </div>
+      ))}
+    </div>
+  );
+});
+
+const FlightsSection = React.memo(({ city, startDate, origin, returnDate }) => {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  const [genericLink, setGenericLink] = useState("");
+
+  useEffect(() => {
+    if (!city) return;
+    setLoading(true);
+    setLoaded(false);
+    const params = new URLSearchParams({ destination: city });
+    if (startDate) params.append("date", startDate);
+    if (origin) params.append("origin", origin);
+    if (returnDate) params.append("return_date", returnDate);
+    fetch(`${API_URL}/flights/search?${params}`)
+      .then(r => r.json())
+      .then(d => {
+        setData(d.flights || []);
+        if (d.generic_link) setGenericLink(d.generic_link);
+      })
+      .catch(() => setData([]))
+      .finally(() => { setLoading(false); setLoaded(true); });
+  }, [city, startDate, origin, returnDate]);
+
+  if (loaded && data.length === 0 && !genericLink) return null;
+  if (!loaded && !loading) return null;
+
+  const formatDuration = (mins) => {
+    if (!mins) return null;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    return h > 0 ? `${h}ч ${m > 0 ? m + 'м' : ''}` : `${m}м`;
+  };
+
+  return (
+    <div className="travel-section">
+      <h3 className="section-title">✈️ Авиабилеты</h3>
+      {loading ? (
+        <div className="skeleton-grid">
+          {[1, 2, 3].map(i => <div key={i} className="skeleton-card short" />)}
+        </div>
+      ) : (
+        <>
+          {data.length > 0 && (
+            <div style={{ display: "flex", gap: "2rem", flexWrap: "wrap", marginBottom: "1.5rem" }}>
+              {data.filter(f => f.type === "outbound" || !f.type).length > 0 && (
+                <div style={{ flex: "1 1 300px" }}>
+                  <h4 style={{ margin: "0 0 0.75rem 0", color: "#9ca3af", fontSize: "0.95rem", fontWeight: "600" }}>Рейсы туда</h4>
+                  <div className="flights-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
+                    {data.filter(f => f.type === "outbound" || !f.type).map((f, i) => (
+                      <a key={`out-${i}`} href={f.link} target="_blank" rel="noopener noreferrer" className="flight-card" style={{ height: "100%" }}>
+                        {f.tag && <div className="flight-tag">{f.tag}</div>}
+                        <div className="flight-price">{f.price ? `${f.price.toLocaleString("ru-RU")} ₽` : "Цена по запросу"}</div>
+                        <div className="flight-route">
+                          {f.origin} → {f.destination}
+                        </div>
+                        {f.departure_at && (
+                          <div className="flight-date">
+                            {new Date(f.departure_at).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}
+                          </div>
+                        )}
+                        <div className="flight-info">
+                          {f.airline && <span>✈ {f.airline}</span>}
+                          <span>{f.transfers === 0 ? "Прямой" : `${f.transfers} пересад.`}</span>
+                          {f.duration > 0 && <span>⏱ {formatDuration(f.duration)}</span>}
+                        </div>
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {data.filter(f => f.type === "inbound").length > 0 && (
+                <div style={{ flex: "1 1 300px" }}>
+                  <h4 style={{ margin: "0 0 0.75rem 0", color: "#9ca3af", fontSize: "0.95rem", fontWeight: "600" }}>Рейсы обратно</h4>
+                  <div className="flights-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
+                    {data.filter(f => f.type === "inbound").map((f, i) => (
+                      <a key={`in-${i}`} href={f.link} target="_blank" rel="noopener noreferrer" className="flight-card" style={{ height: "100%" }}>
+                        {f.tag && <div className="flight-tag">{f.tag}</div>}
+                        <div className="flight-price">{f.price ? `${f.price.toLocaleString("ru-RU")} ₽` : "Цена по запросу"}</div>
+                        <div className="flight-route">
+                          {f.origin} → {f.destination}
+                        </div>
+                        {f.departure_at && (
+                          <div className="flight-date">
+                            {new Date(f.departure_at).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}
+                          </div>
+                        )}
+                        <div className="flight-info">
+                          {f.airline && <span>✈ {f.airline}</span>}
+                          <span>{f.transfers === 0 ? "Прямой" : `${f.transfers} пересад.`}</span>
+                          {f.duration > 0 && <span>⏱ {formatDuration(f.duration)}</span>}
+                        </div>
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {data.length === 0 && genericLink && (
+            <div style={{ marginBottom: "1rem", textAlign: "center", color: "#9ca3af" }}>
+              К сожалению, кэшированных билетов на ваши точные даты мы не нашли.<br /><br />
+            </div>
+          )}
+          {genericLink && (
+            <div style={{ display: "flex", justifyContent: "center", width: "100%", marginTop: "1rem" }}>
+              <a href={genericLink} target="_blank" rel="noopener noreferrer" className="flights-search-btn">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z" /></svg>
+                Искать билеты туда и обратно
+              </a>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+});
+
+const HotelsSection = React.memo(({ city, startDate, endDate }) => {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    if (!city) return;
+    setLoading(true);
+    setLoaded(false);
+    const params = new URLSearchParams({ city });
+    if (startDate) params.append("check_in", startDate);
+    if (endDate) params.append("check_out", endDate);
+    fetch(`${API_URL}/hotels/search?${params}`)
+      .then(r => r.json())
+      .then(d => setData(d.hotels || []))
+      .catch(() => setData([]))
+      .finally(() => { setLoading(false); setLoaded(true); });
+  }, [city, startDate, endDate]);
+
+  if (loaded && data.length === 0) return null;
+  if (!loaded && !loading) return null;
+
+  return (
+    <div className="travel-section">
+      <h3 className="section-title">🏨 Отели</h3>
+      {loading ? (
+        <div className="skeleton-grid">
+          {[1, 2, 3].map(i => <div key={i} className="skeleton-card short" />)}
+        </div>
+      ) : (
+        <div className="hotels-grid">
+          {data.map((h, i) => (
+            <a key={i} href={h.link} target="_blank" rel="noopener noreferrer" className="hotel-card">
+              <div className="hotel-name">{h.name}</div>
+              <div className="hotel-stars">{"⭐".repeat(h.stars || 0)}</div>
+              {h.price_per_night && (
+                <div className="hotel-price">от {h.price_per_night?.toLocaleString("ru-RU")} ₽/ночь</div>
+              )}
+              {h.rating && <div className="hotel-rating">⭐ {h.rating}/10</div>}
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
 
 const App = ({ page }) => {
   const { id } = useParams(); // slug из URL
@@ -118,6 +353,14 @@ const App = ({ page }) => {
   });
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const [originCity, setOriginCity] = useState("");
+  const [showAuth, setShowAuth] = useState(false);
+  const [showForecast, setShowForecast] = useState(true); // Collapsible forecast state
+  const [user, setUser] = useState(() => {
+    const saved = localStorage.getItem("user");
+    return saved ? JSON.parse(saved) : null;
+  });
+  const [token, setToken] = useState(() => localStorage.getItem("token"));
   const [savedSlug, setSavedSlug] = useState(null);
 
   // Состояние для чеклиста
@@ -126,14 +369,6 @@ const App = ({ page }) => {
   const [removedItems, setRemovedItems] = useState([]);
   const [addItemMode, setAddItemMode] = useState(false);
   const [newItem, setNewItem] = useState("");
-
-  // Auth state
-  const [user, setUser] = useState(() => {
-    const saved = localStorage.getItem("user");
-    return saved ? JSON.parse(saved) : null;
-  });
-  const [token, setToken] = useState(() => localStorage.getItem("token"));
-  const [showAuth, setShowAuth] = useState(false);
 
   const handleAuth = (userData, accessToken) => {
     setUser(userData);
@@ -157,8 +392,6 @@ const App = ({ page }) => {
         const res = await fetch(`${API_URL}/checklist/${id}`);
         if (!res.ok) throw new Error("Чеклист не найден");
         const data = await res.json();
-        setCity({ fullName: data.city });
-        setDates({ start: data.start_date, end: data.end_date });
         setResult(data);
         setSavedSlug(id);
       } catch (e) {
@@ -278,6 +511,11 @@ const App = ({ page }) => {
       }
 
       const data = await res.json();
+
+      // Проверяем наличие daily_forecast в ответе
+      if (!data.daily_forecast) {
+        console.warn("daily_forecast отсутствует в ответе сервера", data);
+      }
 
       setResult(data);
       setSavedSlug(data.slug || null);
@@ -420,6 +658,19 @@ const App = ({ page }) => {
                 </div>
 
                 <div className="form-card">
+                  <div className="origin-dest-block">
+                    <div className="origin-row">
+                      <div className="form-field" style={{ flex: 1 }}>
+                        <CitySelect
+                          value={originCity}
+                          onSelect={(val) => setOriginCity(val)}
+                          lang={lang}
+                          label={lang === "ru" ? "Откуда" : "From"}
+                        />
+                      </div>
+                    </div>
+                    <div className="route-arrow">↓</div>
+                  </div>
                   {destinations.map((dest, index) => (
                     <div key={dest.id} className="destination-row">
                       <div className="destination-header">
@@ -446,6 +697,7 @@ const App = ({ page }) => {
                           value={dest.dates}
                           onChange={(val) => updateDestination(dest.id, "dates", val)}
                           lang={lang}
+                          minDate={index > 0 ? (destinations[index - 1].dates.end ? new Date(destinations[index - 1].dates.end) : new Date()) : new Date()}
                         />
                       </div>
                       {index < destinations.length - 1 && <div className="destination-divider">↓</div>}
@@ -565,15 +817,12 @@ const App = ({ page }) => {
             {result && (
               <div className="results-section">
                 <h2>
-                  <h2>
-                    <span>{result.city}</span>
-                    <span className="checklist-dates">
-                      {new Date(result.start_date || destinations[0].dates.start).toLocaleDateString("ru-RU", { day: 'numeric', month: 'long' })}
-                      {" — "}
-                      {new Date(result.end_date || destinations[destinations.length - 1].dates.end).toLocaleDateString("ru-RU", { day: 'numeric', month: 'long' })}
-                    </span>
-                  </h2>
-
+                  <span>{result.city}</span>
+                  <span className="checklist-dates">
+                    {new Date(result.start_date || destinations[0]?.dates?.start).toLocaleDateString("ru-RU", { day: 'numeric', month: 'long' })}
+                    {" — "}
+                    {new Date(result.end_date || destinations[destinations.length - 1]?.dates?.end).toLocaleDateString("ru-RU", { day: 'numeric', month: 'long' })}
+                  </span>
                 </h2>
 
                 {/* Если это мульти-город, показываем маршрут визуально? Пока просто заголовок */}
@@ -643,35 +892,114 @@ const App = ({ page }) => {
                         Восстановить удалённые
                       </button>
                     )}
+                    {(savedSlug || id) && (
+                      <button className="action-btn" onClick={() => {
+                        const slug = savedSlug || id;
+                        window.open(`${API_URL}/checklist/${slug}/calendar`, '_blank');
+                      }}>  {t.exportCalendar || "В календарь"}</button>
+                    )}
+                    <button className="action-btn" onClick={() => window.print()}>
+                      {t.print || "Печать"}
+                    </button>
                   </div>
                 </div>
 
                 {/* Weather Forecast */}
-                <div className="forecast">
-                  <h3>🌤 <span>{t.forecast}</span></h3>
-                  <div className="forecast-grid">
-                    {result.daily_forecast.map((day) => (
-                      <div key={day.date} className={`forecast-card${day.source === "historical" ? " forecast-historical" : ""}`}>
-                        <div className="forecast-date">{formatDate(day.date)}</div>
+                {result.daily_forecast && result.daily_forecast.length > 0 && (
+                  <div className={`forecast-section ${!showForecast ? 'collapsed' : ''}`}>
+                    <div className="forecast-header" onClick={() => setShowForecast(!showForecast)}>
+                      <h3><span>{t.forecast}</span></h3>
+                      <button className="collapse-toggle">
+                        <span className={`chevron ${showForecast ? 'up' : ''}`}>▾</span>
+                      </button>
+                    </div>
 
-                        <img
-                          src={`https://openweathermap.org/img/wn/${day.icon}@2x.png`}
-                          alt={day.condition}
-                          className="forecast-icon"
-                        />
-                        <div className="forecast-conditions">{day.condition}</div>
-                        <div className="forecast-temp">
-                          {day.temp_min.toFixed(1)}° / {day.temp_max.toFixed(1)}°C
-                        </div>
-                        <div className="forecast-details">
-                          {day.humidity !== null && <span title="Влажность">💧 {day.humidity}%</span>}
-                          {day.uv_index !== null && <span title="УФ-индекс">☀️ {day.uv_index.toFixed(0)}</span>}
-                          {day.wind_speed !== null && <span title="Ветер">💨 {day.wind_speed.toFixed(0)} км/ч</span>}
-                        </div>
+                    {showForecast && (
+                      <div className="forecast-content">
+                        {Object.entries(
+                          result.daily_forecast.reduce((acc, day) => {
+                            const cityName = day.city || result.city || "";
+                            if (!acc[cityName]) acc[cityName] = [];
+                            acc[cityName].push(day);
+                            return acc;
+                          }, {})
+                        ).map(([cityName, days]) => (
+                          <div key={cityName} className="city-forecast-group">
+                            {Object.keys(result.daily_forecast.reduce((acc, day) => {
+                              const name = day.city || result.city || "";
+                              acc[name] = true;
+                              return acc;
+                            }, {})).length > 1 && (
+                                <h4 className="city-forecast-title">📍 {cityName}</h4>
+                              )}
+                            <div className="forecast-grid">
+                              {days.map((day) => (
+                                <div key={day.date} className={`forecast-card${day.source === "historical" ? " forecast-historical" : ""}`}>
+                                  <div className="forecast-date">{formatDate(day.date)}</div>
+
+                                  <img
+                                    src={`https://openweathermap.org/img/wn/${day.icon}@2x.png`}
+                                    alt={day.condition}
+                                    className="forecast-icon"
+                                  />
+                                  <div className="forecast-conditions">{day.condition}</div>
+                                  <div className="forecast-temp">
+                                    {day.temp_min.toFixed(1)}° / {day.temp_max.toFixed(1)}°C
+                                  </div>
+                                  <div className="forecast-details">
+                                    {day.humidity !== null && <span title="Влажность">💧 {day.humidity}%</span>}
+                                    {day.uv_index !== null && <span title="УФ-индекс">☀️ {day.uv_index.toFixed(0)}</span>}
+                                    {day.wind_speed !== null && <span title="Ветер">💨 {day.wind_speed.toFixed(0)} {t.kmh}</span>}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    )}
                   </div>
-                </div>
+                )}
+
+                {/* Route Timeline (multi-city) */}
+                {destinations.length > 1 && result && (
+                  <div className="route-timeline">
+                    <h3 className="section-title">🗺 {t.routeTitle || "Маршрут"}</h3>
+                    <div className="timeline-track">
+                      {destinations.map((dest, i) => (
+                        <div key={i} className="timeline-stop">
+                          <div className="timeline-dot" />
+                          {i < destinations.length - 1 && <div className="timeline-line" />}
+                          <div className="timeline-info">
+                            <div className="timeline-city">{dest.city || "..."}</div>
+                            {dest.dates?.start && (
+                              <div className="timeline-dates">
+                                {new Date(dest.dates.start).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}
+                                {" — "}
+                                {new Date(dest.dates.end).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Attractions */}
+                {result?.city && (
+                  <AttractionsSection city={result.city} lang={lang} />
+                )}
+
+                {/* Flights */}
+                {result && result.city && (
+                  <FlightsSection key={"fl-" + result.city} city={result.city} startDate={result.start_date || destinations[0]?.dates?.start} returnDate={result.end_date || destinations[destinations.length - 1]?.dates?.end} origin={originCity?.fullName || originCity || ""} />
+                )}
+
+                {/* Hotels */}
+                {result && result.city && (
+                  <HotelsSection key={"ht-" + result.city} city={result.city} startDate={result.start_date || destinations[0]?.dates?.start} endDate={result.end_date || destinations[destinations.length - 1]?.dates?.end} />
+                )}
 
               </div>
             )}

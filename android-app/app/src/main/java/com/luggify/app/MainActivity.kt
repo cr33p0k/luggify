@@ -22,6 +22,7 @@ class MainActivity : ComponentActivity() {
         val userId = UserIdHelper.getUserId(this)
         val userPreferencesDataStore = UserPreferencesDataStore(this)
         val viewModel = LuggifyViewModel(
+            context = this,
             userId = userId,
             userPreferencesDataStore = userPreferencesDataStore
         )

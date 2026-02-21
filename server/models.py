@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, Float, DateTime, ForeignKey, func
+from sqlalchemy import Column, Integer, String, Date, Float, DateTime, ForeignKey, func, Boolean, JSON
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -13,6 +13,7 @@ class User(Base):
     username = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=True)  # nullable для Telegram-пользователей
     tg_id = Column(String, unique=True, index=True, nullable=True)  # Telegram user ID
+    is_stats_public = Column(Boolean, default=True)
     created_at = Column(DateTime, server_default=func.now())
 
     # Связь с чеклистами
@@ -33,7 +34,10 @@ class Checklist(Base):
     tg_user_id = Column(String, nullable=True, index=True)  # Telegram user id
     checked_items = Column(ARRAY(String), nullable=True)
     removed_items = Column(ARRAY(String), nullable=True)
+    removed_items = Column(ARRAY(String), nullable=True)
     added_items = Column(ARRAY(String), nullable=True)
+    daily_forecast = Column(JSON, nullable=True) 
+    is_public = Column(Boolean, default=True)
 
     # Привязка к пользователю (nullable — для обратной совместимости)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)

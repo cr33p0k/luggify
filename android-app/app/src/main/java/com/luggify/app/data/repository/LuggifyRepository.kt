@@ -140,7 +140,6 @@ class LuggifyRepository(context: Context) {
             },
             onFailure = { _ ->
                 // Нет сети — возвращаем локальную версию с needsSync = true
-                // (уже установлено выше, но обновим для уверенности)
                 val offlineChecklist = localChecklist.copy(needsSync = true)
                 localStore.saveChecklist(offlineChecklist)
                 Result.success(offlineChecklist)
@@ -217,17 +216,28 @@ class LuggifyRepository(context: Context) {
         
         return result.fold(
             onSuccess = { serverChecklists ->
-                // Сохраняем погоду и needsSync из локальных версий
+                // Создаём карту локальных чеклистов для быстрого поиска
                 val localMap = localChecklists.associateBy { it.slug }
+                
                 val mergedChecklists = serverChecklists.map { serverChecklist ->
                     val localChecklist = localMap[serverChecklist.slug]
-                    val localForecast = localChecklist?.daily_forecast
-                    val localNeedsSync = localChecklist?.needsSync ?: false
                     
-                    serverChecklist.copy(
-                        daily_forecast = localForecast ?: serverChecklist.daily_forecast,
-                        needsSync = localNeedsSync // Сохраняем локальный флаг синхронизации
-                    )
+                    // Если локальный чеклист имеет несинхронизированные изменения,
+                    // используем локальные данные вместо серверных
+                    if (localChecklist != null && localChecklist.needsSync) {
+                        // Сохраняем локальные изменения, но обновляем базовые данные с сервера
+                        localChecklist.copy(
+                            // Базовые данные могут обновиться на сервере (например, items)
+                            // но состояние (checked, removed, added) сохраняем локальное
+                            needsSync = true
+                        )
+                    } else {
+                        // Нет локальных несинхронизированных изменений — берём с сервера
+                        serverChecklist.copy(
+                            daily_forecast = localChecklist?.daily_forecast ?: serverChecklist.daily_forecast,
+                            needsSync = false
+                        )
+                    }
                 }
                 localStore.saveAllChecklists(mergedChecklists)
                 Result.success(mergedChecklists)
@@ -273,5 +283,51 @@ class LuggifyRepository(context: Context) {
     
     suspend fun deleteChecklistLocally(slug: String) {
         localStore.deleteChecklist(slug)
+    }
+    
+    /**
+     * Синхронизировать все чеклисты с needsSync = true
+     * Вызывается при загрузке списка "Мои чеклисты" когда есть интернет
+     * @return список обновлённых чеклистов
+     */
+    suspend fun syncAllPendingChecklists(): List<Checklist> {
+        val allChecklists = localStore.getAllChecklists()
+        val pendingChecklists = allChecklists.filter { it.needsSync }
+        
+        if (pendingChecklists.isEmpty()) {
+            return allChecklists
+        }
+        
+        val updatedChecklists = allChecklists.toMutableList()
+        
+        for (checklist in pendingChecklists) {
+            val state = ChecklistStateUpdate(
+                checked_items = checklist.checked_items,
+                removed_items = checklist.removed_items,
+                added_items = checklist.added_items,
+                items = checklist.items
+            )
+            
+            val result = handleApiCall(
+                call = { api.updateChecklistState(checklist.slug, state) },
+                errorMessage = "Ошибка синхронизации"
+            )
+            
+            result.onSuccess { serverChecklist ->
+                // Успешная синхронизация — обновляем в списке
+                val index = updatedChecklists.indexOfFirst { it.slug == checklist.slug }
+                if (index != -1) {
+                    updatedChecklists[index] = serverChecklist.copy(
+                        daily_forecast = checklist.daily_forecast,
+                        needsSync = false
+                    )
+                }
+            }
+            // При ошибке — чеклист остаётся с needsSync = true
+        }
+        
+        // Сохраняем обновлённый список
+        localStore.saveAllChecklists(updatedChecklists)
+        return updatedChecklists
     }
 }

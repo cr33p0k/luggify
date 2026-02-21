@@ -16,7 +16,7 @@ const TRANSLATIONS = {
   }
 };
 
-const DateRangePicker = ({ value, onChange, lang = "ru" }) => {
+const DateRangePicker = ({ value, onChange, lang = "ru", minDate: externalMinDate }) => {
   const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
   // value expected to be { start: "YYYY-MM-DD", end: "YYYY-MM-DD" }
 
@@ -36,6 +36,7 @@ const DateRangePicker = ({ value, onChange, lang = "ru" }) => {
 
   const startDate = value?.start ? new Date(value.start) : null;
   const endDate = value?.end ? new Date(value.end) : null;
+  const minDate = externalMinDate || new Date();
 
   return (
     <div className="input-group">
@@ -48,7 +49,7 @@ const DateRangePicker = ({ value, onChange, lang = "ru" }) => {
             dateFormat="dd.MM.yyyy"
             placeholderText={t.start}
             className="date-input"
-            minDate={new Date()}
+            minDate={minDate}
           />
         </div>
         <div className="date-field">
@@ -58,7 +59,7 @@ const DateRangePicker = ({ value, onChange, lang = "ru" }) => {
             dateFormat="dd.MM.yyyy"
             placeholderText={t.end}
             className="date-input"
-            minDate={startDate || new Date()}
+            minDate={startDate || minDate}
           />
         </div>
       </div>

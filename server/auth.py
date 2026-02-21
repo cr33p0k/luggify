@@ -51,6 +51,9 @@ async def get_db():
     async with SessionLocal() as session:
         try:
             yield session
+        except HTTPException:
+            await session.rollback()
+            raise
         except Exception as e:
             await session.rollback()
             raise HTTPException(status_code=503, detail=f"Ошибка БД: {str(e)}")

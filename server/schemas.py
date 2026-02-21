@@ -49,6 +49,11 @@ class DailyForecast(BaseModel):
     icon: str
     temp_min: float
     temp_max: float
+    city: Optional[str] = None
+    humidity: Optional[float] = None
+    uv_index: Optional[float] = None
+    wind_speed: Optional[float] = None
+    source: Optional[str] = "forecast"
 
 
 class ChecklistCreate(BaseModel):
@@ -61,6 +66,7 @@ class ChecklistCreate(BaseModel):
     checked_items: Optional[List[str]] = None
     removed_items: Optional[List[str]] = None
     added_items: Optional[List[str]] = None
+    daily_forecast: Optional[List[DailyForecast]] = None
     tg_user_id: Optional[str] = None
     user_id: Optional[int] = None
     is_public: bool = True

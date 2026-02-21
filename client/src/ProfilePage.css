@@ -15,6 +15,65 @@
     background: var(--bg-card, #141414);
     border: 1px solid var(--border-subtle, rgba(255, 165, 0, 0.12));
     border-radius: var(--radius-xl, 16px);
+    position: relative;
+}
+
+.privacy-toggle-btn {
+    position: absolute;
+    top: 1.5rem;
+    right: 1.5rem;
+    background: transparent;
+    border: none;
+    font-size: 1.2rem;
+    cursor: pointer;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+}
+
+.privacy-toggle-btn:hover {
+    opacity: 1;
+}
+
+.privacy-toggle-btn.private {
+    opacity: 0.5;
+    filter: grayscale(100%);
+}
+
+.profile-stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+    margin-bottom: 2rem;
+    transition: opacity 0.3s;
+}
+
+.profile-stats.opacity-50 {
+    opacity: 0.5;
+}
+
+.stat-item {
+    background: var(--bg-card, #141414);
+    border: 1px solid var(--border-subtle, rgba(255, 165, 0, 0.12));
+    border-radius: var(--radius-lg, 12px);
+    padding: 1rem;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+.stat-val {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: var(--orange, #ff9900);
+}
+
+.stat-lbl {
+    font-size: 0.75rem;
+    color: var(--text-secondary, #888);
+    text-transform: uppercase;
+    margin-top: 0.2rem;
 }
 
 .profile-avatar {
@@ -41,6 +100,23 @@
     font-size: 0.85rem;
     color: var(--text-secondary, #888);
     margin: 0.2rem 0 0;
+}
+
+.share-btn-text {
+    background: transparent;
+    border: none;
+    color: var(--orange, #ff9900);
+    cursor: pointer;
+    font-size: 0.8rem;
+    padding: 0;
+    text-decoration: underline;
+    opacity: 0.9;
+    transition: all 0.2s;
+}
+
+.share-btn-text:hover {
+    color: #fff;
+    opacity: 1;
 }
 
 .profile-section-title {
@@ -96,14 +172,26 @@
     position: relative;
 }
 
-.delete-btn {
+.card-actions {
     position: absolute;
     top: 10px;
     right: 10px;
-    background: transparent;
+    display: flex;
+    gap: 4px;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+
+.checklist-preview-card:hover .card-actions {
+    opacity: 1;
+}
+
+.delete-btn,
+.privacy-btn {
+    background: rgba(0, 0, 0, 0.4);
     border: none;
     color: var(--text-secondary, #888);
-    font-size: 1.2rem;
+    font-size: 1rem;
     cursor: pointer;
     width: 28px;
     height: 28px;
@@ -112,16 +200,20 @@
     align-items: center;
     justify-content: center;
     transition: all 0.2s;
-    opacity: 0;
-}
-
-.checklist-preview-card:hover .delete-btn {
-    opacity: 1;
 }
 
 .delete-btn:hover {
-    background: rgba(255, 77, 77, 0.15);
+    background: rgba(255, 77, 77, 0.2);
     color: #ff4d4d;
+}
+
+.privacy-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #fff;
+}
+
+.privacy-btn.private {
+    opacity: 0.7;
 }
 
 .checklist-preview-card:hover {
@@ -155,8 +247,159 @@
     color: #666;
 }
 
+/* === Level Badge === */
+.level-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: linear-gradient(135deg, rgba(255, 153, 0, 0.15), rgba(255, 153, 0, 0.05));
+    border: 1px solid rgba(255, 153, 0, 0.3);
+    border-radius: 20px;
+    padding: 2px 10px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--orange, #ff9900);
+    margin-left: 8px;
+    vertical-align: middle;
+}
+
+/* === Achievements Section === */
+.achievements-section {
+    margin-bottom: 2rem;
+}
+
+.achievement-counter {
+    font-size: 0.8rem;
+    font-weight: 400;
+    color: var(--text-secondary, #888);
+    margin-left: 8px;
+}
+
+.achievements-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 1rem;
+}
+
+.achievement-card {
+    background: var(--bg-card, #141414);
+    border: 1px solid var(--border-subtle, rgba(255, 165, 0, 0.12));
+    border-radius: var(--radius-lg, 14px);
+    padding: 1.2rem;
+    text-align: center;
+    transition: all 0.3s ease;
+    position: relative;
+    overflow: hidden;
+}
+
+.achievement-card.unlocked {
+    border-color: rgba(255, 153, 0, 0.4);
+    background: linear-gradient(135deg, rgba(255, 153, 0, 0.08), transparent);
+}
+
+.achievement-card.locked {
+    opacity: 0.45;
+    filter: grayscale(80%);
+}
+
+.achievement-card.unlocked:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 8px 24px rgba(255, 153, 0, 0.15);
+}
+
+.achievement-icon {
+    font-size: 2rem;
+    margin-bottom: 0.5rem;
+}
+
+.achievement-name {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #f0f0f0;
+    margin-bottom: 0.3rem;
+}
+
+.achievement-desc {
+    font-size: 0.7rem;
+    color: var(--text-secondary, #888);
+    margin-bottom: 0.6rem;
+    line-height: 1.3;
+}
+
+.achievement-progress-bar {
+    width: 100%;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.achievement-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--orange, #ff9900), #ffcc00);
+    border-radius: 2px;
+    transition: width 0.5s ease;
+}
+
+/* === Feedback Section === */
+.feedback-section {
+    margin-bottom: 2rem;
+}
+
+.feedback-columns {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+}
+
+.feedback-col h4 {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #f0f0f0;
+    margin-bottom: 0.8rem;
+}
+
+.feedback-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0.8rem;
+    background: var(--bg-card, #141414);
+    border: 1px solid var(--border-subtle, rgba(255, 165, 0, 0.12));
+    border-radius: 8px;
+    margin-bottom: 0.4rem;
+    font-size: 0.82rem;
+    color: var(--text-secondary, #888);
+}
+
+.feedback-item.added {
+    border-left: 3px solid #4ade80;
+}
+
+.feedback-item.removed {
+    border-left: 3px solid #f87171;
+}
+
+.feedback-count {
+    color: var(--orange, #ff9900);
+    font-weight: 600;
+    font-size: 0.75rem;
+}
+
 @media (max-width: 600px) {
     .checklists-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .profile-stats {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .achievements-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .feedback-columns {
         grid-template-columns: 1fr;
     }
 }

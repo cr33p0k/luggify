@@ -307,6 +307,7 @@ class LuggifyViewModel(
         if (userId.isEmpty()) return
         
         viewModelScope.launch {
+            // 1. Сразу показываем локальные данные
             val localChecklists = repository.getLocalChecklists()
             _uiState.value = _uiState.value.copy(
                 myChecklists = localChecklists,
@@ -315,6 +316,7 @@ class LuggifyViewModel(
                 isOfflineMode = false
             )
             
+            // 2. Проверяем сеть
             val isNetworkAvailable = NetworkUtils.isNetworkAvailable(appContext)
             
             if (!isNetworkAvailable) {
@@ -322,6 +324,17 @@ class LuggifyViewModel(
                 return@launch
             }
             
+            // 3. Есть сеть — сначала синхронизируем все несинхронизированные чеклисты
+            val hasPendingSync = localChecklists.any { it.needsSync }
+            if (hasPendingSync) {
+                val syncedChecklists = repository.syncAllPendingChecklists()
+                _uiState.value = _uiState.value.copy(
+                    myChecklists = syncedChecklists,
+                    error = null
+                )
+            }
+            
+            // 4. Загружаем актуальный список с сервера
             if (localChecklists.isEmpty()) {
                 _uiState.value = _uiState.value.copy(isLoadingChecklists = true)
             }

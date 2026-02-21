@@ -88,6 +88,7 @@ async def create_checklist(db: AsyncSession, data: schemas.ChecklistCreate):
         checked_items=data.checked_items,
         removed_items=data.removed_items,
         added_items=data.added_items,
+        daily_forecast=[f.model_dump(mode='json') if hasattr(f, 'model_dump') else f for f in data.daily_forecast] if data.daily_forecast else None,
         user_id=data.user_id,
     )
     db.add(checklist)

@@ -1,8 +1,12 @@
 import os
 from datetime import datetime, timedelta
+from urllib.parse import quote as url_quote
 import httpx
 from fastapi import FastAPI, Query, Depends, HTTPException, Body, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+import time
+import asyncio
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -82,20 +86,10 @@ class MultiCityPackingRequest(BaseModel):
     traveling_with_pet: bool = False
     has_allergies: bool = False
     has_chronic_diseases: bool = False
-
-class DailyForecastItem(BaseModel):
-    date: str
-    temp_min: float
-    temp_max: float
-    condition: str
-    icon: str
-    source: str = "forecast"  # "forecast" или "historical"
-    humidity: Optional[float] = None       # средняя влажность %
-    uv_index: Optional[float] = None       # макс. УФ-индекс
-    wind_speed: Optional[float] = None     # макс. скорость ветра км/ч
+    language: str = "ru"
 
 class ChecklistResponse(schemas.ChecklistOut):
-    daily_forecast: list[DailyForecastItem]
+    daily_forecast: list[schemas.DailyForecast]
 
 class StatsResponse(BaseModel):
     total_trips: int
@@ -245,6 +239,149 @@ async def get_my_checklists(
     return checklists
 
 
+# === Feature: Gamification (Achievements + Levels) ===
+
+ACHIEVEMENTS = [
+    {"id": "first_step", "icon": "🎒", "name_ru": "Первый шаг", "name_en": "First Step",
+     "desc_ru": "Создайте первый чеклист", "desc_en": "Create your first checklist"},
+    {"id": "explorer", "icon": "🧭", "name_ru": "Исследователь", "name_en": "Explorer",
+     "desc_ru": "Совершите 3 поездки", "desc_en": "Complete 3 trips"},
+    {"id": "globetrotter", "icon": "🌍", "name_ru": "Глобус-троттер", "name_en": "Globetrotter",
+     "desc_ru": "Совершите 10 поездок", "desc_en": "Complete 10 trips"},
+    {"id": "multi_city", "icon": "🗺", "name_ru": "Мультигород", "name_en": "Multi-City",
+     "desc_ru": "Создайте маршрут из нескольких городов", "desc_en": "Create a multi-city route"},
+    {"id": "snowbird", "icon": "❄️", "name_ru": "Снежок", "name_en": "Snowbird",
+     "desc_ru": "Поездка при температуре ниже 0°C", "desc_en": "Trip with temperature below 0°C"},
+    {"id": "beach_lover", "icon": "🏖", "name_ru": "Пляжник", "name_en": "Beach Lover",
+     "desc_ru": "Поездка при температуре выше 25°C", "desc_en": "Trip with temperature above 25°C"},
+    {"id": "marathoner", "icon": "🏃", "name_ru": "Марафонец", "name_en": "Marathoner",
+     "desc_ru": "Суммарно более 30 дней в поездках", "desc_en": "More than 30 days of travel total"},
+    {"id": "cosmopolitan", "icon": "🌐", "name_ru": "Космополит", "name_en": "Cosmopolitan",
+     "desc_ru": "Побывайте в 5+ странах", "desc_en": "Visit 5+ countries"},
+    {"id": "list_keeper", "icon": "📋", "name_ru": "Хранитель списков", "name_en": "List Keeper",
+     "desc_ru": "Создайте более 20 чеклистов", "desc_en": "Create more than 20 checklists"},
+]
+
+LEVELS = [
+    {"name_ru": "Новичок", "name_en": "Novice", "icon": "🌱", "min": 0, "max": 2},
+    {"name_ru": "Путешественник", "name_en": "Traveler", "icon": "✈️", "min": 3, "max": 5},
+    {"name_ru": "Эксперт", "name_en": "Expert", "icon": "🏅", "min": 6, "max": 7},
+    {"name_ru": "Легенда", "name_en": "Legend", "icon": "👑", "min": 8, "max": 9},
+]
+
+def compute_achievements(checklists):
+    """Вычисляет ачивки на основе чеклистов пользователя"""
+    total = len(checklists)
+    total_days = 0
+    countries = set()
+    has_multi_city = False
+    has_cold = False
+    has_hot = False
+
+    for c in checklists:
+        if c.start_date and c.end_date:
+            days = (c.end_date - c.start_date).days + 1
+            if days > 0:
+                total_days += days
+        if c.city and "+" in c.city:
+            has_multi_city = True
+        if c.city and "," in c.city:
+            countries.add(c.city.split(",")[-1].strip())
+        if c.avg_temp is not None:
+            if c.avg_temp < 0:
+                has_cold = True
+            if c.avg_temp > 25:
+                has_hot = True
+
+    unlocked = []
+    if total >= 1: unlocked.append("first_step")
+    if total >= 3: unlocked.append("explorer")
+    if total >= 10: unlocked.append("globetrotter")
+    if has_multi_city: unlocked.append("multi_city")
+    if has_cold: unlocked.append("snowbird")
+    if has_hot: unlocked.append("beach_lover")
+    if total_days > 30: unlocked.append("marathoner")
+    if len(countries) >= 5: unlocked.append("cosmopolitan")
+    if total > 20: unlocked.append("list_keeper")
+
+    # Determine progress for each
+    results = []
+    for a in ACHIEVEMENTS:
+        is_unlocked = a["id"] in unlocked
+        progress = 0
+        if a["id"] == "first_step":
+            progress = min(total, 1)
+        elif a["id"] == "explorer":
+            progress = min(total / 3, 1)
+        elif a["id"] == "globetrotter":
+            progress = min(total / 10, 1)
+        elif a["id"] == "multi_city":
+            progress = 1 if has_multi_city else 0
+        elif a["id"] == "snowbird":
+            progress = 1 if has_cold else 0
+        elif a["id"] == "beach_lover":
+            progress = 1 if has_hot else 0
+        elif a["id"] == "marathoner":
+            progress = min(total_days / 30, 1)
+        elif a["id"] == "cosmopolitan":
+            progress = min(len(countries) / 5, 1)
+        elif a["id"] == "list_keeper":
+            progress = min(total / 20, 1)
+
+        results.append({
+            **a,
+            "unlocked": is_unlocked,
+            "progress": round(progress, 2)
+        })
+
+    # Level
+    unlocked_count = len(unlocked)
+    level = LEVELS[0]
+    for lv in LEVELS:
+        if unlocked_count >= lv["min"]:
+            level = lv
+
+    return {"achievements": results, "level": level, "unlocked_count": unlocked_count}
+
+
+@app.get("/my-achievements")
+async def get_my_achievements(
+    user=Depends(require_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Достижения и уровень пользователя"""
+    checklists = await crud.get_checklists_by_user_id(db, user.id)
+    return compute_achievements(checklists)
+
+
+# === Feature: Feedback Stats ===
+
+@app.get("/my-feedback-stats")
+async def get_my_feedback_stats(
+    user=Depends(require_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Статистика предпочтений: что чаще удаляют/добавляют"""
+    checklists = await crud.get_checklists_by_user_id(db, user.id)
+
+    removed_counts = {}
+    added_counts = {}
+
+    for c in checklists:
+        for item in (c.removed_items or []):
+            removed_counts[item] = removed_counts.get(item, 0) + 1
+        for item in (c.added_items or []):
+            added_counts[item] = added_counts.get(item, 0) + 1
+
+    top_removed = sorted(removed_counts.items(), key=lambda x: -x[1])[:10]
+    top_added = sorted(added_counts.items(), key=lambda x: -x[1])[:10]
+
+    return {
+        "top_removed": [{"item": k, "count": v} for k, v in top_removed],
+        "top_added": [{"item": k, "count": v} for k, v in top_added],
+    }
+
+
 @app.get("/my-stats", response_model=StatsResponse)
 async def get_my_stats(
     user=Depends(require_current_user),
@@ -289,7 +426,509 @@ async def get_my_stats(
     }
 
 
-async def get_weather_forecast_data(city: str, start_date: datetime.date, end_date: datetime.date) -> List[DailyForecastItem]:
+# === Feature: Calendar Export (.ics) ===
+
+@app.get("/checklist/{slug}/calendar")
+async def export_checklist_calendar(slug: str, db: AsyncSession = Depends(get_db)):
+    """Экспорт чеклиста в .ics формат для добавления в календарь"""
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    
+    # Format items for description
+    items_text = "\\n".join(f"- {item}" for item in (checklist.items or []))
+    city = checklist.city or "Trip"
+    start = checklist.start_date.strftime("%Y%m%d")
+    end = (checklist.end_date + timedelta(days=1)).strftime("%Y%m%d")  # iCal end is exclusive
+    now = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    
+    ics_content = f"""BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Luggify//Trip Planner//EN
+BEGIN:VEVENT
+DTSTART;VALUE=DATE:{start}
+DTEND;VALUE=DATE:{end}
+SUMMARY:🧳 {city}
+DESCRIPTION:Чеклист Luggify:\\n{items_text}
+DTSTAMP:{now}
+UID:{slug}@luggify.app
+END:VEVENT
+END:VCALENDAR"""
+    
+    return Response(
+        content=ics_content,
+        media_type="text/calendar",
+        headers={"Content-Disposition": f'attachment; filename="luggify-{slug}.ics"'}
+    )
+
+
+# === Feature: Attractions (Curated + Wikipedia) ===
+
+ATTRACTIONS_CACHE = {}
+ATTRACTIONS_LOCKS = {}
+
+
+# Топ достопримечательности для популярных городов (en.wikipedia article titles)
+_CURATED = {
+    "Paris": ["Eiffel Tower","Louvre","Notre-Dame de Paris","Arc de Triomphe","Sacré-Cœur, Paris","Musée d'Orsay","Palace of Versailles","Champs-Élysées","Panthéon, Paris","Sainte-Chapelle","Centre Pompidou","Les Invalides","Place de la Concorde","Palais Garnier","Pont Alexandre III"],
+    "London": ["Tower of London","Buckingham Palace","British Museum","London Eye","Big Ben","Tower Bridge","Westminster Abbey","St Paul's Cathedral","Hyde Park, London","Trafalgar Square","Natural History Museum, London","Tate Modern","Palace of Westminster","Kensington Palace","Hampton Court Palace"],
+    "Rome": ["Colosseum","Pantheon, Rome","Trevi Fountain","Roman Forum","Vatican Museums","St. Peter's Basilica","Sistine Chapel","Piazza Navona","Spanish Steps","Castel Sant'Angelo","Borghese Gallery","Piazza Venezia","Palatine Hill","Basilica di Santa Maria Maggiore","Aventine Hill"],
+    "New York City": ["Statue of Liberty","Central Park","Empire State Building","Times Square","Brooklyn Bridge","Metropolitan Museum of Art","One World Trade Center","Rockefeller Center","Grand Central Terminal","High Line","Museum of Modern Art","Fifth Avenue","Broadway (Manhattan)","Wall Street","Chelsea Market"],
+    "Tokyo": ["Sensō-ji","Meiji Shrine","Tokyo Skytree","Tokyo Tower","Shibuya Crossing","Imperial Palace, Tokyo","Shinjuku Gyoen","Ueno Park","Akihabara","Odaiba","Roppongi Hills","Harajuku","Ginza","Asakusa","Tsukiji fish market"],
+    "Istanbul": ["Hagia Sophia","Blue Mosque","Topkapi Palace","Grand Bazaar","Basilica Cistern","Galata Tower","Dolmabahçe Palace","Süleymaniye Mosque","Bosphorus","Spice Bazaar","Maiden's Tower","Taksim Square","Istiklal Avenue","Chora Church","Pierre Loti"],
+    "Barcelona": ["Sagrada Família","Park Güell","Casa Batlló","La Rambla, Barcelona","Casa Milà","Gothic Quarter, Barcelona","Camp Nou","Palau de la Música Catalana","Barcelona Cathedral","Magic Fountain of Montjuïc","Barceloneta","Montjuïc","Tibidabo","Port Vell","Picasso Museum (Barcelona)"],
+    "Berlin": ["Brandenburg Gate","Berlin Wall","Reichstag building","Museum Island","Checkpoint Charlie","East Side Gallery","Berlin Cathedral","Alexanderplatz","Berlin Television Tower","Charlottenburg Palace","Pergamon Museum","Tiergarten","Potsdamer Platz","Victory Column (Berlin)","Holocaust memorial (Berlin)"],
+    "Dubai": ["Burj Khalifa","Palm Jumeirah","Dubai Mall","Burj Al Arab","Dubai Marina","Dubai Fountain","Museum of the Future","Gold Souk","Dubai Frame","Jumeirah Mosque","Mall of the Emirates","Al Fahidi Historical Neighbourhood","Dubai Creek","Miracle Garden","Global Village"],
+    "Moscow": ["Red Square","Moscow Kremlin","Saint Basil's Cathedral","Bolshoi Theatre","Moscow Metro","Tretyakov Gallery","Cathedral of Christ the Saviour","Arbat Street","GUM (department store)","Gorky Park (Moscow)","Sparrow Hills","Novodevichy Convent","VDNKh","Pushkin Museum","Kolomenskoye"],
+    "Saint Petersburg": ["Hermitage Museum","Church of the Savior on Blood","Peter and Paul Fortress","Saint Isaac's Cathedral","Peterhof Palace","Winter Palace","Nevsky Prospect","Mariinsky Theatre","Catherine Palace","Russian Museum","Palace Square","Kazan Cathedral, Saint Petersburg","Summer Garden","Bronze Horseman","Alexander Column"],
+    "Prague": ["Charles Bridge","Prague Castle","Old Town Square (Prague)","Prague astronomical clock","St. Vitus Cathedral","Wenceslas Square","Dancing House","Lennon Wall","Petřín","Powder Tower","Josefov","Vyšehrad","National Museum (Prague)","Municipal House (Prague)","Old Jewish Cemetery, Prague"],
+    "Amsterdam": ["Rijksmuseum","Anne Frank House","Van Gogh Museum","Royal Palace of Amsterdam","Dam Square","Vondelpark","Jordaan","Heineken Experience","Magere Brug","Westerkerk","NEMO (museum)","Stedelijk Museum Amsterdam","Bloemenmarkt","Museumplein","Begijnhof, Amsterdam"],
+    "Vienna": ["Schönbrunn Palace","St. Stephen's Cathedral, Vienna","Hofburg","Belvedere, Vienna","Vienna State Opera","Kunsthistorisches Museum","Prater","Naschmarkt","Austrian Parliament Building","Albertina","MuseumsQuartier","Rathaus, Vienna","Ringstraße","Graben, Vienna","Vienna Secession"],
+    "Bangkok": ["Grand Palace (Bangkok)","Wat Arun","Wat Pho","Khao San Road","Temple of the Emerald Buddha","Jim Thompson House","Lumpini Park","Erawan Shrine","Chatuchak Weekend Market","Chinatown, Bangkok","Asiatique The Riverfront","Wat Saket","MBK Center","Siam Paragon","Floating market"],
+    "Beijing": ["Forbidden City","Great Wall of China","Temple of Heaven","Summer Palace","Tiananmen Square","Ming tombs","Beihai Park","Lama Temple","798 Art District","Jingshan Park","Hutong","National Museum of China","Dashilan","Olympic Green","Drum Tower of Beijing"],
+    "Sydney": ["Sydney Opera House","Sydney Harbour Bridge","Bondi Beach","Darling Harbour","Taronga Zoo","Royal Botanic Garden, Sydney","Circular Quay","The Rocks, Sydney","Manly Beach","Sydney Tower","Art Gallery of New South Wales","Luna Park Sydney","Barangaroo","Museum of Contemporary Art Australia","Paddy's Markets"],
+    "Cairo": ["Great Pyramid of Giza","Egyptian Museum","Great Sphinx of Giza","Khan el-Khalili","Cairo Citadel","Al-Azhar Mosque","Mosque of Muhammad Ali","Cairo Tower","Coptic Cairo","Al-Muizz Street","Tahrir Square","Baron Empain Palace","Hanging Church (Cairo)","Giza pyramid complex","Museum of Islamic Art, Cairo"],
+    "Singapore": ["Marina Bay Sands","Gardens by the Bay","Merlion","Sentosa","Singapore Zoo","Orchard Road","Singapore Botanic Gardens","Chinatown, Singapore","Clarke Quay","Little India, Singapore","ArtScience Museum","Raffles Hotel","Esplanade – Theatres on the Bay","National Gallery Singapore","Singapore Flyer"],
+    "Athens": ["Acropolis of Athens","Parthenon","Ancient Agora of Athens","Erechtheion","Plaka","Monastiraki","Syntagma Square","Panathenaic Stadium","Acropolis Museum","Temple of Hephaestus","Lycabettus","National Archaeological Museum, Athens","Hadrian's Arch (Athens)","Temple of Olympian Zeus, Athens","Odeon of Herodes Atticus"],
+    "Lisbon": ["Belém Tower","Jerónimos Monastery","Praça do Comércio","Alfama","Santa Justa Lift","São Jorge Castle","Tram 28 (Lisbon)","Pastéis de Belém","Ponte 25 de Abril","LX Factory","Oceanário de Lisboa","Pantheon of Portugal","Time Out Market","Bairro Alto","Rossio"],
+    "Budapest": ["Hungarian Parliament Building","Buda Castle","Széchenyi thermal bath","Fisherman's Bastion","Chain Bridge (Budapest)","St. Stephen's Basilica (Budapest)","Heroes' Square (Budapest)","Matthias Church","Margaret Island","Great Market Hall (Budapest)","Citadella","Gellért thermal bath","Dohány Street Synagogue","Andrássy Avenue","Vajdahunyad Castle"],
+    "Warsaw": ["Royal Castle, Warsaw","Old Town Market Place, Warsaw","Wilanów Palace","Palace of Culture and Science","Łazienki Park","Warsaw Uprising Museum","St. John's Archcathedral, Warsaw","Copernicus Science Centre","National Museum, Warsaw","Saxon Garden","Sigismund's Column","Warsaw Barbican","POLIN Museum","Warsaw Old Town","Belweder"],
+    "Madrid": ["Royal Palace of Madrid","Prado Museum","Retiro Park","Puerta del Sol","Plaza Mayor, Madrid","Reina Sofía","Thyssen-Bornemisza Museum","Temple of Debod","Gran Vía","Almudena Cathedral","Santiago Bernabéu Stadium","Cibeles Palace","Royal Botanical Garden of Madrid","Plaza de Cibeles","Puerta de Alcalá"],
+    "Milan": ["Milan Cathedral","Galleria Vittorio Emanuele II","Santa Maria delle Grazie","Sforza Castle","Pinacoteca di Brera","La Scala","Navigli","San Siro","Basilica of Sant'Ambrogio","Piazza del Duomo, Milan","Quadrilatero della moda","Cimitero Monumentale di Milano","Pinacoteca Ambrosiana","Arco della Pace","Piazza Mercanti"],
+    "Munich": ["Marienplatz","Nymphenburg Palace","Englischer Garten","BMW Welt","Frauenkirche, Munich","Deutsches Museum","Viktualienmarkt","Munich Residenz","Allianz Arena","Hofbräuhaus","Alte Pinakothek","Olympiapark, Munich","Asamkirche","St. Peter's Church, Munich","Karlsplatz"],
+    "Florence": ["Florence Cathedral","Uffizi","Ponte Vecchio","Palazzo Pitti","Piazzale Michelangelo","Galleria dell'Accademia","Palazzo Vecchio","Piazza della Signoria","Boboli Gardens","Basilica of Santa Croce, Florence","Basilica of San Lorenzo, Florence","Bargello","Baptistery of Saint John (Florence)","Basilica di Santa Maria Novella","Piazza della Repubblica, Florence"],
+    "Edinburgh": ["Edinburgh Castle","Royal Mile","Arthur's Seat","Holyrood Palace","Scott Monument","Calton Hill","National Museum of Scotland","St Giles' Cathedral","Princes Street","Edinburgh Old Town","Greyfriars Kirkyard","Royal Botanic Garden Edinburgh","Camera Obscura, Edinburgh","Edinburgh Zoo","Dean Village"],
+    "Copenhagen": ["Tivoli Gardens","The Little Mermaid (statue)","Nyhavn","Amalienborg","Christiansborg Palace","Rosenborg Castle","Strøget","Christiania (district)","Round Tower (Copenhagen)","National Museum of Denmark","Church of Our Saviour, Copenhagen","Ny Carlsberg Glyptotek","Frederiksberg Garden","Kastellet, Copenhagen","Copenhagen Opera House"],
+    "Oslo": ["Oslo Opera House","Vigeland sculpture park","Viking Ship Museum (Oslo)","Akershus Fortress","Holmenkollbakken","Munch Museum","Oslo City Hall","Royal Palace, Oslo","Aker Brygge","Karl Johans gate","Norsk Folkemuseum","Bygdøy","Oslo Cathedral","National Gallery (Oslo)","Fram Museum"],
+    "Stockholm": ["Vasa Museum","Gamla stan","Stockholm Palace","Stockholm City Hall","Skansen","ABBA The Museum","Djurgården","Drottningholm Palace","Storkyrkan","Moderna Museet","Fotografiska","Nobel Prize Museum","Stadshuset","Södermalm","Stortorget, Stockholm"],
+    "Helsinki": ["Helsinki Cathedral","Suomenlinna","Temppeliaukio Church","Senate Square, Helsinki","Sibelius Monument","Ateneum","Uspenski Cathedral","Market Square, Helsinki","Esplanadi","Kiasma","Oodi","Helsinki Olympic Stadium","Seurasaari","Hakaniemi Market Hall","Kaivopuisto"],
+    "Zurich": ["Grossmünster","Lake Zurich","Bahnhofstrasse","Fraumünster","Old Town, Zurich","Swiss National Museum","Kunsthaus Zürich","Lindenhof hill, Zurich","Zurich Zoo","Uetliberg","FIFA World Football Museum","St. Peter, Zurich","Zürichsee","Pavillon Le Corbusier","Botanical Garden of the University of Zurich"],
+    "Porto": ["Livraria Lello","Clérigos Tower","Dom Luís I Bridge","Ribeira, Porto","São Bento railway station","Porto Cathedral","Palácio da Bolsa","Crystal Palace Gardens","Serralves","Igreja do Carmo (Porto)","Foz do Douro","Majestic Café","Church of São Francisco (Porto)","Jardim do Morro","Port wine"],
+    "Dubrovnik": ["Walls of Dubrovnik","Stradun (street)","Dubrovnik Cable Car","Rector's Palace, Dubrovnik","Lokrum","Fort Lovrijenac","Sponza Palace","Pile Gate","Dominican Monastery, Dubrovnik","Banje Beach","Franciscan Church and Monastery, Dubrovnik","Dubrovnik Cathedral","Trsteno Arboretum","Buža Bar","Orlando's Column, Dubrovnik"],
+    "Krakow": ["Wawel Castle","Main Market Square, Kraków","Cloth Hall, Kraków","St. Mary's Basilica, Kraków","Kazimierz","Auschwitz concentration camp","Wieliczka Salt Mine","Wawel Cathedral","Planty Park","Schindler's Factory","Collegium Maius","Barbican of Kraków","Floriańska Street","National Museum in Kraków","Kościuszko Mound"],
+    "Seoul": ["Gyeongbokgung","Bukchon Hanok Village","N Seoul Tower","Myeongdong","Changdeokgung","Dongdaemun Design Plaza","Gwanghwamun","Insadong","Lotte World Tower","War Memorial of Korea","Namdaemun Market","Jogyesa","Cheonggyecheon","Itaewon","COEX Mall"],
+    "Hong Kong": ["Victoria Peak","Victoria Harbour","Star Ferry","Tian Tan Buddha","Wong Tai Sin Temple","Avenue of Stars, Hong Kong","Temple Street Night Market","Hong Kong Disneyland","Ngong Ping 360","Man Mo Temple","Repulse Bay","Lan Kwai Fong","Chi Lin Nunnery","Ladies' Market","Ocean Park Hong Kong"],
+    "Kuala Lumpur": ["Petronas Towers","Batu Caves","KL Tower","Merdeka Square, Kuala Lumpur","Petaling Street","Islamic Arts Museum Malaysia","Sultan Abdul Samad Building","Thean Hou Temple","Perdana Botanical Garden","National Mosque of Malaysia","Central Market, Kuala Lumpur","Aquaria KLCC","Bukit Bintang","National Museum of Malaysia","Istana Negara, Jalan Istana"],
+    "Hanoi": ["Hoan Kiem Lake","Temple of Literature, Hanoi","Ho Chi Minh Mausoleum","Old Quarter (Hanoi)","One Pillar Pagoda","Vietnam Museum of Ethnology","Hoa Lo Prison","Long Biên Bridge","West Lake (Hanoi)","Hanoi Opera House","St. Joseph's Cathedral, Hanoi","Tran Quoc Pagoda","Imperial Citadel of Thăng Long","Ngoc Son Temple","Dong Xuan Market"],
+    "Delhi": ["Red Fort","India Gate","Humayun's Tomb","Qutub Minar","Lotus Temple","Jama Masjid, Delhi","Akshardham (Delhi)","Raj Ghat","Chandni Chowk","Rashtrapati Bhavan","Connaught Place","Gurudwara Bangla Sahib","Lodhi Garden","Purana Qila","Jantar Mantar, New Delhi"],
+    "Mumbai": ["Gateway of India","Chhatrapati Shivaji Maharaj Terminus","Marine Drive, Mumbai","Elephanta Caves","Haji Ali Dargah","Siddhivinayak Temple","Bandra–Worli Sea Link","Chhatrapati Shivaji Maharaj Vastu Sangrahalaya","Colaba Causeway","Juhu Beach","Dharavi","Banganga Tank","Mani Bhavan","Crawford Market","Flora Fountain"],
+    "Los Angeles": ["Hollywood Sign","Griffith Observatory","Getty Center","Hollywood Walk of Fame","Santa Monica Pier","Universal Studios Hollywood","Venice Beach, Los Angeles","The Broad","Los Angeles County Museum of Art","TCL Chinese Theatre","Walt Disney Concert Hall","Rodeo Drive","Sunset Boulevard","Dodger Stadium","Natural History Museum of Los Angeles County"],
+    "San Francisco": ["Golden Gate Bridge","Alcatraz Island","Fisherman's Wharf, San Francisco","Lombard Street","Chinatown, San Francisco","Palace of Fine Arts","Pier 39","Cable car (railway)","Golden Gate Park","Painted ladies","Coit Tower","Ghirardelli Square","Twin Peaks (San Francisco)","San Francisco Museum of Modern Art","Exploratorium"],
+    "Chicago": ["Millennium Park","Cloud Gate","Art Institute of Chicago","Willis Tower","Navy Pier","Magnificent Mile","Chicago Riverwalk","Field Museum of Natural History","Wrigley Field","Museum of Science and Industry (Chicago)","Grant Park (Chicago)","John Hancock Center","Buckingham Fountain","Lincoln Park Zoo","Water Tower (Chicago)"],
+    "Toronto": ["CN Tower","Royal Ontario Museum","Distillery District","Ripley's Aquarium of Canada","Art Gallery of Ontario","St. Lawrence Market","Casa Loma","Toronto Islands","Nathan Phillips Square","Kensington Market, Toronto","High Park","Hockey Hall of Fame","Harbourfront Centre","Dundas Square","Bata Shoe Museum"],
+    "Mexico City": ["Zócalo","Palacio de Bellas Artes","National Museum of Anthropology","Chapultepec","Coyoacán","Frida Kahlo Museum","Templo Mayor","Basilica of Our Lady of Guadalupe","Paseo de la Reforma","Xochimilco","National Palace (Mexico)","Palace of Chapultepec","Torre Latinoamericana","Angel of Independence","Ciudad Universitaria"],
+    "Rio de Janeiro": ["Christ the Redeemer","Sugarloaf Mountain","Copacabana","Ipanema","Maracanã Stadium","Escadaria Selarón","Santa Teresa, Rio de Janeiro","Tijuca National Park","Lapa, Rio de Janeiro","Jardim Botânico, Rio de Janeiro","Museum of Tomorrow","Arcos da Lapa","Pedra da Gávea","Praia Vermelha","Parque Lage"],
+    "Buenos Aires": ["Plaza de Mayo","Casa Rosada","La Boca","Recoleta Cemetery","Teatro Colón","Obelisco de Buenos Aires","San Telmo, Buenos Aires","Puerto Madero","Palermo, Buenos Aires","Caminito","Museo Nacional de Bellas Artes","Avenida 9 de Julio","Floralis Genérica","Palacio Barolo","El Ateneo Grand Splendid"],
+    "Cape Town": ["Table Mountain","Robben Island","V&A Waterfront","Cape of Good Hope","Kirstenbosch National Botanical Garden","Boulders Beach","Bo-Kaap","Cape Point","Chapman's Peak","District Six Museum","Castle of Good Hope","Camps Bay","Constantia (Cape Town)","Groot Constantia","Two Oceans Aquarium"],
+    "Marrakech": ["Djemaa el-Fna","Bahia Palace","Majorelle Garden","Koutoubia","Saadian Tombs","Ben Youssef Madrasa","Menara gardens","El Badi Palace","Marrakech Museum","Mouassine Mosque","Dar Si Said Museum","Tanneries of Marrakech","Agdal Gardens","Bab Agnaou","Le Jardin Secret"],
+    "Melbourne": ["Federation Square","Royal Botanic Gardens, Melbourne","Melbourne Cricket Ground","Flinders Street Station","National Gallery of Victoria","Queen Victoria Market","Hosier Lane","Melbourne Museum","St Paul's Cathedral, Melbourne","Eureka Tower","Brighton Bathing Boxes","Melbourne Zoo","Luna Park, Melbourne","State Library of Victoria","Great Ocean Road"],
+    "Kazan": ["Kazan Kremlin","Qolşärif Mosque","Temple of All Religions","Bauman Street","Kazan Cathedral (Kazan)","Kazan Arena","Kazan Family Center","Millennium Bridge (Kazan)","National Museum of the Republic of Tatarstan","Palace of Farmers","Söyembikä Tower","Riviera Aquapark","Kazan Kremlin Annunciation Cathedral","Tatar Academic State Opera and Ballet Theatre","Old Tatar Quarter"],
+    "Sochi": ["Sochi Olympic Park","Rosa Khutor","Sochi Park","Krasnaya Polyana","Skypark AJ Hackett Sochi","Fisht Olympic Stadium","Akhun Mountain","Riviera Park (Sochi)","Sochi Art Museum","Dagomys Tea Plantation","Stalin's dacha","Sochi Arboretum","Orekhovsky Waterfall","Sochi Discovery World Aquarium","Agura Waterfalls"],
+}
+
+
+@app.get("/attractions")
+async def get_attractions(
+    city: str = Query(...),
+    lang: str = Query("ru"),
+    limit: int = Query(10),
+):
+    """Достопримечательности: кураторский список + Wikipedia для перевода и фото"""
+    cache_key = (city.strip().lower(), lang, limit)
+
+    if cache_key in ATTRACTIONS_CACHE:
+        cached_data, cached_at = ATTRACTIONS_CACHE[cache_key]
+        if time.time() - cached_at < 86400 * 7:
+            return {"attractions": cached_data}
+
+    if cache_key not in ATTRACTIONS_LOCKS:
+        ATTRACTIONS_LOCKS[cache_key] = asyncio.Lock()
+
+    async with ATTRACTIONS_LOCKS[cache_key]:
+        if cache_key in ATTRACTIONS_CACHE:
+            cached_data, cached_at = ATTRACTIONS_CACHE[cache_key]
+            if time.time() - cached_at < 86400 * 7:
+                return {"attractions": cached_data}
+
+        try:
+            wiki_headers = {"User-Agent": "LuggifyBot/1.0 (hello@luggify.app)"}
+            target_lang = lang if lang in ("ru", "en", "de", "fr", "es", "it") else "en"
+            en_wiki = "https://en.wikipedia.org/w/api.php"
+
+            async with httpx.AsyncClient(timeout=30) as client:
+                city_name = city.split(",")[0].strip()
+
+                # ── 1. Определяем английское название города ──
+                en_city = city_name
+                if target_lang != "en":
+                    try:
+                        target_wiki = f"https://{target_lang}.wikipedia.org/w/api.php"
+                        ll_resp = await client.get(target_wiki, params={
+                            "action": "query", "titles": city_name,
+                            "prop": "langlinks", "lllang": "en",
+                            "lllimit": 1, "format": "json"
+                        }, headers=wiki_headers)
+                        for pid, page in ll_resp.json().get("query", {}).get("pages", {}).items():
+                            lls = page.get("langlinks", [])
+                            if lls:
+                                en_city = lls[0].get("*", city_name)
+                    except Exception:
+                        pass
+
+                # ── 2. Берём список достопримечательностей ──
+                en_titles = _CURATED.get(en_city, [])[:limit]
+
+                # Фолбэк: поиск через Wikipedia категории
+                if not en_titles:
+                    try:
+                        for cat in [
+                            f"Category:Tourist attractions in {en_city}",
+                            f"Category:Museums in {en_city}",
+                            f"Category:Landmarks in {en_city}",
+                        ]:
+                            cr = await client.get(en_wiki, params={
+                                "action": "query", "list": "categorymembers",
+                                "cmtitle": cat, "cmlimit": 30,
+                                "cmtype": "page|subcat", "format": "json"
+                            }, headers=wiki_headers)
+                            for m in cr.json().get("query", {}).get("categorymembers", []):
+                                name = m["title"].replace("Category:", "") if m.get("ns") == 14 else m["title"]
+                                if not name.lower().startswith("list of"):
+                                    en_titles.append(name)
+                        en_titles = en_titles[:limit]
+                    except Exception:
+                        pass
+
+                if not en_titles:
+                    return {"attractions": []}
+
+                # ── 3. Батчевый перевод названий ──
+                translations = {}  # en_title -> local_title
+                if target_lang != "en":
+                    for i in range(0, len(en_titles), 50):
+                        chunk = en_titles[i:i+50]
+                        try:
+                            tr = await client.get(en_wiki, params={
+                                "action": "query", "titles": "|".join(chunk),
+                                "prop": "langlinks", "lllang": target_lang,
+                                "lllimit": "max", "redirects": 1, "format": "json"
+                            }, headers=wiki_headers)
+                            for pid, pd in tr.json().get("query", {}).get("pages", {}).items():
+                                if int(pid) > 0:
+                                    lls = pd.get("langlinks", [])
+                                    if lls:
+                                        translations[pd["title"]] = lls[0]["*"]
+                        except Exception:
+                            pass
+
+                # ── 4. Собираем результат с картинками ──
+                results = []
+                for en_title in en_titles:
+                    local_name = translations.get(en_title, en_title)
+                    image_url = None
+
+                    # Картинка из Wikipedia
+                    for wiki_title, wlang in [(local_name, target_lang), (en_title, "en")]:
+                        if image_url:
+                            break
+                        try:
+                            sr = await client.get(
+                                f"https://{wlang}.wikipedia.org/api/rest_v1/page/summary/{url_quote(wiki_title)}",
+                                headers=wiki_headers
+                            )
+                            if sr.status_code == 200:
+                                image_url = sr.json().get("thumbnail", {}).get("source")
+                        except Exception:
+                            pass
+
+                    results.append({
+                        "name": local_name,
+                        "image": image_url,
+                        "link": f"https://www.google.com/search?q={url_quote(local_name)}",
+                    })
+
+                if results:
+                    ATTRACTIONS_CACHE[cache_key] = (results, time.time())
+
+                return {"attractions": results}
+        except Exception as e:
+            print(f"Attractions error: {e}")
+            return {"attractions": []}
+
+
+# === Feature: Flight Search (Travelpayouts) ===
+TRAVELPAYOUTS_TOKEN = os.getenv("TRAVELPAYOUTS_TOKEN", "")
+
+@app.get("/flights/search")
+async def search_flights(
+    destination: str = Query(..., description="City name"),
+    date: str = Query(None, description="YYYY-MM-DD departure"),
+    return_date: str = Query(None, description="YYYY-MM-DD return"),
+    origin: str = Query(None, description="Origin city name"),
+):
+    """Поиск дешёвых авиабилетов через Travelpayouts API"""
+    if not TRAVELPAYOUTS_TOKEN:
+        return {"flights": [], "error": "API key not configured"}
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            # Get IATA code for destination
+            iata_resp = await client.get(
+                "https://autocomplete.travelpayouts.com/places2",
+                params={"term": destination.split(",")[0].strip(), "locale": "ru", "types[]": "city"}
+            )
+            dest_code = ""
+            if iata_resp.status_code == 200 and iata_resp.json():
+                dest_code = iata_resp.json()[0].get("code", "")
+
+            if not dest_code:
+                return {"flights": []}
+
+            # Get IATA code for origin (if provided)
+            origin_code = ""
+            if origin:
+                origin_resp = await client.get(
+                    "https://autocomplete.travelpayouts.com/places2",
+                    params={"term": origin.split(",")[0].strip(), "locale": "ru", "types[]": "city"}
+                )
+                if origin_resp.status_code == 200 and origin_resp.json():
+                    origin_code = origin_resp.json()[0].get("code", "")
+
+            # Search cheap flights
+            params = {
+                "destination": dest_code,
+                "token": TRAVELPAYOUTS_TOKEN,
+                "currency": "rub",
+                "limit": 10,
+            }
+            def format_date_for_url(d_str: str) -> str:
+                if not d_str or len(d_str) < 10: return ""
+                parts = d_str.split("-")
+                return f"{parts[2]}{parts[1]}"
+
+            url_depart = format_date_for_url(date)
+            url_return = format_date_for_url(return_date)
+
+            generic_link = f"https://www.aviasales.ru/search/{origin_code}{url_depart}{dest_code}{url_return}1"
+
+            # Helper: выбрать самый дешёвый и самый быстрый рейс
+            def pick_best_flights(raw_flights, f_origin_default, f_dest_default, flight_type):
+                if not raw_flights:
+                    return []
+                
+                parsed = []
+                for f in raw_flights:
+                    f_origin = f.get("origin", f_origin_default)
+                    f_dest = f.get("destination", f_dest_default)
+                    
+                    api_link = f.get("link")
+                    if api_link:
+                        link = f"https://www.aviasales.ru{api_link}"
+                    else:
+                        link = f"https://www.aviasales.ru/search/{f_origin}{url_depart}{f_dest}{url_return}1"
+                    
+                    duration = f.get("duration_to") or f.get("duration") or 0
+                    
+                    parsed.append({
+                        "price": f.get("price") or f.get("value") or 999999,
+                        "airline": f.get("airline"),
+                        "departure_at": f.get("departure_at"),
+                        "origin": f_origin,
+                        "destination": f_dest,
+                        "transfers": f.get("transfers", 0),
+                        "duration": duration,
+                        "link": link,
+                        "type": flight_type,
+                    })
+                
+                if len(parsed) == 1:
+                    parsed[0]["tag"] = "Самый дешёвый"
+                    return parsed
+                
+                results = []
+                # 1. Самый дешёвый
+                cheapest = min(parsed, key=lambda x: x["price"])
+                cheapest_copy = dict(cheapest)
+                cheapest_copy["tag"] = "Самый дешёвый"
+                results.append(cheapest_copy)
+                
+                # 2. Самый быстрый (другой рейс)
+                others = [f for f in parsed if f is not cheapest]
+                with_duration = [f for f in others if f["duration"] > 0]
+                if with_duration:
+                    fastest = min(with_duration, key=lambda x: x["duration"])
+                    fastest_copy = dict(fastest)
+                    fastest_copy["tag"] = "Самый быстрый"
+                    results.append(fastest_copy)
+                elif others:
+                    alt = min(others, key=lambda x: x["transfers"])
+                    alt_copy = dict(alt)
+                    alt_copy["tag"] = "Меньше пересадок"
+                    results.append(alt_copy)
+                
+                return results
+
+            # 1. OUTBOUND FLIGHTS
+            out_params = {
+                "destination": dest_code,
+                "token": TRAVELPAYOUTS_TOKEN,
+                "currency": "rub",
+                "limit": 30,
+            }
+            if origin_code: out_params["origin"] = origin_code
+            if date: out_params["departure_at"] = date
+            
+            outbound = []
+            try:
+                out_resp = await client.get("https://api.travelpayouts.com/aviasales/v3/prices_for_dates", params=out_params)
+                if out_resp.status_code == 200:
+                    raw = out_resp.json().get("data") or []
+                    outbound = pick_best_flights(raw, origin_code, dest_code, "outbound")
+            except Exception: pass
+
+            # 2. INBOUND FLIGHTS
+            inbound = []
+            if return_date and dest_code:
+                # Определяем пункт назначения для обратного рейса
+                inbound_dest = origin_code
+                if not inbound_dest and outbound:
+                    # Используем origin из найденного outbound рейса
+                    inbound_dest = outbound[0].get("origin", "")
+                
+                in_params = {
+                    "origin": dest_code,
+                    "token": TRAVELPAYOUTS_TOKEN,
+                    "currency": "rub",
+                    "limit": 30,
+                    "departure_at": return_date,
+                }
+                if inbound_dest:
+                    in_params["destination"] = inbound_dest
+                
+                try:
+                    in_resp = await client.get("https://api.travelpayouts.com/aviasales/v3/prices_for_dates", params=in_params)
+                    if in_resp.status_code == 200:
+                        raw = in_resp.json().get("data") or []
+                        inbound = pick_best_flights(raw, dest_code, inbound_dest or "", "inbound")
+                except Exception: pass
+
+            return {"flights": outbound + inbound, "destination_code": dest_code, "generic_link": generic_link}
+    except Exception as e:
+        print(f"Flights error: {e}")
+        return {"flights": []}
+
+
+# === Feature: Hotel Search (RapidAPI Booking.com) ===
+
+RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
+
+@app.get("/hotels/search")
+async def search_hotels(
+    city: str = Query(...),
+    check_in: str = Query(None, description="YYYY-MM-DD"),
+    check_out: str = Query(None, description="YYYY-MM-DD"),
+):
+    """Поиск отелей через бесплатный RapidAPI Booking.com (или mock пока нет ключа)"""
+    city_name = city.split(",")[0].strip()
+
+    # Если ключа нет, возвращаем mock-данные (заглушки) чтобы UI не был пустым
+    if not RAPIDAPI_KEY:
+        print("No RAPIDAPI_KEY found, returning MOCK hotes data.")
+        return {
+            "hotels": [
+                {
+                    "name": f"Grand Hotel {city_name}",
+                    "stars": 5,
+                    "price_per_night": 12500,
+                    "rating": 9.2,
+                    "link": f"https://www.booking.com/searchresults.ru.html?ss={city_name}",
+                },
+                {
+                    "name": f"City Center Apartments",
+                    "stars": 4,
+                    "price_per_night": 4500,
+                    "rating": 8.7,
+                    "link": f"https://www.booking.com/searchresults.ru.html?ss={city_name}",
+                },
+                {
+                    "name": f"Budget Hostel {city_name}",
+                    "stars": 2,
+                    "price_per_night": 1200,
+                    "rating": 7.5,
+                    "link": f"https://www.booking.com/searchresults.ru.html?ss={city_name}",
+                }
+            ],
+            "error": "RAPIDAPI_KEY not configured. Showing mock data."
+        }
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            headers = {
+                "X-RapidAPI-Key": RAPIDAPI_KEY,
+                "X-RapidAPI-Host": "booking-com.p.rapidapi.com"
+            }
+            
+            # 1. Сначала нужно получить dest_id города
+            loc_resp = await client.get(
+                "https://booking-com.p.rapidapi.com/v1/hotels/locations",
+                headers=headers,
+                params={"name": city_name, "locale": "ru"}
+            )
+            
+            if loc_resp.status_code != 200:
+                return {"hotels": []}
+                
+            locations = loc_resp.json()
+            if not locations:
+                return {"hotels": []}
+                
+            dest_id = locations[0].get("dest_id")
+            dest_type = locations[0].get("dest_type")
+
+            # 2. Ищем отели
+            # Если даты не переданы, ставим завтрашний день
+            from datetime import timedelta
+            t_check_in = check_in or (datetime.date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+            t_check_out = check_out or (datetime.date.today() + timedelta(days=3)).strftime("%Y-%m-%d")
+
+            search_resp = await client.get(
+                "https://booking-com.p.rapidapi.com/v1/hotels/search",
+                headers=headers,
+                params={
+                    "dest_id": dest_id,
+                    "dest_type": dest_type,
+                    "checkin_date": t_check_in,
+                    "checkout_date": t_check_out,
+                    "adults_number": "1",
+                    "room_number": "1",
+                    "units": "metric",
+                    "locale": "ru",
+                    "currency": "RUB"
+                }
+            )
+            
+            if search_resp.status_code != 200:
+                return {"hotels": []}
+
+            results = search_resp.json().get("result", [])
+            hotels = []
+            
+            for h in results[:6]:
+                hotels.append({
+                    "name": h.get("hotel_name", ""),
+                    "stars": int(h.get("class", 0)),
+                    "price_per_night": h.get("min_total_price"),
+                    "rating": h.get("review_score"),
+                    "link": h.get("url", f"https://www.booking.com/searchresults.ru.html?ss={city_name}"),
+                })
+
+            return {"hotels": hotels}
+    except Exception as e:
+        print(f"Hotels error: {e}")
+        return {"hotels": []}
+
+
+async def get_weather_forecast_data(city: str, start_date: datetime.date, end_date: datetime.date, language: str = "ru") -> List[schemas.DailyForecast]:
     """Helper to fetch weather forecast for a checklist (used when viewing saved checklists)"""
     async with httpx.AsyncClient() as client:
         # 1. Geocoding
@@ -380,7 +1019,8 @@ async def get_weather_forecast_data(city: str, start_date: datetime.date, end_da
                     for i, _ in enumerate(times):
                         if current_hist_date > end_date: break
                         
-                        desc, icon = WMO_CODES.get(codes[i], ("Неизвестно", "01d"))
+                        default_desc = "Unknown" if language != "ru" else "Неизвестно"
+                        desc, icon = WMO_CODES.get(language, {}).get(codes[i], (default_desc, "01d"))
                         date_str = current_hist_date.strftime("%Y-%m-%d")
                         daily_data[date_str] = {
                             "temp_max": maxs[i],
@@ -398,13 +1038,17 @@ async def get_weather_forecast_data(city: str, start_date: datetime.date, end_da
         result = []
         for date_str in sorted(daily_data.keys()):
             item = daily_data[date_str]
-            result.append(DailyForecastItem(
+            result.append(schemas.DailyForecast(
                 date=date_str,
                 temp_min=item["temp_min"],
                 temp_max=item["temp_max"],
                 condition=item["condition"],
                 icon=item["icon"],
-                source=item["source"]
+                source=item.get("source", "forecast"),
+                city=item.get("city"),
+                humidity=item.get("humidity"),
+                uv_index=item.get("uv_index"),
+                wind_speed=item.get("wind_speed")
             ))
         return result
 
@@ -602,14 +1246,20 @@ async def calculate_packing_data(
                     winds = d.get("wind_speed_10m_max", [])
                     
                     for i, t in enumerate(times):
-                        # Use translations
-                        default_desc = "Unknown" if gender != "ru" else "Неизвестно"
-                        desc, icon = WMO_CODES.get(gender if gender in WMO_CODES else "ru", {}).get(codes[i], (default_desc, "01d"))
-                        # Wait, gender is not language. I need language here.
-                        # calculate_packing_data argument needs 'language'.
-                        # Assuming it's passed... But wait, I added it to Pydantic model but not to function args in this refactor?
-                        # I need to update function signature first.
-                        pass
+                        default_desc = "Unknown" if language != "ru" else "Неизвестно"
+                        desc, icon = WMO_CODES.get(language if language in WMO_CODES else "ru", {}).get(codes[i], (default_desc, "01d"))
+                        daily_data[t] = {
+                            "temp_max": maxs[i],
+                            "temp_min": mins[i],
+                            "weathercode": codes[i],
+                            "condition": desc,
+                            "icon": icon,
+                            "source": "forecast",
+                            "city": city.split(",")[0].strip(),
+                            "humidity": hums[i] if i < len(hums) else None,
+                            "uv_index": uvs[i] if i < len(uvs) else None,
+                            "wind_speed": winds[i] if i < len(winds) else None,
+                        }
 
             except Exception as e:
                 print(f"Forecast error: {e}")
@@ -651,6 +1301,7 @@ async def calculate_packing_data(
                             "condition": desc,
                             "icon": icon,
                             "source": "historical",
+                            "city": city.split(",")[0].strip(), # Add city
                             "humidity": hums[i] if i < len(hums) else None,
                             "uv_index": None,
                             "wind_speed": winds[i] if i < len(winds) else None,
@@ -670,16 +1321,17 @@ async def calculate_packing_data(
 
     for date_str in sorted(daily_data.keys()):
         item = daily_data[date_str]
-        daily_forecast.append(DailyForecastItem(
+        daily_forecast.append(schemas.DailyForecast(
             date=date_str,
             temp_min=item["temp_min"],
             temp_max=item["temp_max"],
             condition=item["condition"],
             icon=item["icon"],
-            source=item["source"],
-            humidity=item["humidity"],
-            uv_index=item["uv_index"],
-            wind_speed=item["wind_speed"],
+            source=item.get("source", "forecast"),
+            city=item.get("city"),
+            humidity=item.get("humidity"),
+            uv_index=item.get("uv_index"),
+            wind_speed=item.get("wind_speed")
         ))
         temps.append((item["temp_min"] + item["temp_max"]) / 2)
         conditions.add(item["condition"])
@@ -816,22 +1468,28 @@ async def create_checklist_from_items(db, items, city, start_date, end_date, avg
         items=all_items,
         avg_temp=avg_temp,
         conditions=sorted(list(conditions)),
-        daily_forecast=daily_forecast,
+        daily_forecast=[schemas.DailyForecast(**d) if isinstance(d, dict) else d for d in daily_forecast] if daily_forecast else None,
         user_id=user_id,
     )
     checklist = await crud.create_checklist(db, checklist_data)
     
-    return {
-        "slug": checklist.slug,
-        "city": checklist.city,
-        "start_date": checklist.start_date,
-        "end_date": checklist.end_date,
-        "items": all_items,
-        "items_by_category": categories,
-        "avg_temp": checklist.avg_temp,
-        "conditions": checklist.conditions,
-        "daily_forecast": daily_forecast
-    }
+    # Return ChecklistResponse with daily_forecast
+    return ChecklistResponse(
+        slug=checklist.slug,
+        city=checklist.city,
+        start_date=checklist.start_date,
+        end_date=checklist.end_date,
+        items=all_items,
+        avg_temp=checklist.avg_temp,
+        conditions=checklist.conditions,
+        checked_items=checklist.checked_items,
+        removed_items=checklist.removed_items,
+        added_items=checklist.added_items,
+        tg_user_id=checklist.tg_user_id,
+        user_id=checklist.user_id,
+        is_public=getattr(checklist, 'is_public', True),
+        daily_forecast=daily_forecast
+    )
 
 @app.post("/generate-packing-list", response_model=ChecklistResponse)
 async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db), current_user=Depends(get_current_user)):
@@ -907,15 +1565,31 @@ async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):
     if not checklist:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
 
-    # Fetch fresh weather data
-    forecast = await get_weather_forecast_data(checklist.city, checklist.start_date, checklist.end_date)
+    # If daily_forecast is saved in DB, use it. Otherwise try to fetch fresh one (optional fallback)
+    forecast = checklist.daily_forecast
+    if not forecast:
+        # Fallback to fresh fetch if missing (for legacy checklists)
+        try:
+            forecast = await get_weather_forecast_data(checklist.city, checklist.start_date, checklist.end_date, language="ru")
+        except:
+            forecast = []
     
-    # Construct response manually (since ORM object doesn't have daily_forecast)
-    response = ChecklistResponse(
-        **{k: getattr(checklist, k) for k in checklist.__table__.columns.keys()},
+    return ChecklistResponse(
+        slug=checklist.slug,
+        city=checklist.city,
+        start_date=checklist.start_date,
+        end_date=checklist.end_date,
+        items=checklist.items,
+        avg_temp=checklist.avg_temp,
+        conditions=checklist.conditions,
+        checked_items=checklist.checked_items or [],
+        removed_items=checklist.removed_items or [],
+        added_items=checklist.added_items or [],
+        tg_user_id=checklist.tg_user_id,
+        user_id=checklist.user_id,
+        is_public=getattr(checklist, 'is_public', True),
         daily_forecast=forecast
     )
-    return response
 
     # Категории для чеклиста (для фронта)
     # --- Распределение по категориям (копия логики из generate_list) ---
