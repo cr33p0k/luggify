@@ -857,16 +857,90 @@ async def search_hotels(
     city_short = city.split(",")[0].strip()  # короткое имя для ссылки на Booking
 
     from datetime import timedelta
-    t_check_in = check_in or (datetime.date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
-    t_check_out = check_out or (datetime.date.today() + timedelta(days=3)).strftime("%Y-%m-%d")
+    
+    def parse_date(d_str):
+        if not d_str: return None
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%m/%d/%Y"):
+            try:
+                # `datetime` is already the class, so we use it directly
+                return datetime.strptime(d_str, fmt).date()
+            except ValueError:
+                pass
+        return None
+
+    d_in = parse_date(check_in)
+    d_out = parse_date(check_out)
+
+    if not d_in:
+        d_in = datetime.now().date() + timedelta(days=1)
+    if not d_out or d_out <= d_in:
+        d_out = d_in + timedelta(days=3)
+
+    t_check_in = d_in.strftime("%Y-%m-%d")
+    t_check_out = d_out.strftime("%Y-%m-%d")
 
     # Кол-во ночей для расчёта цены за ночь
-    try:
-        d_in = datetime.datetime.strptime(t_check_in, "%Y-%m-%d").date()
-        d_out = datetime.datetime.strptime(t_check_out, "%Y-%m-%d").date()
-        num_nights = max((d_out - d_in).days, 1)
-    except:
-        num_nights = 2
+    num_nights = max((d_out - d_in).days, 1)
+
+    c_lower = city_name.lower()
+    
+    # Список крупных городов для точного попадания (иногда приходит только город без страны)
+    ru_cities = [
+        "москва", "санкт-петербург", "питер", "спб", "сочи", "казань", 
+        "новосибирск", "екатеринбург", "нижний новгород", "краснодар", 
+        "калининград", "владивосток", "анапа", "геленджик", "адлер"
+    ]
+    
+    is_russia = "россия" in c_lower or "russia" in c_lower or any(rc in c_lower for rc in ru_cities)
+
+    if is_russia:
+        print(f"Hotels search: {city_name} is in Russia. Routing to ru_widgets.")
+        
+        # Sutochno: прямая ссылка в SPA поисковик
+        sutochno_target = f"https://sutochno.ru/front/searchapp/search?guests_adults=1&occupied={t_check_in};{t_check_out}&term={url_quote(city_short)}"
+        
+        # Ostrovok: хардкодим ID популярных городов, чтобы гарантировать идеальный предзаполненный поиск
+        ostrovok_map = {
+            "москва": {"id": 2395, "slug": "russia/moscow"},
+            "санкт-петербург": {"id": 2042, "slug": "russia/st._petersburg"},
+            "питер": {"id": 2042, "slug": "russia/st._petersburg"},
+            "спб": {"id": 2042, "slug": "russia/st._petersburg"},
+            "сочи": {"id": 5580, "slug": "russia/sochi"},
+            "казань": {"id": 1993, "slug": "russia/kazan"},
+            "новосибирск": {"id": 2721, "slug": "russia/novosibirsk"},
+            "екатеринбург": {"id": 6049238, "slug": "russia/yekaterinburg"},
+            "нижний новгород": {"id": 1361, "slug": "russia/nizhniy_novgorod"},
+            "краснодар": {"id": 1913, "slug": "russia/krasnodar"},
+            "калининград": {"id": 1798, "slug": "russia/kaliningrad"},
+            "владивосток": {"id": 3748, "slug": "russia/vladivostok"},
+            "анапа": {"id": 258, "slug": "russia/anapa"},
+            "геленджик": {"id": 1301, "slug": "russia/gelendzhik"},
+            "адлер": {"id": 299, "slug": "russia/adler"}
+        }
+
+        o_dates = f"{d_in.strftime('%d.%m.%Y')}-{d_out.strftime('%d.%m.%Y')}"
+        o_data = ostrovok_map.get(c_lower)
+        if o_data:
+            ostrovok_target = f"https://ostrovok.ru/hotel/{o_data['slug']}/?q={o_data['id']}&dates={o_dates}"
+        else:
+            ostrovok_target = f"https://ostrovok.ru/?q={url_quote(city_short)}&dates={o_dates}"
+        
+        if TRAVELPAYOUTS_MARKER:
+            ostrovok_link = f"https://tp.media/r?marker={TRAVELPAYOUTS_MARKER}&p=7038&u={url_quote(ostrovok_target)}&campaign_id=459"
+            sutochno_link = f"https://tp.media/r?marker={TRAVELPAYOUTS_MARKER}&p=2690&u={url_quote(sutochno_target)}&campaign_id=99"
+        else:
+            ostrovok_link = ostrovok_target
+            sutochno_link = sutochno_target
+            
+        return {
+            "provider": "ru_widgets",
+            "hotels": [],
+            "num_nights": num_nights,
+            "links": {
+                "ostrovok": ostrovok_link,
+                "sutochno": sutochno_link
+            }
+        }
 
     # Если ключа нет, возвращаем mock-данные (заглушки) чтобы UI не был пустым
     if not RAPIDAPI_KEY:
@@ -1010,15 +1084,10 @@ async def search_hotels(
                 price = round(total_price / num_nights, 2) if total_price else None
                 currency = gross_price.get("currency", "EUR")
 
-                # Ссылка — прямая на страницу отеля через slug из имени
-                # Проверено: booking.com/hotel/{cc}/{slug}.html работает ✓
-                country_code = h.get("countryCode", "").lower()
-                slug = re.sub(r'[^a-z0-9\s-]', '', name.lower())
-                slug = re.sub(r'[\s]+', '-', slug).strip('-')
-                if slug and country_code:
-                    link = f"https://www.booking.com/hotel/{country_code}/{slug}.html?checkin={t_check_in}&checkout={t_check_out}&group_adults=1"
-                else:
-                    link = f"https://www.booking.com/searchresults.html?ss={city_short}&checkin={t_check_in}&checkout={t_check_out}&group_adults=1"
+                # Ссылка — самый надежный вариант это поиск по точному имени отеля,
+                # Booking.com отлично его понимает и открывает страницу отеля или показывает его на первом месте (без 404)
+                name_encoded = url_quote(name)
+                link = f"https://www.booking.com/searchresults.html?ss={name_encoded}&checkin={t_check_in}&checkout={t_check_out}&group_adults=1"
 
                 # Конвертируем цену в рубли
                 price_rub = None

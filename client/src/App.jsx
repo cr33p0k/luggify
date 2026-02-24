@@ -295,6 +295,9 @@ const HotelsSection = React.memo(({ city, startDate, endDate }) => {
   const [priceMin, setPriceMin] = useState("");
   const [priceMax, setPriceMax] = useState("");
 
+  const [provider, setProvider] = useState(null);
+  const [links, setLinks] = useState({});
+
   const doFetch = () => {
     if (!city) return;
     setLoading(true);
@@ -307,10 +310,29 @@ const HotelsSection = React.memo(({ city, startDate, endDate }) => {
     if (priceMax) params.append("price_max", priceMax);
     fetch(`${API_URL}/hotels/search?${params}`)
       .then(r => r.json())
-      .then(d => setData(d.hotels || []))
+      .then(d => {
+        setData(d.hotels || []);
+        setProvider(d.provider || null);
+        setLinks(d.links || {});
+      })
       .catch(() => setData([]))
       .finally(() => { setLoading(false); setLoaded(true); });
   };
+
+  useEffect(() => {
+    if (!city || triggered) return;
+    const cLower = city.toLowerCase();
+    const ruCities = [
+      "москва", "санкт-петербург", "питер", "спб", "сочи", "казань",
+      "новосибирск", "екатеринбург", "нижний новгород", "краснодар",
+      "калининград", "владивосток", "анапа", "геленджик", "адлер"
+    ];
+    const isRussia = cLower.includes("россия") || cLower.includes("russia") || ruCities.some(rc => cLower.includes(rc));
+    if (isRussia) {
+      doFetch();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [city]);
 
   if (!city) return null;
 
@@ -351,6 +373,26 @@ const HotelsSection = React.memo(({ city, startDate, endDate }) => {
         <div className="loading-spinner-wrap">
           <div className="loading-spinner" />
           <span className="loading-text">Ищем отели…</span>
+        </div>
+      ) : provider === "ru_widgets" ? (
+        <div className="ru-widgets-container">
+          <div className="ru-widgets-text" style={{ textAlign: "center", color: "#9ca3af", marginBottom: "1rem", fontSize: "0.9rem" }}>
+            Для путешествий по России бронирование на Booking недоступно. Мы рекомендуем использовать проверенные российские сервисы:
+          </div>
+          <div className="ru-widgets-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
+            <a href={links.ostrovok} target="_blank" rel="noopener noreferrer" className="ru-widget-card" style={{ background: "#1a1a1a", border: "1px solid #333", borderRadius: "12px", padding: "1.5rem", display: "flex", flexDirection: "column", alignItems: "center", textDecoration: "none", transition: "transform 0.2s, border-color 0.2s" }}>
+              <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>🏨</div>
+              <h4 style={{ color: "white", margin: "0 0 0.5rem 0" }}>Ostrovok.ru</h4>
+              <p style={{ color: "#9ca3af", fontSize: "0.85rem", textAlign: "center", margin: 0 }}>Более миллиона отелей и апартаментов по всей России</p>
+              <div style={{ background: "var(--orange)", color: "white", padding: "0.5rem 1rem", borderRadius: "6px", fontSize: "0.85rem", fontWeight: "bold", marginTop: "1rem", width: "100%", textAlign: "center" }}>Поиск на Ostrovok</div>
+            </a>
+            <a href={links.sutochno} target="_blank" rel="noopener noreferrer" className="ru-widget-card" style={{ background: "#1a1a1a", border: "1px solid #333", borderRadius: "12px", padding: "1.5rem", display: "flex", flexDirection: "column", alignItems: "center", textDecoration: "none", transition: "transform 0.2s, border-color 0.2s" }}>
+              <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>🔑</div>
+              <h4 style={{ color: "white", margin: "0 0 0.5rem 0" }}>Суточно.ру</h4>
+              <p style={{ color: "#9ca3af", fontSize: "0.85rem", textAlign: "center", margin: 0 }}>Лучший сервис для аренды частного жилья и квартир</p>
+              <div style={{ background: "var(--orange)", color: "white", padding: "0.5rem 1rem", borderRadius: "6px", fontSize: "0.85rem", fontWeight: "bold", marginTop: "1rem", width: "100%", textAlign: "center" }}>Поиск на Суточно</div>
+            </a>
+          </div>
         </div>
       ) : loaded && data.length === 0 ? (
         <div style={{ textAlign: "center", color: "#9ca3af", padding: "1rem 0" }}>
