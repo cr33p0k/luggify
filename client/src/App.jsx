@@ -134,12 +134,26 @@ const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
       ) : (
         <div className="attractions-grid">
           {data.map((a, i) => (
-            <a key={i} href={a.link} target="_blank" rel="noopener noreferrer" className="attraction-card">
-              {a.image && <img src={a.image} alt={a.name} className="attraction-img" loading="lazy" />}
-              <div className="attraction-body">
-                <div className="attraction-name">{a.name}</div>
-              </div>
-            </a>
+            <div key={i} className="attraction-card">
+              <a href={a.link} target="_blank" rel="noopener noreferrer" className="attraction-bg-link">
+                {a.image && <img src={a.image} alt={a.name} className="attraction-img" loading="lazy" />}
+                <div className="attraction-body">
+                  <div className="attraction-name">{a.name}</div>
+                </div>
+              </a>
+              <a
+                href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(a.name + ', ' + city)}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="attraction-map-btn"
+                title={lang === "ru" ? "Открыть в Google Картах" : "Open in Google Maps"}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+                  <circle cx="12" cy="10" r="3" />
+                </svg>
+              </a>
+            </div>
           ))}
         </div>
       )}
@@ -292,8 +306,6 @@ const HotelsSection = React.memo(({ city, startDate, endDate }) => {
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [triggered, setTriggered] = useState(false);
-  const [priceMin, setPriceMin] = useState("");
-  const [priceMax, setPriceMax] = useState("");
 
   const [provider, setProvider] = useState(null);
   const [links, setLinks] = useState({});
@@ -306,8 +318,6 @@ const HotelsSection = React.memo(({ city, startDate, endDate }) => {
     const params = new URLSearchParams({ city });
     if (startDate) params.append("check_in", startDate);
     if (endDate) params.append("check_out", endDate);
-    if (priceMin) params.append("price_min", priceMin);
-    if (priceMax) params.append("price_max", priceMax);
     fetch(`${API_URL}/hotels/search?${params}`)
       .then(r => r.json())
       .then(d => {
@@ -319,15 +329,18 @@ const HotelsSection = React.memo(({ city, startDate, endDate }) => {
       .finally(() => { setLoading(false); setLoaded(true); });
   };
 
+  const cLower = city ? city.toLowerCase() : "";
+  const ruCities = [
+    "москва", "санкт-петербург", "питер", "спб", "сочи", "казань",
+    "новосибирск", "екатеринбург", "нижний новгород", "краснодар",
+    "калининград", "владивосток", "анапа", "геленджик", "адлер"
+  ];
+  const isRussia = cLower.includes("россия") || cLower.includes("russia") || ruCities.some(rc => cLower.includes(rc));
+
+  const bookingDirectLink = `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(city.split(",")[0].trim())}${startDate ? `&checkin=${startDate}` : ""}${endDate ? `&checkout=${endDate}` : ""}&group_adults=1`;
+
   useEffect(() => {
     if (!city || triggered) return;
-    const cLower = city.toLowerCase();
-    const ruCities = [
-      "москва", "санкт-петербург", "питер", "спб", "сочи", "казань",
-      "новосибирск", "екатеринбург", "нижний новгород", "краснодар",
-      "калининград", "владивосток", "анапа", "геленджик", "адлер"
-    ];
-    const isRussia = cLower.includes("россия") || cLower.includes("russia") || ruCities.some(rc => cLower.includes(rc));
     if (isRussia) {
       doFetch();
     }
@@ -339,35 +352,34 @@ const HotelsSection = React.memo(({ city, startDate, endDate }) => {
   return (
     <div className="travel-section">
       <h3 className="section-title">🏨 Отели</h3>
+      {loaded && data.length > 0 && provider !== "ru_widgets" && !isRussia && (
+        <a href={bookingDirectLink} target="_blank" rel="noopener noreferrer" className="booking-corner-link" title="Перейти на Booking.com">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </a>
+      )}
       {!triggered ? (
         <div className="hotels-filter-wrap">
-          <div className="hotels-price-filter">
-            <span className="hotels-filter-label">Цена за ночь (₽):</span>
-            <input
-              type="number"
-              className="hotels-price-input"
-              placeholder="от"
-              value={priceMin}
-              onChange={e => setPriceMin(e.target.value)}
-              min="0"
-            />
-            <span className="hotels-filter-dash">—</span>
-            <input
-              type="number"
-              className="hotels-price-input"
-              placeholder="до"
-              value={priceMax}
-              onChange={e => setPriceMax(e.target.value)}
-              min="0"
-            />
+          <div className="hotels-buttons-row">
+            <button className="flights-search-btn" onClick={doFetch}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                <polyline points="9 22 9 12 15 12 15 22" />
+              </svg>
+              Показать отели
+            </button>
+            {!isRussia && (
+              <a href={bookingDirectLink} target="_blank" rel="noopener noreferrer" className="booking-secondary-btn" title="Искать напрямую на Booking.com">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                  <polyline points="15 3 21 3 21 9"></polyline>
+                  <line x1="10" y1="14" x2="21" y2="3"></line>
+                </svg>
+                Перейти на Booking
+              </a>
+            )}
           </div>
-          <button className="flights-search-btn" onClick={doFetch}>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-              <polyline points="9 22 9 12 15 12 15 22" />
-            </svg>
-            Показать отели
-          </button>
         </div>
       ) : loading ? (
         <div className="loading-spinner-wrap">
@@ -555,7 +567,15 @@ const App = ({ page }) => {
   const handleAuth = (userData, accessToken) => {
     setUser(userData);
     setToken(accessToken);
+    localStorage.setItem("user", JSON.stringify(userData));
+    localStorage.setItem("token", accessToken);
   };
+
+  useEffect(() => {
+    if (user) {
+      localStorage.setItem("user", JSON.stringify(user));
+    }
+  }, [user]);
 
   const handleLogout = () => {
     setUser(null);
@@ -788,7 +808,11 @@ const App = ({ page }) => {
             <>
               <div className="navbar-profile" onClick={() => navigate("/profile")}>
                 <div className="navbar-avatar">
-                  {user.username.charAt(0).toUpperCase()}
+                  {user.avatar && (user.avatar.startsWith("data:image") || user.avatar.startsWith("http")) ? (
+                    <img src={user.avatar} alt="Avatar" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }} />
+                  ) : (
+                    user.avatar ? user.avatar : user.username.charAt(0).toUpperCase()
+                  )}
                 </div>
                 <span className="navbar-username">{user.username}</span>
               </div>
@@ -830,7 +854,7 @@ const App = ({ page }) => {
       <div className="page-wrapper">
         {/* Profile Page */}
         {page === "profile" ? (
-          <ProfilePage user={user} token={token} onLogout={handleLogout} />
+          <ProfilePage user={user} token={token} onLogout={handleLogout} onUpdateUser={setUser} />
         ) : (
           <>
             {!result && (

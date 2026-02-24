@@ -77,16 +77,25 @@
 }
 
 .profile-avatar {
-    width: 56px;
-    height: 56px;
+    width: 64px;
+    height: 64px;
     border-radius: 50%;
     background: linear-gradient(135deg, var(--orange, #ff9900), var(--orange-light, #ffae42));
     color: #0d0d0d;
-    font-size: 1.5rem;
+    font-size: 2rem;
     font-weight: 700;
     display: flex;
     align-items: center;
     justify-content: center;
+    cursor: pointer;
+    transition: transform 0.2s, box-shadow 0.2s;
+    user-select: none;
+    box-shadow: 0 4px 12px rgba(255, 153, 0, 0.2);
+}
+
+.profile-avatar:hover {
+    transform: scale(1.05);
+    box-shadow: 0 8px 16px rgba(255, 153, 0, 0.4);
 }
 
 .profile-info h2 {
@@ -96,27 +105,87 @@
     margin: 0;
 }
 
-.profile-info p {
-    font-size: 0.85rem;
+.profile-stats-summary {
+    font-size: 0.9rem;
     color: var(--text-secondary, #888);
-    margin: 0.2rem 0 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 0.4rem;
 }
 
-.share-btn-text {
-    background: transparent;
-    border: none;
+.dot-separator {
+    color: rgba(255, 255, 255, 0.2);
+}
+
+.share-btn-enhanced {
+    background: rgba(255, 153, 0, 0.1);
+    border: 1px solid rgba(255, 153, 0, 0.3);
     color: var(--orange, #ff9900);
     cursor: pointer;
     font-size: 0.8rem;
-    padding: 0;
-    text-decoration: underline;
-    opacity: 0.9;
+    font-weight: 600;
+    padding: 6px 14px;
+    border-radius: 20px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     transition: all 0.2s;
 }
 
-.share-btn-text:hover {
+.share-btn-enhanced:hover {
+    background: var(--orange, #ff9900);
+    color: white;
+    border-color: var(--orange, #ff9900);
+    box-shadow: 0 4px 10px rgba(255, 153, 0, 0.3);
+}
+
+/* Tabs */
+.profile-tabs {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 2rem;
+    border-bottom: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.1));
+    padding-bottom: 0px;
+}
+
+.profile-tab {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary, #888);
+    font-size: 1rem;
+    font-weight: 600;
+    padding: 0.8rem 1.5rem;
+    cursor: pointer;
+    border-bottom: 3px solid transparent;
+    transition: all 0.2s;
+}
+
+.profile-tab:hover {
     color: #fff;
-    opacity: 1;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 8px 8px 0 0;
+}
+
+.profile-tab.active {
+    color: var(--orange, #ff9900);
+    border-bottom-color: var(--orange, #ff9900);
+}
+
+.tab-content.animations-fade {
+    animation: fadeIn 0.4s ease forwards;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(5px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
 .profile-section-title {

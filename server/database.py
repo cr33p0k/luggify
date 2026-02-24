@@ -29,6 +29,22 @@ SessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
     bind=async_engine,
-    class_=AsyncSession
+    class_=AsyncSession,
+    expire_on_commit=False,
 )
+
+from fastapi import HTTPException
+
+async def get_db():
+    if SessionLocal is None:
+        raise HTTPException(status_code=503, detail="База данных не настроена. Проверьте переменную окружения DATABASE_URL")
+    async with SessionLocal() as session:
+        try:
+            yield session
+        except HTTPException:
+            await session.rollback()
+            raise
+        except Exception as e:
+            await session.rollback()
+            raise HTTPException(status_code=503, detail=f"Ошибка БД: {str(e)}")
 

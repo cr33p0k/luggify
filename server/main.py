@@ -12,12 +12,11 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
 import crud, models, schemas
-from database import SessionLocal, async_engine
+from database import SessionLocal, async_engine, get_db
 from typing import List, Optional
 from auth import (
     verify_password, create_access_token,
-    get_current_user, require_current_user,
-    get_db as auth_get_db,
+    get_current_user, require_current_user
 )
 
 load_dotenv()
@@ -49,18 +48,6 @@ app.add_middleware(
 # Словарь переводов погодных условий
 
 
-async def get_db():
-    if SessionLocal is None:
-        raise HTTPException(status_code=503, detail="База данных не настроена. Проверьте переменную окружения DATABASE_URL")
-    async with SessionLocal() as session:
-        try:
-            yield session
-        except HTTPException:
-            await session.rollback()
-            raise
-        except Exception as e:
-            await session.rollback()
-            raise HTTPException(status_code=503, detail=f"Ошибка подключения к базе данных: {str(e)}")
 
 class PackingRequest(BaseModel):
     city: str
@@ -185,6 +172,19 @@ async def update_privacy(
 ):
     """Обновление настроек приватности пользователя"""
     user.is_stats_public = privacy.is_stats_public
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+@app.patch("/auth/avatar", response_model=schemas.UserOut)
+async def update_avatar(
+    data: schemas.UserAvatarUpdate,
+    user=Depends(require_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Обновление аватара пользователя"""
+    user.avatar = data.avatar
     await db.commit()
     await db.refresh(user)
     return user

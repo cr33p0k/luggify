@@ -30,9 +30,14 @@ class UserOut(BaseModel):
     tg_id: Optional[str] = None
     is_stats_public: bool = True
     created_at: Optional[datetime] = None
+    avatar: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+class UserAvatarUpdate(BaseModel):
+    avatar: Optional[str] = None
 
 
 class Token(BaseModel):

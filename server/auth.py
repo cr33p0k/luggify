@@ -8,7 +8,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database import SessionLocal
+from database import SessionLocal, get_db
 
 # Конфигурация JWT
 SECRET_KEY = os.getenv("SECRET_KEY", "luggify-super-secret-key-change-in-production")
@@ -43,20 +43,6 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-
-async def get_db():
-    """Получение сессии БД"""
-    if SessionLocal is None:
-        raise HTTPException(status_code=503, detail="База данных не настроена")
-    async with SessionLocal() as session:
-        try:
-            yield session
-        except HTTPException:
-            await session.rollback()
-            raise
-        except Exception as e:
-            await session.rollback()
-            raise HTTPException(status_code=503, detail=f"Ошибка БД: {str(e)}")
 
 
 async def get_current_user(

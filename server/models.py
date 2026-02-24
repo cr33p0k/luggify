@@ -15,6 +15,7 @@ class User(Base):
     tg_id = Column(String, unique=True, index=True, nullable=True)  # Telegram user ID
     is_stats_public = Column(Boolean, default=True)
     created_at = Column(DateTime, server_default=func.now())
+    avatar = Column(String, nullable=True)  # URL, emoji or base64
 
     # Связь с чеклистами
     checklists = relationship("Checklist", back_populates="user")
