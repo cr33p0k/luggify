@@ -31,6 +31,7 @@ class Checklist(Base):
     avg_temp = Column(Float)        # float вместо строки
     conditions = Column(ARRAY(String))
     slug = Column(String, unique=True, index=True)  # токен/slug
+    origin_city = Column(String, nullable=True)  # город отправления
     tg_user_id = Column(String, nullable=True, index=True)  # Telegram user id
     checked_items = Column(ARRAY(String), nullable=True)
     removed_items = Column(ARRAY(String), nullable=True)

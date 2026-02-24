@@ -1,4 +1,5 @@
 import os
+import re
 from datetime import datetime, timedelta
 from urllib.parse import quote as url_quote
 import httpx
@@ -72,6 +73,7 @@ class PackingRequest(BaseModel):
     has_allergies: bool = False
     has_chronic_diseases: bool = False
     language: str = "ru"
+    origin_city: str = ""
 
 class TripSegment(BaseModel):
     city: str
@@ -87,6 +89,7 @@ class MultiCityPackingRequest(BaseModel):
     has_allergies: bool = False
     has_chronic_diseases: bool = False
     language: str = "ru"
+    origin_city: str = ""
 
 class ChecklistResponse(schemas.ChecklistOut):
     daily_forecast: list[schemas.DailyForecast]
@@ -711,7 +714,7 @@ async def search_flights(
 
             generic_link = f"https://www.aviasales.ru/search/{origin_code}{url_depart}{dest_code}{url_return}1"
 
-            # Helper: выбрать самый дешёвый и самый быстрый рейс
+            # Helper: выбрать лучший рейс — приоритет прямым (без пересадок)
             def pick_best_flights(raw_flights, f_origin_default, f_dest_default, flight_type):
                 if not raw_flights:
                     return []
@@ -741,32 +744,18 @@ async def search_flights(
                         "type": flight_type,
                     })
                 
-                if len(parsed) == 1:
-                    parsed[0]["tag"] = "Самый дешёвый"
-                    return parsed
+                # Приоритет: самый дешёвый прямой, иначе самый дешёвый
+                direct = [f for f in parsed if f["transfers"] == 0]
+                if direct:
+                    best = min(direct, key=lambda x: x["price"])
+                    best_copy = dict(best)
+                    best_copy["tag"] = "Прямой рейс"
+                    return [best_copy]
                 
-                results = []
-                # 1. Самый дешёвый
                 cheapest = min(parsed, key=lambda x: x["price"])
                 cheapest_copy = dict(cheapest)
                 cheapest_copy["tag"] = "Самый дешёвый"
-                results.append(cheapest_copy)
-                
-                # 2. Самый быстрый (другой рейс)
-                others = [f for f in parsed if f is not cheapest]
-                with_duration = [f for f in others if f["duration"] > 0]
-                if with_duration:
-                    fastest = min(with_duration, key=lambda x: x["duration"])
-                    fastest_copy = dict(fastest)
-                    fastest_copy["tag"] = "Самый быстрый"
-                    results.append(fastest_copy)
-                elif others:
-                    alt = min(others, key=lambda x: x["transfers"])
-                    alt_copy = dict(alt)
-                    alt_copy["tag"] = "Меньше пересадок"
-                    results.append(alt_copy)
-                
-                return results
+                return [cheapest_copy]
 
             # 1. OUTBOUND FLIGHTS
             out_params = {
@@ -818,22 +807,70 @@ async def search_flights(
         return {"flights": []}
 
 
-# === Feature: Hotel Search (RapidAPI Booking.com) ===
+# === Currency Exchange Rates (free, no API key) ===
+
+EXCHANGE_RATES = {}  # currency -> RUB rate
+EXCHANGE_RATES_UPDATED = 0
+EXCHANGE_RATES_TTL = 86400  # 24 часа
+
+async def get_rub_rate(currency: str) -> float:
+    """Получить курс валюты к RUB. Бесплатный API, без ключа."""
+    global EXCHANGE_RATES, EXCHANGE_RATES_UPDATED
+    if currency == "RUB":
+        return 1.0
+    if EXCHANGE_RATES and time.time() - EXCHANGE_RATES_UPDATED < EXCHANGE_RATES_TTL:
+        return EXCHANGE_RATES.get(currency, 0)
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get("https://open.er-api.com/v6/latest/RUB")
+            if resp.status_code == 200:
+                data = resp.json()
+                rates = data.get("rates", {})
+                # rates содержит: сколько единиц валюты в 1 RUB
+                # Нам нужно наоборот: сколько RUB в 1 единице валюты
+                EXCHANGE_RATES = {cur: 1.0/rate for cur, rate in rates.items() if rate > 0}
+                EXCHANGE_RATES_UPDATED = time.time()
+                print(f"Exchange rates updated: EUR={EXCHANGE_RATES.get('EUR', '?'):.1f}₽, USD={EXCHANGE_RATES.get('USD', '?'):.1f}₽")
+    except Exception as e:
+        print(f"Exchange rates error: {e}")
+    return EXCHANGE_RATES.get(currency, 0)
+
+
+# === Feature: Hotel Search (RapidAPI Booking.com - ntd119/booking-com18) ===
 
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
+HOTELS_LOCATION_CACHE = {}  # key: city_name_lower -> locationId (permanent, city IDs don't change)
+HOTELS_CACHE = {}  # key: (city, check_in, check_out) -> (data, timestamp)
+HOTELS_CACHE_TTL = 604800  # 7 дней — экономим запросы (530/мес, ~265 поисков)
 
 @app.get("/hotels/search")
 async def search_hotels(
     city: str = Query(...),
     check_in: str = Query(None, description="YYYY-MM-DD"),
     check_out: str = Query(None, description="YYYY-MM-DD"),
+    price_min: int = Query(None, description="Min price per night in RUB"),
+    price_max: int = Query(None, description="Max price per night in RUB"),
 ):
-    """Поиск отелей через бесплатный RapidAPI Booking.com (или mock пока нет ключа)"""
-    city_name = city.split(",")[0].strip()
+    """Поиск отелей через RapidAPI booking-com18 (ntd119) — с фото, ценами, рейтингом"""
+    # Используем полное имя города (напр. "Paris, France") для точного поиска
+    city_name = city.strip()
+    city_short = city.split(",")[0].strip()  # короткое имя для ссылки на Booking
+
+    from datetime import timedelta
+    t_check_in = check_in or (datetime.date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+    t_check_out = check_out or (datetime.date.today() + timedelta(days=3)).strftime("%Y-%m-%d")
+
+    # Кол-во ночей для расчёта цены за ночь
+    try:
+        d_in = datetime.datetime.strptime(t_check_in, "%Y-%m-%d").date()
+        d_out = datetime.datetime.strptime(t_check_out, "%Y-%m-%d").date()
+        num_nights = max((d_out - d_in).days, 1)
+    except:
+        num_nights = 2
 
     # Если ключа нет, возвращаем mock-данные (заглушки) чтобы UI не был пустым
     if not RAPIDAPI_KEY:
-        print("No RAPIDAPI_KEY found, returning MOCK hotes data.")
+        print("No RAPIDAPI_KEY found, returning MOCK hotels data.")
         return {
             "hotels": [
                 {
@@ -841,6 +878,8 @@ async def search_hotels(
                     "stars": 5,
                     "price_per_night": 12500,
                     "rating": 9.2,
+                    "image": None,
+                    "review_word": "Превосходно",
                     "link": f"https://www.booking.com/searchresults.ru.html?ss={city_name}",
                 },
                 {
@@ -848,6 +887,8 @@ async def search_hotels(
                     "stars": 4,
                     "price_per_night": 4500,
                     "rating": 8.7,
+                    "image": None,
+                    "review_word": "Отлично",
                     "link": f"https://www.booking.com/searchresults.ru.html?ss={city_name}",
                 },
                 {
@@ -855,77 +896,337 @@ async def search_hotels(
                     "stars": 2,
                     "price_per_night": 1200,
                     "rating": 7.5,
+                    "image": None,
+                    "review_word": "Хорошо",
                     "link": f"https://www.booking.com/searchresults.ru.html?ss={city_name}",
                 }
             ],
             "error": "RAPIDAPI_KEY not configured. Showing mock data."
         }
 
+    print(f"Hotels search: city='{city_name}', dates={t_check_in}→{t_check_out}, nights={num_nights}")
+
+    # Проверяем кеш
+    cache_key = (city_name.lower(), t_check_in, t_check_out)
+    if cache_key in HOTELS_CACHE:
+        cached_data, cached_at = HOTELS_CACHE[cache_key]
+        if time.time() - cached_at < HOTELS_CACHE_TTL:
+            print(f"Hotels cache hit for {city_name}")
+            return {"hotels": cached_data, "num_nights": num_nights}
+
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
+        async with httpx.AsyncClient(timeout=20) as client:
             headers = {
                 "X-RapidAPI-Key": RAPIDAPI_KEY,
-                "X-RapidAPI-Host": "booking-com.p.rapidapi.com"
+                "X-RapidAPI-Host": "booking-com18.p.rapidapi.com"
             }
-            
-            # 1. Сначала нужно получить dest_id города
-            loc_resp = await client.get(
-                "https://booking-com.p.rapidapi.com/v1/hotels/locations",
-                headers=headers,
-                params={"name": city_name, "locale": "ru"}
-            )
-            
-            if loc_resp.status_code != 200:
-                return {"hotels": []}
-                
-            locations = loc_resp.json()
-            if not locations:
-                return {"hotels": []}
-                
-            dest_id = locations[0].get("dest_id")
-            dest_type = locations[0].get("dest_type")
+
+            # 1. Получаем locationId — кешируем навсегда (city IDs не меняются)
+            city_key = city_name.lower()
+            if city_key in HOTELS_LOCATION_CACHE:
+                location_id = HOTELS_LOCATION_CACHE[city_key]
+                print(f"Hotels location cache hit for {city_name} -> {location_id[:30]}...")
+            else:
+                ac_resp = await client.get(
+                    "https://booking-com18.p.rapidapi.com/stays/auto-complete",
+                    headers=headers,
+                    params={"query": city_name}
+                )
+
+                if ac_resp.status_code != 200:
+                    print(f"Hotels auto-complete failed: {ac_resp.status_code}")
+                    return {"hotels": []}
+
+                ac_data = ac_resp.json()
+                locations = ac_data.get("data", [])
+                if not locations:
+                    print(f"No locations found for {city_name}")
+                    return {"hotels": []}
+
+                # Фильтруем: только города (dest_type=city), а не отели/регионы
+                city_locations = [l for l in locations if l.get("dest_type") == "city" or l.get("type") == "ci"]
+                if not city_locations:
+                    city_locations = locations  # fallback на все результаты
+
+                # Выбираем город с наибольшим кол-вом отелей (избегаем мелкие города-однофамильцы)
+                best = max(city_locations, key=lambda x: x.get("nr_hotels", 0) or x.get("hotels", 0) or 0)
+                location_id = best.get("id", "")
+                if not location_id:
+                    return {"hotels": []}
+
+                chosen_label = best.get("label", best.get("name", "?"))
+                nr = best.get("nr_hotels") or best.get("hotels") or "?"
+                print(f"Hotels: chose '{chosen_label}' ({nr} hotels) for query '{city_name}'")
+                HOTELS_LOCATION_CACHE[city_key] = location_id
 
             # 2. Ищем отели
-            # Если даты не переданы, ставим завтрашний день
-            from datetime import timedelta
-            t_check_in = check_in or (datetime.date.today() + timedelta(days=1)).strftime("%Y-%m-%d")
-            t_check_out = check_out or (datetime.date.today() + timedelta(days=3)).strftime("%Y-%m-%d")
-
             search_resp = await client.get(
-                "https://booking-com.p.rapidapi.com/v1/hotels/search",
+                "https://booking-com18.p.rapidapi.com/stays/search",
                 headers=headers,
                 params={
-                    "dest_id": dest_id,
-                    "dest_type": dest_type,
-                    "checkin_date": t_check_in,
-                    "checkout_date": t_check_out,
-                    "adults_number": "1",
-                    "room_number": "1",
-                    "units": "metric",
+                    "locationId": location_id,
+                    "checkinDate": t_check_in,
+                    "checkoutDate": t_check_out,
+                    "adults": "1",
+                    "currency": "RUB",
                     "locale": "ru",
-                    "currency": "RUB"
+                    "sort": "review_score",
                 }
             )
-            
+
             if search_resp.status_code != 200:
+                print(f"Hotels search failed: {search_resp.status_code}")
                 return {"hotels": []}
 
-            results = search_resp.json().get("result", [])
-            hotels = []
-            
-            for h in results[:6]:
-                hotels.append({
-                    "name": h.get("hotel_name", ""),
-                    "stars": int(h.get("class", 0)),
-                    "price_per_night": h.get("min_total_price"),
-                    "rating": h.get("review_score"),
-                    "link": h.get("url", f"https://www.booking.com/searchresults.ru.html?ss={city_name}"),
-                })
+            search_data = search_resp.json()
+            results = search_data.get("data", [])
+            if not results:
+                # Попробуем альтернативную структуру
+                results = search_data.get("result", [])
 
-            return {"hotels": hotels}
+            hotels = []
+            for h in results:  # парсим все ~20 результатов для качественной сортировки
+                # Данные на верхнем уровне (реальная структура API)
+                name = h.get("name", "")
+
+                # Фото — API возвращает square60, заменяем на square600 для качества
+                photo_urls = h.get("photoUrls", [])
+                image = photo_urls[0] if photo_urls else None
+                if image:
+                    image = image.replace("square60", "square600")
+
+                # Рейтинг
+                review_score = h.get("reviewScore")
+                review_word = h.get("reviewScoreWord", "")
+                review_count = h.get("reviewCount", 0) or 0
+
+                # Звёзды (propertyClass или qualityClass)
+                stars = h.get("propertyClass") or h.get("qualityClass") or 0
+
+                # Цена и валюта — API возвращает цену за ВЕСЬ период, делим на ночи
+                price_breakdown = h.get("priceBreakdown", {})
+                gross_price = price_breakdown.get("grossPrice", {})
+                total_price = gross_price.get("value")
+                price = round(total_price / num_nights, 2) if total_price else None
+                currency = gross_price.get("currency", "EUR")
+
+                # Ссылка — прямая на страницу отеля через slug из имени
+                # Проверено: booking.com/hotel/{cc}/{slug}.html работает ✓
+                country_code = h.get("countryCode", "").lower()
+                slug = re.sub(r'[^a-z0-9\s-]', '', name.lower())
+                slug = re.sub(r'[\s]+', '-', slug).strip('-')
+                if slug and country_code:
+                    link = f"https://www.booking.com/hotel/{country_code}/{slug}.html?checkin={t_check_in}&checkout={t_check_out}&group_adults=1"
+                else:
+                    link = f"https://www.booking.com/searchresults.html?ss={city_short}&checkin={t_check_in}&checkout={t_check_out}&group_adults=1"
+
+                # Конвертируем цену в рубли
+                price_rub = None
+                if price and currency and currency != "RUB":
+                    rub_rate = await get_rub_rate(currency)
+                    if rub_rate > 0:
+                        price_rub = round(price * rub_rate)
+                elif price and currency == "RUB":
+                    price_rub = round(price)
+
+                if name:
+                    hotels.append({
+                        "name": name,
+                        "stars": int(stars) if stars else 0,
+                        "price_per_night": round(price) if price else None,
+                        "price_rub": price_rub,
+                        "currency": currency,
+                        "rating": review_score,
+                        "review_word": review_word,
+                        "review_count": review_count,
+                        "image": image,
+                        "link": link,
+                    })
+
+            # --- Качественная фильтрация и сортировка ---
+            # 1. Убираем отели с рейтингом ниже 6.0 ("Bad", "Poor")
+            hotels = [h for h in hotels if not h["rating"] or h["rating"] >= 6.0]
+            # 2. Сортируем: сначала с отзывами и высоким рейтингом
+            #    (без рейтинга уходят вниз)
+            hotels.sort(key=lambda x: (
+                x["rating"] is not None,      # с рейтингом — вперёд
+                x["rating"] or 0,              # выше рейтинг — выше
+                x["review_count"] or 0,        # больше отзывов — выше
+            ), reverse=True)
+            # 3. Берём топ-10
+            hotels = hotels[:10]
+
+            # Фильтруем по цене (в рублях), если заданы границы
+            if price_min or price_max:
+                filtered = []
+                for h in hotels:
+                    pr = h.get("price_rub")
+                    if pr is None:
+                        continue
+                    if price_min and pr < price_min:
+                        continue
+                    if price_max and pr > price_max:
+                        continue
+                    filtered.append(h)
+                hotels = filtered[:10]
+
+            # Сохраняем в кеш ПОЛНЫЕ результаты (до фильтрации)
+            # Фильтрация по цене применяется каждый раз заново
+            if not (price_min or price_max) and hotels:
+                HOTELS_CACHE[cache_key] = (hotels, time.time())
+
+            return {"hotels": hotels, "num_nights": num_nights}
     except Exception as e:
         print(f"Hotels error: {e}")
+        import traceback
+        traceback.print_exc()
         return {"hotels": []}
+
+
+# === Feature: eSIM Search (Airalo via Travelpayouts) ===
+
+TRAVELPAYOUTS_MARKER = os.getenv("TRAVELPAYOUTS_MARKER", "")
+TRAVELPAYOUTS_PROJECT = os.getenv("TRAVELPAYOUTS_PROJECT", "")
+
+# Маппинг стран → Airalo URL slug
+_AIRALO_SLUGS = {
+    "France": "france", "Germany": "germany", "Italy": "italy", "Spain": "spain",
+    "United Kingdom": "united-kingdom", "United States": "united-states",
+    "Turkey": "turkey", "Thailand": "thailand", "Japan": "japan", "China": "china",
+    "South Korea": "south-korea", "India": "india", "Brazil": "brazil",
+    "Mexico": "mexico", "Argentina": "argentina", "Australia": "australia",
+    "Canada": "canada", "Egypt": "egypt", "Morocco": "morocco",
+    "South Africa": "south-africa", "United Arab Emirates": "united-arab-emirates",
+    "Singapore": "singapore", "Malaysia": "malaysia", "Indonesia": "indonesia",
+    "Vietnam": "vietnam", "Philippines": "philippines",
+    "Russia": "russia", "Czech Republic": "czech-republic", "Czechia": "czech-republic",
+    "Poland": "poland", "Netherlands": "netherlands", "Belgium": "belgium",
+    "Austria": "austria", "Switzerland": "switzerland", "Portugal": "portugal",
+    "Greece": "greece", "Croatia": "croatia", "Hungary": "hungary",
+    "Sweden": "sweden", "Norway": "norway", "Denmark": "denmark", "Finland": "finland",
+    "Ireland": "ireland", "Israel": "israel", "Saudi Arabia": "saudi-arabia",
+    "Qatar": "qatar", "Georgia": "georgia", "Armenia": "armenia",
+    "Azerbaijan": "azerbaijan", "Kazakhstan": "kazakhstan", "Uzbekistan": "uzbekistan",
+    "Montenegro": "montenegro", "Serbia": "serbia", "Romania": "romania",
+    "Bulgaria": "bulgaria", "Sri Lanka": "sri-lanka", "Maldives": "maldives",
+    "New Zealand": "new-zealand", "Colombia": "colombia", "Peru": "peru",
+    "Chile": "chile", "Cuba": "cuba", "Dominican Republic": "dominican-republic",
+    "Tunisia": "tunisia", "Jordan": "jordan", "Oman": "oman", "Bahrain": "bahrain",
+    "Kuwait": "kuwait", "Taiwan": "taiwan", "Hong Kong": "hong-kong",
+}
+
+# Перевод названий стран EN → RU
+_COUNTRY_RU = {
+    "France": "Франция", "Germany": "Германия", "Italy": "Италия", "Spain": "Испания",
+    "United Kingdom": "Великобритания", "United States": "США",
+    "Turkey": "Турция", "Thailand": "Таиланд", "Japan": "Япония", "China": "Китай",
+    "South Korea": "Южная Корея", "India": "Индия", "Brazil": "Бразилия",
+    "Mexico": "Мексика", "Argentina": "Аргентина", "Australia": "Австралия",
+    "Canada": "Канада", "Egypt": "Египет", "Morocco": "Марокко",
+    "South Africa": "ЮАР", "United Arab Emirates": "ОАЭ",
+    "Singapore": "Сингапур", "Malaysia": "Малайзия", "Indonesia": "Индонезия",
+    "Vietnam": "Вьетнам", "Philippines": "Филиппины",
+    "Russia": "Россия", "Czech Republic": "Чехия", "Czechia": "Чехия",
+    "Poland": "Польша", "Netherlands": "Нидерланды", "Belgium": "Бельгия",
+    "Austria": "Австрия", "Switzerland": "Швейцария", "Portugal": "Португалия",
+    "Greece": "Греция", "Croatia": "Хорватия", "Hungary": "Венгрия",
+    "Sweden": "Швеция", "Norway": "Норвегия", "Denmark": "Дания", "Finland": "Финляндия",
+    "Ireland": "Ирландия", "Israel": "Израиль", "Saudi Arabia": "Саудовская Аравия",
+    "Qatar": "Катар", "Georgia": "Грузия", "Armenia": "Армения",
+    "Azerbaijan": "Азербайджан", "Kazakhstan": "Казахстан", "Uzbekistan": "Узбекистан",
+    "Montenegro": "Черногория", "Serbia": "Сербия", "Romania": "Румыния",
+    "Bulgaria": "Болгария", "Sri Lanka": "Шри-Ланка", "Maldives": "Мальдивы",
+    "New Zealand": "Новая Зеландия", "Colombia": "Колумбия", "Peru": "Перу",
+    "Chile": "Чили", "Cuba": "Куба", "Dominican Republic": "Доминикана",
+    "Tunisia": "Тунис", "Jordan": "Иордания", "Oman": "Оман", "Bahrain": "Бахрейн",
+    "Kuwait": "Кувейт", "Taiwan": "Тайвань", "Hong Kong": "Гонконг",
+}
+
+
+def _build_airalo_affiliate_link(airalo_path: str) -> str:
+    """Формирует affiliate-ссылку Travelpayouts для Airalo."""
+    direct_url = f"https://www.airalo.com/{airalo_path}"
+    if TRAVELPAYOUTS_MARKER and TRAVELPAYOUTS_PROJECT:
+        encoded = url_quote(direct_url, safe="")
+        return (
+            f"https://tp.media/r?marker={TRAVELPAYOUTS_MARKER}"
+            f"&trs={TRAVELPAYOUTS_PROJECT}&p=8310"
+            f"&u={encoded}&campaign_id=541"
+        )
+    return direct_url
+
+
+@app.get("/esim/search")
+async def search_esim(
+    city: str = Query(..., description="City name"),
+    lang: str = Query("ru"),
+):
+    """Поиск eSIM пакетов для страны назначения через Airalo (Travelpayouts affiliate)"""
+    city_name = city.split(",")[0].strip()
+
+    try:
+        # 1. Определяем страну по городу через Nominatim
+        country_en = None
+        async with httpx.AsyncClient(timeout=10) as client:
+            headers = {"User-Agent": "Luggify/1.0 (travel packing app)"}
+            geo_resp = await client.get(NOMINATIM_URL, params={
+                "q": city_name, "format": "json",
+                "accept-language": "en", "limit": 1,
+                "addressdetails": 1,
+            }, headers=headers)
+            if geo_resp.status_code == 200 and geo_resp.json():
+                addr = geo_resp.json()[0].get("address", {})
+                country_en = addr.get("country")
+
+        if not country_en:
+            # Фоллбэк: пробуем вытащить страну из запятой в названии
+            if "," in city:
+                country_part = city.split(",")[-1].strip()
+                # Проверяем прямое совпадение
+                for en_name, slug in _AIRALO_SLUGS.items():
+                    if country_part.lower() == en_name.lower():
+                        country_en = en_name
+                        break
+                # Проверяем русское название
+                if not country_en:
+                    for en_name, ru_name in _COUNTRY_RU.items():
+                        if country_part.lower() == ru_name.lower():
+                            country_en = en_name
+                            break
+
+        if not country_en:
+            return {
+                "esim": None,
+                "browse_link": _build_airalo_affiliate_link(""),
+            }
+
+        # 2. Находим Airalo slug для страны
+        slug = _AIRALO_SLUGS.get(country_en)
+        if not slug:
+            # Генерируем slug из названия
+            slug = country_en.lower().replace(" ", "-")
+
+        country_display = _COUNTRY_RU.get(country_en, country_en) if lang == "ru" else country_en
+
+        # 3. Формируем eSIM данные
+        esim_link = _build_airalo_affiliate_link(f"{slug}-esim")
+
+        return {
+            "esim": {
+                "country": country_display,
+                "country_en": country_en,
+                "link": esim_link,
+                "provider": "Airalo",
+            },
+            "browse_link": _build_airalo_affiliate_link(""),
+        }
+
+    except Exception as e:
+        print(f"eSIM search error: {e}")
+        return {
+            "esim": None,
+            "browse_link": _build_airalo_affiliate_link(""),
+        }
 
 
 async def get_weather_forecast_data(city: str, start_date: datetime.date, end_date: datetime.date, language: str = "ru") -> List[schemas.DailyForecast]:
@@ -1436,7 +1737,7 @@ async def calculate_packing_data(
         "end_date": end_dt.date()
     }
 
-async def create_checklist_from_items(db, items, city, start_date, end_date, avg_temp, conditions, daily_forecast, user_id=None, language="ru"):
+async def create_checklist_from_items(db, items, city, start_date, end_date, avg_temp, conditions, daily_forecast, user_id=None, language="ru", origin_city=""):
     # Categorization logic
     mapping = get_category_map(language)
     categories = {k: [] for k in mapping.keys()}
@@ -1470,6 +1771,7 @@ async def create_checklist_from_items(db, items, city, start_date, end_date, avg
         conditions=sorted(list(conditions)),
         daily_forecast=[schemas.DailyForecast(**d) if isinstance(d, dict) else d for d in daily_forecast] if daily_forecast else None,
         user_id=user_id,
+        origin_city=origin_city or None,
     )
     checklist = await crud.create_checklist(db, checklist_data)
     
@@ -1488,6 +1790,7 @@ async def create_checklist_from_items(db, items, city, start_date, end_date, avg
         tg_user_id=checklist.tg_user_id,
         user_id=checklist.user_id,
         is_public=getattr(checklist, 'is_public', True),
+        origin_city=checklist.origin_city,
         daily_forecast=daily_forecast
     )
 
@@ -1501,7 +1804,8 @@ async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db),
         db, data["items"], req.city, data["start_date"], data["end_date"],
         data["avg_temp"], data["conditions"], data["daily_forecast"],
         current_user.id if current_user else None,
-        language=req.language
+        language=req.language,
+        origin_city=req.origin_city
     )
 
 @app.post("/generate-multi-city", response_model=ChecklistResponse)
@@ -1537,7 +1841,8 @@ async def generate_multi_city(req: MultiCityPackingRequest, db: AsyncSession = D
         db, all_items, display_city, min_date, max_date,
         avg_temp, list(conditions), all_forecast,
         current_user.id if current_user else None,
-        language=req.language
+        language=req.language,
+        origin_city=req.origin_city
     )
 
 @app.post("/save-tg-checklist", response_model=schemas.ChecklistOut)
@@ -1588,6 +1893,7 @@ async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):
         tg_user_id=checklist.tg_user_id,
         user_id=checklist.user_id,
         is_public=getattr(checklist, 'is_public', True),
+        origin_city=getattr(checklist, 'origin_city', None),
         daily_forecast=forecast
     )
 

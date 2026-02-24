@@ -67,6 +67,7 @@ class ChecklistCreate(BaseModel):
     removed_items: Optional[List[str]] = None
     added_items: Optional[List[str]] = None
     daily_forecast: Optional[List[DailyForecast]] = None
+    origin_city: Optional[str] = None
     tg_user_id: Optional[str] = None
     user_id: Optional[int] = None
     is_public: bool = True

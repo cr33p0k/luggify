@@ -126,8 +126,9 @@ const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
     <>
       {loading ? (
         <div className="section-loading">
-          <div className="skeleton-grid">
-            {Array.from({ length: limit }, (_, i) => <div key={i} className="skeleton-card" />)}
+          <div className="loading-spinner-wrap">
+            <div className="loading-spinner" />
+            <span className="loading-text">Ищем интересные места…</span>
           </div>
         </div>
       ) : (
@@ -205,8 +206,9 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate }) => {
     <div className="travel-section">
       <h3 className="section-title">✈️ Авиабилеты</h3>
       {loading ? (
-        <div className="skeleton-grid">
-          {[1, 2, 3].map(i => <div key={i} className="skeleton-card short" />)}
+        <div className="loading-spinner-wrap">
+          <div className="loading-spinner" />
+          <span className="loading-text">Ищем авиабилеты…</span>
         </div>
       ) : (
         <>
@@ -289,43 +291,181 @@ const HotelsSection = React.memo(({ city, startDate, endDate }) => {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [triggered, setTriggered] = useState(false);
+  const [priceMin, setPriceMin] = useState("");
+  const [priceMax, setPriceMax] = useState("");
 
-  useEffect(() => {
+  const doFetch = () => {
     if (!city) return;
     setLoading(true);
     setLoaded(false);
+    setTriggered(true);
     const params = new URLSearchParams({ city });
     if (startDate) params.append("check_in", startDate);
     if (endDate) params.append("check_out", endDate);
+    if (priceMin) params.append("price_min", priceMin);
+    if (priceMax) params.append("price_max", priceMax);
     fetch(`${API_URL}/hotels/search?${params}`)
       .then(r => r.json())
       .then(d => setData(d.hotels || []))
       .catch(() => setData([]))
       .finally(() => { setLoading(false); setLoaded(true); });
-  }, [city, startDate, endDate]);
+  };
 
-  if (loaded && data.length === 0) return null;
-  if (!loaded && !loading) return null;
+  if (!city) return null;
 
   return (
     <div className="travel-section">
       <h3 className="section-title">🏨 Отели</h3>
-      {loading ? (
-        <div className="skeleton-grid">
-          {[1, 2, 3].map(i => <div key={i} className="skeleton-card short" />)}
+      {!triggered ? (
+        <div className="hotels-filter-wrap">
+          <div className="hotels-price-filter">
+            <span className="hotels-filter-label">Цена за ночь (₽):</span>
+            <input
+              type="number"
+              className="hotels-price-input"
+              placeholder="от"
+              value={priceMin}
+              onChange={e => setPriceMin(e.target.value)}
+              min="0"
+            />
+            <span className="hotels-filter-dash">—</span>
+            <input
+              type="number"
+              className="hotels-price-input"
+              placeholder="до"
+              value={priceMax}
+              onChange={e => setPriceMax(e.target.value)}
+              min="0"
+            />
+          </div>
+          <button className="flights-search-btn" onClick={doFetch}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+              <polyline points="9 22 9 12 15 12 15 22" />
+            </svg>
+            Показать отели
+          </button>
+        </div>
+      ) : loading ? (
+        <div className="loading-spinner-wrap">
+          <div className="loading-spinner" />
+          <span className="loading-text">Ищем отели…</span>
+        </div>
+      ) : loaded && data.length === 0 ? (
+        <div style={{ textAlign: "center", color: "#9ca3af", padding: "1rem 0" }}>
+          Отели не найдены для данного направления
         </div>
       ) : (
         <div className="hotels-grid">
           {data.map((h, i) => (
             <a key={i} href={h.link} target="_blank" rel="noopener noreferrer" className="hotel-card">
-              <div className="hotel-name">{h.name}</div>
-              <div className="hotel-stars">{"⭐".repeat(h.stars || 0)}</div>
-              {h.price_per_night && (
-                <div className="hotel-price">от {h.price_per_night?.toLocaleString("ru-RU")} ₽/ночь</div>
+              {h.image ? (
+                <img src={h.image} alt={h.name} className="hotel-img" loading="lazy" />
+              ) : (
+                <div className="hotel-img-placeholder">🏨</div>
               )}
-              {h.rating && <div className="hotel-rating">⭐ {h.rating}/10</div>}
+              <div className="hotel-body">
+                <div className="hotel-name">{h.name}</div>
+                <div className="hotel-meta">
+                  {h.stars > 0 && <span className="hotel-stars">{"★".repeat(h.stars)}</span>}
+                  {h.rating && (
+                    <span className="hotel-rating-badge">
+                      {h.rating}
+                      {h.review_word && <span className="hotel-review-word"> · {h.review_word}</span>}
+                    </span>
+                  )}
+                </div>
+                {h.price_per_night && (
+                  <div className="hotel-price">
+                    {h.currency === "RUB"
+                      ? `${h.price_per_night.toLocaleString("ru-RU")} ₽ / ночь`
+                      : `${h.currency === "EUR" ? "€" : h.currency === "USD" ? "$" : h.currency} ${h.price_per_night.toLocaleString("ru-RU")} / ночь`}
+                    {h.price_rub && h.currency !== "RUB" && (
+                      <span className="hotel-price-rub"> (~{h.price_rub.toLocaleString("ru-RU")} ₽)</span>
+                    )}
+                  </div>
+                )}
+              </div>
             </a>
           ))}
+        </div>
+      )}
+    </div>
+  );
+});
+
+const EsimSection = React.memo(({ city, lang }) => {
+  const [data, setData] = useState(null);
+  const [browseLink, setBrowseLink] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    if (!city) return;
+    setLoading(true);
+    setLoaded(false);
+    const params = new URLSearchParams({ city, lang });
+    fetch(`${API_URL}/esim/search?${params}`)
+      .then(r => r.json())
+      .then(d => {
+        setData(d.esim || null);
+        if (d.browse_link) setBrowseLink(d.browse_link);
+      })
+      .catch(() => setData(null))
+      .finally(() => { setLoading(false); setLoaded(true); });
+  }, [city, lang]);
+
+  if (loaded && !data && !browseLink) return null;
+  if (!loaded && !loading) return null;
+
+  return (
+    <div className="travel-section">
+      <h3 className="section-title">📱 {lang === "ru" ? "eSIM для интернета" : "eSIM for Data"}</h3>
+      {loading ? (
+        <div className="skeleton-grid">
+          <div className="skeleton-card short" />
+        </div>
+      ) : (
+        <div className="esim-content">
+          {data ? (
+            <div className="esim-card">
+              <div className="esim-icon">📱</div>
+              <div className="esim-details">
+                <div className="esim-country">{data.country}</div>
+                <div className="esim-provider">
+                  <span className="esim-provider-badge">Airalo</span>
+                </div>
+                <div className="esim-description">
+                  {lang === "ru"
+                    ? "Виртуальная SIM-карта — подключитесь к интернету сразу по прилёту, без покупки местной SIM"
+                    : "Virtual SIM card — get connected right after landing, no need to buy a local SIM"}
+                </div>
+              </div>
+              <a href={data.link} target="_blank" rel="noopener noreferrer" className="esim-cta-btn">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="5" y="2" width="14" height="20" rx="2" ry="2" /><line x1="12" y1="18" x2="12" y2="18" />
+                </svg>
+                {lang === "ru" ? "Выбрать eSIM" : "Choose eSIM"}
+              </a>
+            </div>
+          ) : (
+            browseLink && (
+              <div className="esim-card esim-generic">
+                <div className="esim-icon">🌍</div>
+                <div className="esim-details">
+                  <div className="esim-description">
+                    {lang === "ru"
+                      ? "eSIM доступны для 200+ стран — оставайтесь на связи в путешествии"
+                      : "eSIM available for 200+ countries — stay connected while traveling"}
+                  </div>
+                </div>
+                <a href={browseLink} target="_blank" rel="noopener noreferrer" className="esim-cta-btn">
+                  {lang === "ru" ? "Посмотреть eSIM" : "Browse eSIMs"}
+                </a>
+              </div>
+            )
+          )}
         </div>
       )}
     </div>
@@ -496,6 +636,7 @@ const App = ({ page }) => {
         has_allergies: options.has_allergies,
         has_chronic_diseases: options.has_chronic_diseases,
         language: lang,
+        origin_city: originCity?.fullName || originCity || "",
       };
 
       const res = await fetch(`${API_URL}/generate-multi-city`, {
@@ -993,12 +1134,17 @@ const App = ({ page }) => {
 
                 {/* Flights */}
                 {result && result.city && (
-                  <FlightsSection key={"fl-" + result.city} city={result.city} startDate={result.start_date || destinations[0]?.dates?.start} returnDate={result.end_date || destinations[destinations.length - 1]?.dates?.end} origin={originCity?.fullName || originCity || ""} />
+                  <FlightsSection key={"fl-" + result.city} city={result.city} startDate={result.start_date || destinations[0]?.dates?.start} returnDate={result.end_date || destinations[destinations.length - 1]?.dates?.end} origin={originCity?.fullName || originCity || result.origin_city || ""} />
                 )}
 
                 {/* Hotels */}
                 {result && result.city && (
                   <HotelsSection key={"ht-" + result.city} city={result.city} startDate={result.start_date || destinations[0]?.dates?.start} endDate={result.end_date || destinations[destinations.length - 1]?.dates?.end} />
+                )}
+
+                {/* eSIM */}
+                {result && result.city && (
+                  <EsimSection key={"esim-" + result.city} city={result.city} lang={lang} />
                 )}
 
               </div>
