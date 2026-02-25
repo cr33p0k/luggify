@@ -152,3 +152,31 @@ async def update_checklist_state(db: AsyncSession, slug: str, checked_items=None
     await db.commit()
     await db.refresh(checklist)
     return checklist
+
+# === City Attractions CRUD ===
+
+async def get_city_attractions(db: AsyncSession, city_name: str):
+    """Получение закэшированных достопримечательностей города"""
+    result = await db.execute(
+        select(models.CityAttraction).where(models.CityAttraction.city_name == city_name.strip().lower())
+    )
+    return result.scalar_one_or_none()
+
+async def save_city_attractions(db: AsyncSession, city_name: str, data: list):
+    """Сохранение/обновление достопримечательностей города"""
+    normalized_name = city_name.strip().lower()
+    existing = await get_city_attractions(db, normalized_name)
+    if existing:
+        existing.data = data
+        await db.commit()
+        await db.refresh(existing)
+        return existing
+    
+    new_attraction = models.CityAttraction(
+        city_name=normalized_name,
+        data=data
+    )
+    db.add(new_attraction)
+    await db.commit()
+    await db.refresh(new_attraction)
+    return new_attraction

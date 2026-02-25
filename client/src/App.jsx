@@ -135,14 +135,14 @@ const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
         <div className="attractions-grid">
           {data.map((a, i) => (
             <div key={i} className="attraction-card">
-              <a href={a.link} target="_blank" rel="noopener noreferrer" className="attraction-bg-link">
+              <a href={`https://www.google.com/search?q=${encodeURIComponent(a.name + ' ' + city)}`} target="_blank" rel="noopener noreferrer" className="attraction-bg-link">
                 {a.image && <img src={a.image} alt={a.name} className="attraction-img" loading="lazy" />}
                 <div className="attraction-body">
                   <div className="attraction-name">{a.name}</div>
                 </div>
               </a>
               <a
-                href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(a.name + ', ' + city)}`}
+                href={a.link || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(a.name + ', ' + city)}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="attraction-map-btn"

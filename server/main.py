@@ -529,134 +529,172 @@ _CURATED = {
     "Sochi": ["Sochi Olympic Park","Rosa Khutor","Sochi Park","Krasnaya Polyana","Skypark AJ Hackett Sochi","Fisht Olympic Stadium","Akhun Mountain","Riviera Park (Sochi)","Sochi Art Museum","Dagomys Tea Plantation","Stalin's dacha","Sochi Arboretum","Orekhovsky Waterfall","Sochi Discovery World Aquarium","Agura Waterfalls"],
 }
 
-
 @app.get("/attractions")
 async def get_attractions(
     city: str = Query(...),
     lang: str = Query("ru"),
     limit: int = Query(10),
+    db: AsyncSession = Depends(get_db)  # Add DB dependency
 ):
-    """Достопримечательности: кураторский список + Wikipedia для перевода и фото"""
-    cache_key = (city.strip().lower(), lang, limit)
+    """Достопримечательности (Google Places API V2 + DB Cache + Wiki Pictures)"""
+    city_name = city.split(",")[0].strip()
+    cache_key = f"{city_name}_{lang}_{limit}".lower()
+    
+    # 1. Поиск в БД (Кэш)
+    cached_obj = await crud.get_city_attractions(db, cache_key)
+    if cached_obj:
+        # Проверяем свежесть (например, 30 дней)
+        if (datetime.now() - cached_obj.updated_at).days < 30:
+            return {"attractions": cached_obj.data}
 
-    if cache_key in ATTRACTIONS_CACHE:
-        cached_data, cached_at = ATTRACTIONS_CACHE[cache_key]
-        if time.time() - cached_at < 86400 * 7:
-            return {"attractions": cached_data}
-
+    # Lock для ин-мемори (если несколько юзеров одновременно запросили новый город)
     if cache_key not in ATTRACTIONS_LOCKS:
         ATTRACTIONS_LOCKS[cache_key] = asyncio.Lock()
 
     async with ATTRACTIONS_LOCKS[cache_key]:
-        if cache_key in ATTRACTIONS_CACHE:
-            cached_data, cached_at = ATTRACTIONS_CACHE[cache_key]
-            if time.time() - cached_at < 86400 * 7:
-                return {"attractions": cached_data}
+        # Двойная проверка на случай, если другой таск уже сохранил
+        cached_obj = await crud.get_city_attractions(db, cache_key)
+        if cached_obj and (datetime.now() - cached_obj.updated_at).days < 30:
+            return {"attractions": cached_obj.data}
 
+        results = []
         try:
-            wiki_headers = {"User-Agent": "LuggifyBot/1.0 (hello@luggify.app)"}
-            target_lang = lang if lang in ("ru", "en", "de", "fr", "es", "it") else "en"
-            en_wiki = "https://en.wikipedia.org/w/api.php"
+            rapidapi_key = os.getenv("RAPIDAPI_KEY")
+            if not rapidapi_key:
+                raise Exception("RAPIDAPI_KEY is not configured")
+
+            url = "https://google-map-places-new-v2.p.rapidapi.com/v1/places:searchText"
+            payload = {
+                "textQuery": f"top tourist attractions in {city_name}",
+                "languageCode": lang,
+                "maxResultCount": limit
+            }
+            headers = {
+                "x-rapidapi-key": rapidapi_key,
+                "x-rapidapi-host": "google-map-places-new-v2.p.rapidapi.com",
+                "Content-Type": "application/json",
+                "X-Goog-FieldMask": "places.displayName,places.rating,places.googleMapsUri,places.userRatingCount,places.location"
+            }
 
             async with httpx.AsyncClient(timeout=30) as client:
-                city_name = city.split(",")[0].strip()
+                resp = await client.post(url, json=payload, headers=headers)
+                if resp.status_code == 200:
+                    places = resp.json().get("places", [])
+                    
+                    # Для каждого места пробуем найти картинку через бесплатную Википедию
+                    # Это бережет лимиты RapidAPI (нам выделено мало запросов)
+                    wiki_headers = {"User-Agent": "LuggifyBot/1.0 (hello@luggify.app)"}
+                    target_lang = lang if lang in ("ru", "en", "de", "fr", "es", "it") else "en"
+                    
+                    for p in places:
+                        local_name = p.get("displayName", {}).get("text", "")
+                        if not local_name:
+                            continue
+                            
+                        maps_url = p.get("googleMapsUri", f"https://www.google.com/search?q={url_quote(local_name)}")
+                        image_url = None
+                        wiki_titles_to_try = []
+                        
+                        # 1. Запрашиваем названия статей из Wiki по прямому текстовому соответствию (OpenSearch)
+                        for wlang in ([target_lang] if target_lang == "en" else [target_lang, "en"]):
+                            try:
+                                search_resp = await client.get(
+                                    f"https://{wlang}.wikipedia.org/w/api.php",
+                                    params={"action": "opensearch", "search": local_name, "limit": 1, "format": "json"},
+                                    headers=wiki_headers
+                                )
+                                if search_resp.status_code == 200:
+                                    t = search_resp.json()[1]
+                                    if t:
+                                        wiki_titles_to_try.append((wlang, t[0]))
+                            except Exception:
+                                pass
+                                
+                        # 2. Добавляем поиск по координатам (Geosearch) как запасной вариант (на случай дизамбигов или других названий статей)
+                        if "location" in p:
+                            lat = p["location"].get("latitude")
+                            lon = p["location"].get("longitude")
+                            if lat and lon:
+                                for wlang in ([target_lang] if target_lang == "en" else [target_lang, "en"]):
+                                    try:
+                                        geo_resp = await client.get(
+                                            f"https://{wlang}.wikipedia.org/w/api.php",
+                                            params={"action": "query", "list": "geosearch", "gscoord": f"{lat}|{lon}", "gsradius": 50, "gslimit": 1, "format": "json"},
+                                            headers=wiki_headers
+                                        )
+                                        if geo_resp.status_code == 200:
+                                            geo_res = geo_resp.json().get("query", {}).get("geosearch", [])
+                                            if geo_res and geo_res[0]["title"] not in [wt[1] for wt in wiki_titles_to_try]:
+                                                wiki_titles_to_try.append((wlang, geo_res[0]["title"]))
+                                    except Exception:
+                                        pass
 
-                # ── 1. Определяем английское название города ──
-                en_city = city_name
-                if target_lang != "en":
-                    try:
-                        target_wiki = f"https://{target_lang}.wikipedia.org/w/api.php"
-                        ll_resp = await client.get(target_wiki, params={
-                            "action": "query", "titles": city_name,
-                            "prop": "langlinks", "lllang": "en",
-                            "lllimit": 1, "format": "json"
-                        }, headers=wiki_headers)
-                        for pid, page in ll_resp.json().get("query", {}).get("pages", {}).items():
-                            lls = page.get("langlinks", [])
-                            if lls:
-                                en_city = lls[0].get("*", city_name)
-                    except Exception:
-                        pass
+                        # 3. После перебора названий пытаемся найти хоть одно фото
+                        for wlang, wiki_title in wiki_titles_to_try:
+                            if image_url:
+                                break
+                            try:
+                                # Сначала пробуем получить главное фото страницы
+                                sr = await client.get(
+                                    f"https://{wlang}.wikipedia.org/api/rest_v1/page/summary/{url_quote(wiki_title)}",
+                                    headers=wiki_headers
+                                )
+                                if sr.status_code == 200:
+                                    source_url = sr.json().get("thumbnail", {}).get("source", "")
+                                    # Если это логотип, вектор, флаг или марка — отбраковываем и ищем нормальное фото
+                                    bad_words = [".svg", "logo", "flag", "icon", "symbol", "эмблема", "логотип", "герб", "stamp", "marka", "марка", "map", "карта"]
+                                    if source_url and not any(w in source_url.lower() for w in bad_words):
+                                        image_url = source_url
 
-                # ── 2. Берём список достопримечательностей ──
-                en_titles = _CURATED.get(en_city, [])[:limit]
+                                # Если главного фото нет или это логотип — скачиваем список фото и берем самое большое (в килобайтах)
+                                if not image_url:
+                                    img_resp = await client.get(
+                                        f"https://{wlang}.wikipedia.org/w/api.php",
+                                        params={"action": "query", "prop": "images", "titles": wiki_title, "redirects": 1, "format": "json", "imlimit": 50},
+                                        headers=wiki_headers
+                                    )
+                                    images_list = []
+                                    for pid, page in img_resp.json().get("query", {}).get("pages", {}).items():
+                                        for img in page.get("images", []):
+                                            title = img["title"]
+                                            if title.lower().endswith((".jpg", ".jpeg", ".webp")):
+                                                images_list.append(title)
+                                    
+                                    if images_list:
+                                        # Получаем URL и размер картинок, чтобы отсеять мелкие значки и выбрать лучшую
+                                        info_resp = await client.get(
+                                            f"https://{wlang}.wikipedia.org/w/api.php",
+                                            params={"action": "query", "titles": "|".join(images_list[:15]), "prop": "imageinfo", "iiprop": "url|size", "iiurlwidth": 800, "format": "json"},
+                                            headers=wiki_headers
+                                        )
+                                        valid_photos = []
+                                        for pid, page in info_resp.json().get("query", {}).get("pages", {}).items():
+                                            info = page.get("imageinfo", [{}])[0]
+                                            url = info.get("thumburl") or info.get("url")
+                                            size = info.get("size", 0)
+                                            if url and size > 80000: # Отсекаем все, что меньше 80KB в оригинале (мелкие иконки/марки)
+                                                valid_photos.append((size, url))
+                                        
+                                        if valid_photos:
+                                            valid_photos.sort(key=lambda x: x[0], reverse=True) # Берем самую тяжелую (качественную)
+                                            image_url = valid_photos[0][1]
+                            except Exception:
+                                pass
+                            
+                        results.append({
+                            "name": local_name,
+                            "image": image_url,
+                            "link": maps_url,
+                        })
 
-                # Фолбэк: поиск через Wikipedia категории
-                if not en_titles:
-                    try:
-                        for cat in [
-                            f"Category:Tourist attractions in {en_city}",
-                            f"Category:Museums in {en_city}",
-                            f"Category:Landmarks in {en_city}",
-                        ]:
-                            cr = await client.get(en_wiki, params={
-                                "action": "query", "list": "categorymembers",
-                                "cmtitle": cat, "cmlimit": 30,
-                                "cmtype": "page|subcat", "format": "json"
-                            }, headers=wiki_headers)
-                            for m in cr.json().get("query", {}).get("categorymembers", []):
-                                name = m["title"].replace("Category:", "") if m.get("ns") == 14 else m["title"]
-                                if not name.lower().startswith("list of"):
-                                    en_titles.append(name)
-                        en_titles = en_titles[:limit]
-                    except Exception:
-                        pass
-
-                if not en_titles:
-                    return {"attractions": []}
-
-                # ── 3. Батчевый перевод названий ──
-                translations = {}  # en_title -> local_title
-                if target_lang != "en":
-                    for i in range(0, len(en_titles), 50):
-                        chunk = en_titles[i:i+50]
-                        try:
-                            tr = await client.get(en_wiki, params={
-                                "action": "query", "titles": "|".join(chunk),
-                                "prop": "langlinks", "lllang": target_lang,
-                                "lllimit": "max", "redirects": 1, "format": "json"
-                            }, headers=wiki_headers)
-                            for pid, pd in tr.json().get("query", {}).get("pages", {}).items():
-                                if int(pid) > 0:
-                                    lls = pd.get("langlinks", [])
-                                    if lls:
-                                        translations[pd["title"]] = lls[0]["*"]
-                        except Exception:
-                            pass
-
-                # ── 4. Собираем результат с картинками ──
-                results = []
-                for en_title in en_titles:
-                    local_name = translations.get(en_title, en_title)
-                    image_url = None
-
-                    # Картинка из Wikipedia
-                    for wiki_title, wlang in [(local_name, target_lang), (en_title, "en")]:
-                        if image_url:
-                            break
-                        try:
-                            sr = await client.get(
-                                f"https://{wlang}.wikipedia.org/api/rest_v1/page/summary/{url_quote(wiki_title)}",
-                                headers=wiki_headers
-                            )
-                            if sr.status_code == 200:
-                                image_url = sr.json().get("thumbnail", {}).get("source")
-                        except Exception:
-                            pass
-
-                    results.append({
-                        "name": local_name,
-                        "image": image_url,
-                        "link": f"https://www.google.com/search?q={url_quote(local_name)}",
-                    })
-
-                if results:
-                    ATTRACTIONS_CACHE[cache_key] = (results, time.time())
-
+            if results:
+                await crud.save_city_attractions(db, cache_key, results)
                 return {"attractions": results}
+                
         except Exception as e:
-            print(f"Attractions error: {e}")
-            return {"attractions": []}
+            print(f"Attractions API V2 error: {e}")
+            
+        return {"attractions": []}
 
 
 # === Feature: Flight Search (Travelpayouts) ===

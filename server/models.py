@@ -44,3 +44,11 @@ class Checklist(Base):
     # Привязка к пользователю (nullable — для обратной совместимости)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     user = relationship("User", back_populates="checklists")
+
+class CityAttraction(Base):
+    __tablename__ = "city_attractions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    city_name = Column(String, unique=True, index=True, nullable=False) # lowercase
+    data = Column(JSON, nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
