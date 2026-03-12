@@ -691,10 +691,7 @@ async def get_attractions(
                     if not local_name_en:
                         continue
                         
-                    if lang == "ru":
-                        maps_url = f"https://yandex.ru/search/?text={url_quote(local_name_en)}+{url_quote(city_name)}+достопримечательность"
-                    else:
-                        maps_url = f"https://www.google.com/search?q={url_quote(local_name_en)}+{url_quote(city_name)}+attraction"
+                    maps_url = p.get("googleMapsUri", f"https://www.google.com/maps/search/?api=1&query={url_quote(local_name_en + ', ' + city_name)}")
 
                     image_url = None
                     wiki_title_en = None
@@ -712,8 +709,26 @@ async def get_attractions(
                                 wiki_title_en = t[0]
                     except Exception:
                         pass
+
+                    # 2. Fallback: ищем по координатам если не нашли по названию
+                    if not wiki_title_en and "location" in p:
+                        lat = p["location"].get("latitude")
+                        lon = p["location"].get("longitude")
+                        if lat and lon:
+                            try:
+                                geo_resp = await client.get(
+                                    "https://en.wikipedia.org/w/api.php",
+                                    params={"action": "query", "list": "geosearch", "gscoord": f"{lat}|{lon}", "gsradius": 500, "gslimit": 1, "format": "json"},
+                                    headers=wiki_headers
+                                )
+                                if geo_resp.status_code == 200:
+                                    geo_res = geo_resp.json().get("query", {}).get("geosearch", [])
+                                    if geo_res:
+                                        wiki_title_en = geo_res[0]["title"]
+                            except Exception:
+                                pass
                             
-                    # 2. Ищем фото
+                    # 3. Ищем фото
                     if wiki_title_en:
                         try:
                             sr = await client.get(
