@@ -2120,6 +2120,27 @@ async def add_checklist_event(
     
     return await crud.create_itinerary_event(db, checklist_id=checklist.id, data=event_in)
 
+@app.patch("/events/{event_id}", response_model=schemas.ItineraryEventOut)
+async def update_itinerary_event(
+    event_id: int,
+    event_in: schemas.ItineraryEventUpdate,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user)
+):
+    result = await db.execute(select(models.ItineraryEvent).where(models.ItineraryEvent.id == event_id))
+    event = result.scalar_one_or_none()
+    if not event:
+        raise HTTPException(status_code=404, detail="Событие не найдено")
+    
+    checklist = await crud.get_checklist_by_id(db, event.checklist_id)
+    if not checklist or checklist.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Нет прав редактировать")
+    
+    updated = await crud.update_itinerary_event(db, event_id, event_in)
+    if not updated:
+        raise HTTPException(status_code=500, detail="Ошибка при обновлении")
+    return updated
+
 @app.delete("/events/{event_id}")
 async def remove_itinerary_event(
     event_id: int,

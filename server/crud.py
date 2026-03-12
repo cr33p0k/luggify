@@ -253,6 +253,19 @@ async def create_itinerary_event(db: AsyncSession, checklist_id: int, data: sche
     await db.refresh(new_event)
     return new_event
 
+async def update_itinerary_event(db: AsyncSession, event_id: int, data: schemas.ItineraryEventUpdate):
+    result = await db.execute(select(models.ItineraryEvent).where(models.ItineraryEvent.id == event_id))
+    event = result.scalar_one_or_none()
+    if not event:
+        return None
+    update_data = data.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(event, key, value)
+    await db.commit()
+    await db.refresh(event)
+    return event
+
+
 async def delete_itinerary_event(db: AsyncSession, event_id: int):
     result = await db.execute(select(models.ItineraryEvent).where(models.ItineraryEvent.id == event_id))
     event = result.scalar_one_or_none()

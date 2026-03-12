@@ -437,6 +437,8 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner }) => {
   const [loading, setLoading] = useState(false);
   const [showItinerary, setShowItinerary] = useState(false);
   const [expandedAddress, setExpandedAddress] = useState(null);
+  const [editingEvent, setEditingEvent] = useState(null);
+  const [editData, setEditData] = useState({ time: "", title: "", description: "", address: "" });
   const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
   const token = localStorage.getItem("token");
 
@@ -479,6 +481,34 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner }) => {
         setNewEvent({ time: "", title: "", description: "", address: "" });
       } else {
         alert("Ошибка при сохранении события");
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Сбой сети");
+    }
+    setLoading(false);
+  };
+
+  const handleEditSubmit = async (eventId) => {
+    if (!editData.title) return alert("Введите название события");
+    setLoading(true);
+    try {
+      const resp = await fetch(`${API_URL}/events/${eventId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          time: editData.time || null,
+          title: editData.title,
+          description: editData.description || null,
+          address: editData.address || null
+        })
+      });
+      if (resp.ok) {
+        const updated = await resp.json();
+        setEvents(events.map(ev => ev.id === eventId ? updated : ev));
+        setEditingEvent(null);
+      } else {
+        alert("Ошибка при сохранении изменений");
       }
     } catch (e) {
       console.error(e);
@@ -536,45 +566,51 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner }) => {
                     )}
                     {hasEvents.map(ev => (
                       <div key={ev.id} className="itinerary-event-card">
-                        {ev.time && <div className="itinerary-event-time">{ev.time}</div>}
-                        <div className="itinerary-event-content">
-                          <div className="itinerary-event-title">{ev.title}</div>
-                          {ev.description && <div className="itinerary-event-desc">{ev.description}</div>}
-                          {ev.address && (
-                            <div className="itinerary-event-address">
-                              <span 
-                                className="address-link" 
-                                onClick={(e) => { e.stopPropagation(); setExpandedAddress(expandedAddress === ev.id ? null : ev.id); }}
-                              >
-                                📍 {ev.address}
-                              </span>
-                              {expandedAddress === ev.id && (
-                                <div className="address-map-links">
-                                  <a 
-                                    href={`https://yandex.ru/maps/?text=${encodeURIComponent(ev.address)}`} 
-                                    target="_blank" 
-                                    rel="noopener noreferrer"
-                                    className="map-link yandex"
-                                    onClick={e => e.stopPropagation()}
+                        {editingEvent === ev.id ? (
+                          /* === Edit Mode === */
+                          <div className="itinerary-form" style={{flex:1}}>
+                            <div className="itinerary-form-row">
+                              <input type="time" value={editData.time || ""} onChange={e => setEditData({...editData, time: e.target.value})} />
+                              <input type="text" value={editData.title} onChange={e => setEditData({...editData, title: e.target.value})} placeholder={t.eventTitlePlaceholder} autoFocus />
+                            </div>
+                            <input type="text" className="full-w" value={editData.description || ""} onChange={e => setEditData({...editData, description: e.target.value})} placeholder={t.eventDescPlaceholder} />
+                            <input type="text" className="full-w" value={editData.address || ""} onChange={e => setEditData({...editData, address: e.target.value})} placeholder={lang === "ru" ? "📍 Адрес" : "📍 Address"} />
+                            <div className="itinerary-form-actions">
+                              <button className="action-btn primary" onClick={() => handleEditSubmit(ev.id)} disabled={loading}>{t.saveEventBtn}</button>
+                              <button className="action-btn" onClick={() => setEditingEvent(null)}>{t.cancel}</button>
+                            </div>
+                          </div>
+                        ) : (
+                          /* === View Mode === */
+                          <>
+                            {ev.time && <div className="itinerary-event-time">{ev.time}</div>}
+                            <div className="itinerary-event-content">
+                              <div className="itinerary-event-title">{ev.title}</div>
+                              {ev.description && <div className="itinerary-event-desc">{ev.description}</div>}
+                              {ev.address && (
+                                <div className="itinerary-event-address">
+                                  <span 
+                                    className="address-link" 
+                                    onClick={(e) => { e.stopPropagation(); setExpandedAddress(expandedAddress === ev.id ? null : ev.id); }}
                                   >
-                                    Яндекс Карты
-                                  </a>
-                                  <a 
-                                    href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(ev.address)}`} 
-                                    target="_blank" 
-                                    rel="noopener noreferrer"
-                                    className="map-link google"
-                                    onClick={e => e.stopPropagation()}
-                                  >
-                                    Google Maps
-                                  </a>
+                                    📍 {ev.address}
+                                  </span>
+                                  {expandedAddress === ev.id && (
+                                    <div className="address-map-links">
+                                      <a href={`https://yandex.ru/maps/?text=${encodeURIComponent(ev.address)}`} target="_blank" rel="noopener noreferrer" className="map-link yandex" onClick={e => e.stopPropagation()}>Яндекс Карты</a>
+                                      <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(ev.address)}`} target="_blank" rel="noopener noreferrer" className="map-link google" onClick={e => e.stopPropagation()}>Google Maps</a>
+                                    </div>
+                                  )}
                                 </div>
                               )}
                             </div>
-                          )}
-                        </div>
-                        {isOwner && (
-                           <button className="del-evt-btn" onClick={() => handleRemoveEvent(ev.id)} title="Удалить">×</button>
+                            {isOwner && (
+                              <div className="evt-actions">
+                                <button className="edit-evt-btn" onClick={() => { setEditingEvent(ev.id); setEditData({ time: ev.time || "", title: ev.title, description: ev.description || "", address: ev.address || "" }); }} title="Редактировать">✎</button>
+                                <button className="del-evt-btn" onClick={() => handleRemoveEvent(ev.id)} title="Удалить">×</button>
+                              </div>
+                            )}
+                          </>
                         )}
                       </div>
                     ))}

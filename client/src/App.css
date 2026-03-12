@@ -1474,6 +1474,35 @@ input[type="date"]:focus,
   cursor: pointer;
   padding: 0 4px;
   border-radius: 4px;
+  transition: color 0.2s;
+}
+
+.evt-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+  margin-left: 8px;
+}
+
+.edit-evt-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: color 0.2s;
+}
+
+.edit-evt-btn:hover {
+  color: #4fc3f7;
+}
+
+.del-evt-btn:hover {
+  color: #ff5252;
 }
 
 .del-evt-btn:hover {

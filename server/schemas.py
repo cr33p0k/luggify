@@ -70,6 +70,13 @@ class ItineraryEventCreate(BaseModel):
     description: Optional[str] = None
     address: Optional[str] = None
 
+class ItineraryEventUpdate(BaseModel):
+    event_date: Optional[date] = None
+    time: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    address: Optional[str] = None
+
 class ItineraryEventOut(ItineraryEventCreate):
     id: int
     checklist_id: int
