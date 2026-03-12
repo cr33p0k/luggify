@@ -65,7 +65,7 @@ const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
                 {expandedMap === i && (
                   <div className="attraction-map-popup" onClick={e => e.stopPropagation()}>
                     <a 
-                      href={a.link || `https://yandex.ru/maps/?text=${encodeURIComponent(a.name + ' ' + city)}`} 
+                      href={`https://yandex.ru/maps/?text=${encodeURIComponent(a.name + ' ' + city)}`} 
                       target="_blank" 
                       rel="noopener noreferrer"
                       className="map-link yandex"
