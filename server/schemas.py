@@ -31,6 +31,9 @@ class UserOut(BaseModel):
     is_stats_public: bool = True
     created_at: Optional[datetime] = None
     avatar: Optional[str] = None
+    followers_count: Optional[int] = 0
+    following_count: Optional[int] = 0
+    is_following: Optional[bool] = False
 
     class Config:
         from_attributes = True

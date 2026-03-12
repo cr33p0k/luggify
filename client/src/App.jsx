@@ -9,97 +9,7 @@ import "./App.css";
 import "./AuthModal.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
-
-const TRANSLATIONS = {
-  ru: {
-    heroTitle: "Куда собираемся?",
-    heroSubtitle: "Введите город и даты — мы соберём идеальный чеклист для вашей поездки",
-    addCity: "+ Добавить город",
-    generate: "🚀 Поехали!",
-    transport: "Транспорт:",
-    gender: "Пол:",
-    tripType: "Тип поездки:",
-    pet: "🐾 С питомцем",
-    allergies: "🤧 Аллергия",
-    meds: "💊 Лекарства",
-    forecast: "🌤 Прогноз погоды",
-    humidity: "Влажность",
-    uv: "УФ-индекс",
-    wind: "Ветер",
-    kmh: "км/ч",
-    errorChecklist: "Ошибка при загрузке чеклиста",
-    errorServer: "Ошибка при запросе к серверу",
-    fillAll: "Заполните все города и даты!",
-    login: "Войти",
-    logout: "Выйти",
-    saveSuccess: "✅ Чеклист сохранён в вашем аккаунте!",
-    saveError: "❌ Ошибка сохранения",
-    restore: "Восстановить удалённые",
-    reset: "Сбросить отметки",
-    addItem: "+ Добавить вещь",
-    cancel: "Отмена",
-    newItem: "Новая вещь",
-    exportCalendar: "📅 В календарь",
-    print: "🖨 Печать",
-    // Options
-    plane: "✈️ Самолёт",
-    train: "🚆 Поезд",
-    car: "🚗 Авто",
-    bus: "🚌 Автобус",
-    unisex: "🚻 Любой",
-    male: "👨 Мужской",
-    female: "👩 Женский",
-    vacation: "🌴 Отдых",
-    business: "💼 Работа",
-    active: "🏃 Активный",
-    beach: "🏖 Пляж",
-    winter: "🎿 Зима",
-  },
-  en: {
-    heroTitle: "Where to?",
-    heroSubtitle: "Enter city and dates — we'll generate the perfect packing list for your trip",
-    addCity: "+ Add City",
-    generate: "🚀 Let's go!",
-    transport: "Transport:",
-    gender: "Gender:",
-    tripType: "Trip Type:",
-    pet: "🐾 With Pet",
-    allergies: "🤧 Allergies",
-    meds: "💊 Chronic Disease",
-    forecast: "🌤 Weather Forecast",
-    humidity: "Humidity",
-    uv: "UV Index",
-    wind: "Wind",
-    kmh: "km/h",
-    errorChecklist: "Error loading checklist",
-    errorServer: "Server connection error",
-    fillAll: "Please fill in all cities and dates!",
-    login: "Login",
-    logout: "Logout",
-    saveSuccess: "✅ Checklist saved to your account!",
-    saveError: "❌ Save error",
-    restore: "Restore removed items",
-    reset: "Reset checks",
-    addItem: "+ Add Item",
-    cancel: "Cancel",
-    newItem: "New item",
-    exportCalendar: "📅 Add to Calendar",
-    print: "🖨 Print",
-    // Options
-    plane: "✈️ Plane",
-    train: "🚆 Train",
-    car: "🚗 Car",
-    bus: "🚌 Bus",
-    unisex: "🚻 Any",
-    male: "👨 Male",
-    female: "👩 Female",
-    vacation: "🌴 Vacation",
-    business: "💼 Business",
-    active: "🏃 Active",
-    beach: "🏖 Beach",
-    winter: "🎿 Winter",
-  }
-};
+import { TRANSLATIONS, formatDuration, pluralize } from "./i18n";
 
 // === Sub-components for travel services ===
 
@@ -128,7 +38,7 @@ const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
         <div className="section-loading">
           <div className="loading-spinner-wrap">
             <div className="loading-spinner" />
-            <span className="loading-text">Ищем интересные места…</span>
+            <span className="loading-text">{TRANSLATIONS[lang].searchingAttractions}</span>
           </div>
         </div>
       ) : (
@@ -146,7 +56,7 @@ const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
                 target="_blank"
                 rel="noopener noreferrer"
                 className="attraction-map-btn"
-                title={lang === "ru" ? "Открыть в Google Картах" : "Open in Google Maps"}
+                title={TRANSLATIONS[lang].openInGoogleMaps}
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
@@ -170,7 +80,7 @@ const AttractionsSection = React.memo(({ city, lang }) => {
 
   return (
     <div className="travel-section">
-      <h3 className="section-title">🏛 {lang === "ru" ? "Что посмотреть" : "What to See"}</h3>
+      <h3 className="section-title">🏛 {TRANSLATIONS[lang].whatToSee}</h3>
       {cities.map((c, idx) => (
         <div key={c + idx}>
           {isMulti && <h4 className="attractions-city-title">📍 {c}</h4>}
@@ -181,7 +91,7 @@ const AttractionsSection = React.memo(({ city, lang }) => {
   );
 });
 
-const FlightsSection = React.memo(({ city, startDate, origin, returnDate }) => {
+const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang }) => {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -207,22 +117,15 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate }) => {
   }, [city, startDate, origin, returnDate]);
 
   if (loaded && data.length === 0 && !genericLink) return null;
-  if (!loaded && !loading) return null;
-
-  const formatDuration = (mins) => {
-    if (!mins) return null;
-    const h = Math.floor(mins / 60);
-    const m = mins % 60;
-    return h > 0 ? `${h}ч ${m > 0 ? m + 'м' : ''}` : `${m}м`;
-  };
+  const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
 
   return (
     <div className="travel-section">
-      <h3 className="section-title">✈️ Авиабилеты</h3>
+      <h3 className="section-title">✈️ {t.flightsTitle}</h3>
       {loading ? (
         <div className="loading-spinner-wrap">
           <div className="loading-spinner" />
-          <span className="loading-text">Ищем авиабилеты…</span>
+          <span className="loading-text">{t.searchingFlights}</span>
         </div>
       ) : (
         <>
@@ -230,12 +133,12 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate }) => {
             <div style={{ display: "flex", gap: "2rem", flexWrap: "wrap", marginBottom: "1.5rem" }}>
               {data.filter(f => f.type === "outbound" || !f.type).length > 0 && (
                 <div style={{ flex: "1 1 300px" }}>
-                  <h4 style={{ margin: "0 0 0.75rem 0", color: "#9ca3af", fontSize: "0.95rem", fontWeight: "600" }}>Рейсы туда</h4>
+                  <h4 style={{ margin: "0 0 0.75rem 0", color: "#9ca3af", fontSize: "0.95rem", fontWeight: "600" }}>{t.outboundFlights}</h4>
                   <div className="flights-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
                     {data.filter(f => f.type === "outbound" || !f.type).map((f, i) => (
                       <a key={`out-${i}`} href={f.link} target="_blank" rel="noopener noreferrer" className="flight-card" style={{ height: "100%" }}>
                         {f.tag && <div className="flight-tag">{f.tag}</div>}
-                        <div className="flight-price">{f.price ? `${f.price.toLocaleString("ru-RU")} ₽` : "Цена по запросу"}</div>
+                        <div className="flight-price">{f.price ? `${f.price.toLocaleString("ru-RU")} ₽` : t.priceOnRequest}</div>
                         <div className="flight-route">
                           {f.origin} → {f.destination}
                         </div>
@@ -246,8 +149,8 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate }) => {
                         )}
                         <div className="flight-info">
                           {f.airline && <span>✈ {f.airline}</span>}
-                          <span>{f.transfers === 0 ? "Прямой" : `${f.transfers} пересад.`}</span>
-                          {f.duration > 0 && <span>⏱ {formatDuration(f.duration)}</span>}
+                          <span>{f.transfers === 0 ? t.directFlight : pluralize(f.transfers, ['пересадка', 'пересадки', 'пересадок'], ['stop', 'stops'], lang)}</span>
+                          {f.duration > 0 && <span>⏱ {formatDuration(f.duration, lang)}</span>}
                         </div>
                       </a>
                     ))}
@@ -256,12 +159,12 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate }) => {
               )}
               {data.filter(f => f.type === "inbound").length > 0 && (
                 <div style={{ flex: "1 1 300px" }}>
-                  <h4 style={{ margin: "0 0 0.75rem 0", color: "#9ca3af", fontSize: "0.95rem", fontWeight: "600" }}>Рейсы обратно</h4>
+                  <h4 style={{ margin: "0 0 0.75rem 0", color: "#9ca3af", fontSize: "0.95rem", fontWeight: "600" }}>{t.inboundFlights}</h4>
                   <div className="flights-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
                     {data.filter(f => f.type === "inbound").map((f, i) => (
                       <a key={`in-${i}`} href={f.link} target="_blank" rel="noopener noreferrer" className="flight-card" style={{ height: "100%" }}>
                         {f.tag && <div className="flight-tag">{f.tag}</div>}
-                        <div className="flight-price">{f.price ? `${f.price.toLocaleString("ru-RU")} ₽` : "Цена по запросу"}</div>
+                        <div className="flight-price">{f.price ? `${f.price.toLocaleString("ru-RU")} ₽` : t.priceOnRequest}</div>
                         <div className="flight-route">
                           {f.origin} → {f.destination}
                         </div>
@@ -272,8 +175,8 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate }) => {
                         )}
                         <div className="flight-info">
                           {f.airline && <span>✈ {f.airline}</span>}
-                          <span>{f.transfers === 0 ? "Прямой" : `${f.transfers} пересад.`}</span>
-                          {f.duration > 0 && <span>⏱ {formatDuration(f.duration)}</span>}
+                          <span>{f.transfers === 0 ? t.directFlight : pluralize(f.transfers, ['пересадка', 'пересадки', 'пересадок'], ['stop', 'stops'], lang)}</span>
+                          {f.duration > 0 && <span>⏱ {formatDuration(f.duration, lang)}</span>}
                         </div>
                       </a>
                     ))}
@@ -284,14 +187,14 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate }) => {
           )}
           {data.length === 0 && genericLink && (
             <div style={{ marginBottom: "1rem", textAlign: "center", color: "#9ca3af" }}>
-              К сожалению, кэшированных билетов на ваши точные даты мы не нашли.<br /><br />
+              {t.noCachedTickets}<br /><br />
             </div>
           )}
           {genericLink && (
             <div style={{ display: "flex", justifyContent: "center", width: "100%", marginTop: "1rem" }}>
               <a href={genericLink} target="_blank" rel="noopener noreferrer" className="flights-search-btn">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7z" /></svg>
-                Искать билеты туда и обратно
+                {t.searchReturnTickets}
               </a>
             </div>
           )}
@@ -301,7 +204,7 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate }) => {
   );
 });
 
-const HotelsSection = React.memo(({ city, startDate, endDate }) => {
+const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -349,11 +252,13 @@ const HotelsSection = React.memo(({ city, startDate, endDate }) => {
 
   if (!city) return null;
 
+  const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
+
   return (
     <div className="travel-section">
-      <h3 className="section-title">🏨 Отели</h3>
+      <h3 className="section-title">🏨 {t.hotelsTitle}</h3>
       {loaded && data.length > 0 && provider !== "ru_widgets" && !isRussia && (
-        <a href={bookingDirectLink} target="_blank" rel="noopener noreferrer" className="booking-corner-link" title="Перейти на Booking.com">
+        <a href={bookingDirectLink} target="_blank" rel="noopener noreferrer" className="booking-corner-link" title={t.goToBooking}>
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="9 18 15 12 9 6" />
           </svg>
@@ -367,16 +272,16 @@ const HotelsSection = React.memo(({ city, startDate, endDate }) => {
                 <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
                 <polyline points="9 22 9 12 15 12 15 22" />
               </svg>
-              Показать отели
+              {t.showHotels}
             </button>
             {!isRussia && (
-              <a href={bookingDirectLink} target="_blank" rel="noopener noreferrer" className="booking-secondary-btn" title="Искать напрямую на Booking.com">
+              <a href={bookingDirectLink} target="_blank" rel="noopener noreferrer" className="booking-secondary-btn" title={t.searchDirectlyBooking}>
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
                   <polyline points="15 3 21 3 21 9"></polyline>
                   <line x1="10" y1="14" x2="21" y2="3"></line>
                 </svg>
-                Перейти на Booking
+                {t.goToBooking}
               </a>
             )}
           </div>
@@ -384,12 +289,12 @@ const HotelsSection = React.memo(({ city, startDate, endDate }) => {
       ) : loading ? (
         <div className="loading-spinner-wrap">
           <div className="loading-spinner" />
-          <span className="loading-text">Ищем отели…</span>
+          <span className="loading-text">{t.searchingHotels}</span>
         </div>
       ) : provider === "ru_widgets" ? (
         <div className="ru-widgets-container">
           <div className="ru-widgets-text" style={{ textAlign: "center", color: "#9ca3af", marginBottom: "1rem", fontSize: "0.9rem" }}>
-            Для путешествий по России бронирование на Booking недоступно. Мы рекомендуем использовать проверенные российские сервисы:
+            {t.ruWidgetsDisclaimer}
           </div>
           <div className="ru-widgets-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
             <a href={links.ostrovok} target="_blank" rel="noopener noreferrer" className="ru-widget-card" style={{ background: "#1a1a1a", border: "1px solid #333", borderRadius: "12px", padding: "1.5rem", display: "flex", flexDirection: "column", alignItems: "center", textDecoration: "none", transition: "transform 0.2s, border-color 0.2s" }}>
@@ -408,7 +313,7 @@ const HotelsSection = React.memo(({ city, startDate, endDate }) => {
         </div>
       ) : loaded && data.length === 0 ? (
         <div style={{ textAlign: "center", color: "#9ca3af", padding: "1rem 0" }}>
-          Отели не найдены для данного направления
+          {t.noHotelsFound}
         </div>
       ) : (
         <div className="hotels-grid">
@@ -433,8 +338,8 @@ const HotelsSection = React.memo(({ city, startDate, endDate }) => {
                 {h.price_per_night && (
                   <div className="hotel-price">
                     {h.currency === "RUB"
-                      ? `${h.price_per_night.toLocaleString("ru-RU")} ₽ / ночь`
-                      : `${h.currency === "EUR" ? "€" : h.currency === "USD" ? "$" : h.currency} ${h.price_per_night.toLocaleString("ru-RU")} / ночь`}
+                      ? `${h.price_per_night.toLocaleString("ru-RU")} ₽ / ${t.perNight}`
+                      : `${h.currency === "EUR" ? "€" : h.currency === "USD" ? "$" : h.currency} ${h.price_per_night.toLocaleString("ru-RU")} / ${t.perNight}`}
                     {h.price_rub && h.currency !== "RUB" && (
                       <span className="hotel-price-rub"> (~{h.price_rub.toLocaleString("ru-RU")} ₽)</span>
                     )}
@@ -473,9 +378,11 @@ const EsimSection = React.memo(({ city, lang }) => {
   if (loaded && !data && !browseLink) return null;
   if (!loaded && !loading) return null;
 
+  const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
+
   return (
     <div className="travel-section">
-      <h3 className="section-title">📱 {lang === "ru" ? "eSIM для интернета" : "eSIM for Data"}</h3>
+      <h3 className="section-title">📱 {t.esimTitle}</h3>
       {loading ? (
         <div className="skeleton-grid">
           <div className="skeleton-card short" />
@@ -491,16 +398,14 @@ const EsimSection = React.memo(({ city, lang }) => {
                   <span className="esim-provider-badge">Airalo</span>
                 </div>
                 <div className="esim-description">
-                  {lang === "ru"
-                    ? "Виртуальная SIM-карта — подключитесь к интернету сразу по прилёту, без покупки местной SIM"
-                    : "Virtual SIM card — get connected right after landing, no need to buy a local SIM"}
+                  {t.esimDesc}
                 </div>
               </div>
               <a href={data.link} target="_blank" rel="noopener noreferrer" className="esim-cta-btn">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <rect x="5" y="2" width="14" height="20" rx="2" ry="2" /><line x1="12" y1="18" x2="12" y2="18" />
                 </svg>
-                {lang === "ru" ? "Выбрать eSIM" : "Choose eSIM"}
+                {t.chooseEsim}
               </a>
             </div>
           ) : (
@@ -509,13 +414,11 @@ const EsimSection = React.memo(({ city, lang }) => {
                 <div className="esim-icon">🌍</div>
                 <div className="esim-details">
                   <div className="esim-description">
-                    {lang === "ru"
-                      ? "eSIM доступны для 200+ стран — оставайтесь на связи в путешествии"
-                      : "eSIM available for 200+ countries — stay connected while traveling"}
+                    {t.esimDescBrowse}
                   </div>
                 </div>
                 <a href={browseLink} target="_blank" rel="noopener noreferrer" className="esim-cta-btn">
-                  {lang === "ru" ? "Посмотреть eSIM" : "Browse eSIMs"}
+                  {t.browseEsim}
                 </a>
               </div>
             )
@@ -854,7 +757,7 @@ const App = ({ page }) => {
       <div className="page-wrapper">
         {/* Profile Page */}
         {page === "profile" ? (
-          <ProfilePage user={user} token={token} onLogout={handleLogout} onUpdateUser={setUser} />
+          <ProfilePage user={user} token={token} onLogout={handleLogout} onUpdateUser={setUser} lang={lang} />
         ) : (
           <>
             {!result && (
@@ -1200,12 +1103,12 @@ const App = ({ page }) => {
 
                 {/* Flights */}
                 {result && result.city && (
-                  <FlightsSection key={"fl-" + result.city} city={result.city} startDate={result.start_date || destinations[0]?.dates?.start} returnDate={result.end_date || destinations[destinations.length - 1]?.dates?.end} origin={originCity?.fullName || originCity || result.origin_city || ""} />
+                  <FlightsSection key={"fl-" + result.city} city={result.city} startDate={result.start_date || destinations[0]?.dates?.start} returnDate={result.end_date || destinations[destinations.length - 1]?.dates?.end} origin={originCity?.fullName || originCity || result.origin_city || ""} lang={lang} />
                 )}
 
                 {/* Hotels */}
                 {result && result.city && (
-                  <HotelsSection key={"ht-" + result.city} city={result.city} startDate={result.start_date || destinations[0]?.dates?.start} endDate={result.end_date || destinations[destinations.length - 1]?.dates?.end} />
+                  <HotelsSection key={"ht-" + result.city} city={result.city} startDate={result.start_date || destinations[0]?.dates?.start} endDate={result.end_date || destinations[destinations.length - 1]?.dates?.end} lang={lang} />
                 )}
 
                 {/* eSIM */}

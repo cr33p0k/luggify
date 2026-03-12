@@ -71,6 +71,57 @@ async def create_user_from_telegram(db: AsyncSession, tg_id: str, username: str,
     return user
 
 
+async def follow_user(db: AsyncSession, follower_id: int, following_id: int):
+    """Подписка на пользователя"""
+    stmt = select(models.followers_association).where(
+        models.followers_association.c.follower_id == follower_id,
+        models.followers_association.c.following_id == following_id
+    )
+    result = await db.execute(stmt)
+    if result.first():
+        return False  # Уже подписан
+
+    insert_stmt = models.followers_association.insert().values(
+        follower_id=follower_id,
+        following_id=following_id
+    )
+    await db.execute(insert_stmt)
+    await db.commit()
+    return True
+
+async def unfollow_user(db: AsyncSession, follower_id: int, following_id: int):
+    """Отписка от пользователя"""
+    delete_stmt = models.followers_association.delete().where(
+        models.followers_association.c.follower_id == follower_id,
+        models.followers_association.c.following_id == following_id
+    )
+    result = await db.execute(delete_stmt)
+    await db.commit()
+    return result.rowcount > 0
+
+async def get_followers(db: AsyncSession, user_id: int):
+    """Получить всех подписчиков (кто подписан на user_id)"""
+    stmt = (
+        select(models.User)
+        .join(models.followers_association, models.User.id == models.followers_association.c.follower_id)
+        .where(models.followers_association.c.following_id == user_id)
+        .order_by(models.followers_association.c.created_at.desc())
+    )
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+async def get_following(db: AsyncSession, user_id: int):
+    """Получить всех, на кого подписан user_id (подписки)"""
+    stmt = (
+        select(models.User)
+        .join(models.followers_association, models.User.id == models.followers_association.c.following_id)
+        .where(models.followers_association.c.follower_id == user_id)
+        .order_by(models.followers_association.c.created_at.desc())
+    )
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+
 # === Checklist CRUD ===
 
 async def create_checklist(db: AsyncSession, data: schemas.ChecklistCreate):

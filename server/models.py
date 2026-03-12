@@ -1,8 +1,16 @@
-from sqlalchemy import Column, Integer, String, Date, Float, DateTime, ForeignKey, func, Boolean, JSON
+from sqlalchemy import Column, Integer, String, Date, Float, DateTime, ForeignKey, func, Boolean, JSON, Table
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from database import Base
+
+followers_association = Table(
+    "followers",
+    Base.metadata,
+    Column("follower_id", Integer, ForeignKey("users.id"), primary_key=True),
+    Column("following_id", Integer, ForeignKey("users.id"), primary_key=True),
+    Column("created_at", DateTime, server_default=func.now())
+)
 
 
 class User(Base):
@@ -16,9 +24,17 @@ class User(Base):
     is_stats_public = Column(Boolean, default=True)
     created_at = Column(DateTime, server_default=func.now())
     avatar = Column(String, nullable=True)  # URL, emoji or base64
-
     # Связь с чеклистами
     checklists = relationship("Checklist", back_populates="user")
+
+    # Подписки (на кого подписан этот юзер)
+    following = relationship(
+        "User",
+        secondary=followers_association,
+        primaryjoin=id == followers_association.c.follower_id,
+        secondaryjoin=id == followers_association.c.following_id,
+        backref="followers"
+    )
 
 
 class Checklist(Base):
