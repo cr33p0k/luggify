@@ -2022,7 +2022,8 @@ async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):
         user_id=checklist.user_id,
         is_public=getattr(checklist, 'is_public', True),
         origin_city=getattr(checklist, 'origin_city', None),
-        daily_forecast=forecast
+        daily_forecast=forecast,
+        events=checklist.events or []
     )
 
     # Категории для чеклиста (для фронта)
