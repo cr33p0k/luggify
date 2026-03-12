@@ -1799,11 +1799,34 @@ input[type="date"]:focus,
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-.attraction-map-btn:hover {
+.attraction-map-btn:hover, .attraction-map-btn.active {
   background: var(--orange);
   border-color: var(--orange);
   transform: scale(1.1);
   box-shadow: 0 4px 12px rgba(255, 153, 0, 0.4);
+}
+
+.attraction-map-popup {
+  position: absolute;
+  top: 40px;
+  right: 0;
+  background: rgba(30, 30, 30, 0.95);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 10px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 130px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  z-index: 100;
+  cursor: default;
+}
+
+.attraction-map-popup .map-link {
+  margin: 0;
+  text-align: center;
 }
 
 .attraction-img {

@@ -17,6 +17,7 @@ const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [expandedMap, setExpandedMap] = useState(null);
 
   useEffect(() => {
     if (!city) return;
@@ -51,18 +52,37 @@ const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
                   <div className="attraction-name">{a.name}</div>
                 </div>
               </a>
-              <a
-                href={a.link || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(a.name + ', ' + city)}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="attraction-map-btn"
-                title={TRANSLATIONS[lang].openInGoogleMaps}
+              <div 
+                className={`attraction-map-btn ${expandedMap === i ? 'active' : ''}`}
+                onClick={() => setExpandedMap(expandedMap === i ? null : i)}
+                title={lang === 'ru' ? 'Показать на карте' : 'Show on map'}
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
                   <circle cx="12" cy="10" r="3" />
                 </svg>
-              </a>
+
+                {expandedMap === i && (
+                  <div className="attraction-map-popup" onClick={e => e.stopPropagation()}>
+                    <a 
+                      href={a.link || `https://yandex.ru/maps/?text=${encodeURIComponent(a.name + ' ' + city)}`} 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      className="map-link yandex"
+                    >
+                      Яндекс Карты
+                    </a>
+                    <a 
+                      href={a.link || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(a.name + ', ' + city)}`} 
+                      target="_blank" 
+                      rel="noopener noreferrer"
+                      className="map-link google"
+                    >
+                      Google Maps
+                    </a>
+                  </div>
+                )}
+              </div>
             </div>
           ))}
         </div>
