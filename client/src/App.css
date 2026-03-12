@@ -1419,6 +1419,52 @@ input[type="date"]:focus,
   line-height: 1.4;
 }
 
+.itinerary-event-address {
+  margin-top: 4px;
+}
+
+.address-link {
+  font-size: 0.8rem;
+  color: #4fc3f7;
+  cursor: pointer;
+  text-decoration: none;
+  transition: color 0.2s;
+}
+
+.address-link:hover {
+  color: #81d4fa;
+  text-decoration: underline;
+}
+
+.address-map-links {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.map-link {
+  font-size: 0.75rem;
+  padding: 4px 10px;
+  border-radius: 6px;
+  text-decoration: none;
+  font-weight: 600;
+  transition: opacity 0.2s;
+}
+
+.map-link:hover {
+  opacity: 0.85;
+}
+
+.map-link.yandex {
+  background: #fc3f1d;
+  color: #fff;
+}
+
+.map-link.google {
+  background: #4285f4;
+  color: #fff;
+}
+
 .del-evt-btn {
   background: transparent;
   border: none;

@@ -11,6 +11,7 @@ import asyncio
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 import crud, models, schemas
 from database import SessionLocal, async_engine, get_db
 from typing import List, Optional

@@ -73,6 +73,7 @@ class ItineraryEvent(Base):
     time = Column(String, nullable=True) # e.g. "14:30"
     title = Column(String, nullable=False)
     description = Column(String, nullable=True)
+    address = Column(String, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     checklist = relationship("Checklist", back_populates="events")

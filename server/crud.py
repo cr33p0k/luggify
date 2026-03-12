@@ -245,7 +245,8 @@ async def create_itinerary_event(db: AsyncSession, checklist_id: int, data: sche
         event_date=data.event_date,
         time=data.time,
         title=data.title,
-        description=data.description
+        description=data.description,
+        address=data.address
     )
     db.add(new_event)
     await db.commit()

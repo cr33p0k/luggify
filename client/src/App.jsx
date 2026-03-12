@@ -433,9 +433,10 @@ const EsimSection = React.memo(({ city, lang }) => {
 const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner }) => {
   const [events, setEvents] = useState(checklist?.events || []);
   const [addingDay, setAddingDay] = useState(null);
-  const [newEvent, setNewEvent] = useState({ time: "", title: "", description: "" });
+  const [newEvent, setNewEvent] = useState({ time: "", title: "", description: "", address: "" });
   const [loading, setLoading] = useState(false);
   const [showItinerary, setShowItinerary] = useState(false);
+  const [expandedAddress, setExpandedAddress] = useState(null);
   const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
   const token = localStorage.getItem("token");
 
@@ -467,14 +468,15 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner }) => {
           event_date: dateStr,
           time: newEvent.time || null,
           title: newEvent.title,
-          description: newEvent.description || null
+          description: newEvent.description || null,
+          address: newEvent.address || null
         })
       });
       if (resp.ok) {
         const ev = await resp.json();
         setEvents([...events, ev]);
         setAddingDay(null);
-        setNewEvent({ time: "", title: "", description: "" });
+        setNewEvent({ time: "", title: "", description: "", address: "" });
       } else {
         alert("Ошибка при сохранении события");
       }
@@ -538,6 +540,38 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner }) => {
                         <div className="itinerary-event-content">
                           <div className="itinerary-event-title">{ev.title}</div>
                           {ev.description && <div className="itinerary-event-desc">{ev.description}</div>}
+                          {ev.address && (
+                            <div className="itinerary-event-address">
+                              <span 
+                                className="address-link" 
+                                onClick={(e) => { e.stopPropagation(); setExpandedAddress(expandedAddress === ev.id ? null : ev.id); }}
+                              >
+                                📍 {ev.address}
+                              </span>
+                              {expandedAddress === ev.id && (
+                                <div className="address-map-links">
+                                  <a 
+                                    href={`https://yandex.ru/maps/?text=${encodeURIComponent(ev.address)}`} 
+                                    target="_blank" 
+                                    rel="noopener noreferrer"
+                                    className="map-link yandex"
+                                    onClick={e => e.stopPropagation()}
+                                  >
+                                    Яндекс Карты
+                                  </a>
+                                  <a 
+                                    href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(ev.address)}`} 
+                                    target="_blank" 
+                                    rel="noopener noreferrer"
+                                    className="map-link google"
+                                    onClick={e => e.stopPropagation()}
+                                  >
+                                    Google Maps
+                                  </a>
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
                         {isOwner && (
                            <button className="del-evt-btn" onClick={() => handleRemoveEvent(ev.id)} title="Удалить">×</button>
@@ -576,11 +610,18 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner }) => {
                                 onChange={e => setNewEvent({...newEvent, description: e.target.value})} 
                                 placeholder={t.eventDescPlaceholder}
                              />
+                             <input 
+                                type="text" 
+                                className="full-w"
+                                value={newEvent.address}
+                                onChange={e => setNewEvent({...newEvent, address: e.target.value})} 
+                                placeholder={lang === "ru" ? "📍 Адрес (необязательно)" : "📍 Address (optional)"}
+                             />
                              <div className="itinerary-form-actions">
                                <button className="action-btn primary" onClick={() => handleAddSubmit(dStr)} disabled={loading}>
                                  {t.saveEventBtn}
                                </button>
-                               <button className="action-btn" onClick={() => { setAddingDay(null); setNewEvent({ time:"", title:"", description:""}); }}>
+                               <button className="action-btn" onClick={() => { setAddingDay(null); setNewEvent({ time:"", title:"", description:"", address:""}); }}>
                                  {t.cancel}
                                </button>
                              </div>

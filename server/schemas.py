@@ -68,6 +68,7 @@ class ItineraryEventCreate(BaseModel):
     time: Optional[str] = None
     title: str
     description: Optional[str] = None
+    address: Optional[str] = None
 
 class ItineraryEventOut(ItineraryEventCreate):
     id: int
