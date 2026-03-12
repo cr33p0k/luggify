@@ -154,6 +154,11 @@ async def get_checklist_by_slug(db: AsyncSession, slug: str):
     return result.scalar_one_or_none()
 
 
+async def get_checklist_by_id(db: AsyncSession, checklist_id: int):
+    result = await db.execute(select(models.Checklist).where(models.Checklist.id == checklist_id))
+    return result.scalar_one_or_none()
+
+
 async def get_checklist_by_tg_user_id(db: AsyncSession, tg_user_id: str):
     result = await db.execute(
         select(models.Checklist)

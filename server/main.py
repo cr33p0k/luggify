@@ -631,7 +631,7 @@ async def get_attractions(
     cached_obj = await crud.get_city_attractions(db, cache_key)
     if cached_obj:
         # Проверяем свежесть (например, 30 дней)
-        if (datetime.now() - cached_obj.updated_at).days < 30:
+        if (datetime.now() - cached_obj.updated_at).days < 180:
             return {"attractions": cached_obj.data}
 
     # Lock для ин-мемори (если несколько юзеров одновременно запросили новый город)

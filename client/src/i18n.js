@@ -142,7 +142,7 @@ export const TRANSLATIONS = {
         followingStat: "Подписки",
 
         // Itinerary
-        itineraryTitle: "Маршрут и расписание",
+        itineraryTitle: "План по дням",
         addEvent: "+ Добавить событие",
         eventTimePlaceholder: "Время (14:30)",
         eventTitlePlaceholder: "Название (Ужин, Музей...)",
@@ -267,7 +267,7 @@ export const TRANSLATIONS = {
         followingStat: "Following",
 
         // Itinerary
-        itineraryTitle: "Trip Itinerary",
+        itineraryTitle: "Day Plan",
         addEvent: "+ Add event",
         eventTimePlaceholder: "Time (14:30)",
         eventTitlePlaceholder: "Title (Dinner, Museum...)",
