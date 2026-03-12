@@ -1479,10 +1479,10 @@ input[type="date"]:focus,
 
 .evt-actions {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   gap: 4px;
-  align-items: center;
-  margin-left: 8px;
+  align-items: flex-start;
+  margin-left: auto;
 }
 
 .edit-evt-btn {
@@ -1490,9 +1490,9 @@ input[type="date"]:focus,
   border: none;
   color: var(--text-muted);
   font-size: 1.1rem;
-  line-height: 1;
+  line-height: normal;
   cursor: pointer;
-  padding: 4px;
+  padding: 2px 4px;
   border-radius: 4px;
   transition: color 0.2s;
 }
