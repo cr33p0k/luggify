@@ -660,7 +660,7 @@ async def get_attractions(
                 "x-rapidapi-key": rapidapi_key,
                 "x-rapidapi-host": "google-map-places-new-v2.p.rapidapi.com",
                 "Content-Type": "application/json",
-                "X-Goog-FieldMask": "places.displayName,places.rating,places.googleMapsUri,places.userRatingCount,places.location,places.photos"
+                "X-Goog-FieldMask": "places.displayName,places.rating,places.googleMapsUri,places.userRatingCount,places.photos"
             }
 
             async with httpx.AsyncClient(timeout=30) as client:
@@ -676,8 +676,6 @@ async def get_attractions(
                     if cached_obj:
                         return {"attractions": cached_obj.data}
                     return {"attractions": []}
-                    
-                wiki_headers = {"User-Agent": "LuggifyBot/1.0 (hello@luggify.app)"}
                 
                 for p in places:
                     name = p.get("displayName", {}).get("text", "")
@@ -686,105 +684,23 @@ async def get_attractions(
                         
                     maps_url = p.get("googleMapsUri", f"https://www.google.com/maps/search/?api=1&query={url_quote(name + ', ' + city_name)}")
                     image_url = None
-                    wiki_title = None
                     
-                    # 1. Запрашиваем название статьи в Wikipedia
-                    wiki_lang = "ru" if lang == "ru" else "en"
-                    wiki_base = f"https://{wiki_lang}.wikipedia.org"
-                    try:
-                        search_resp = await client.get(
-                            f"{wiki_base}/w/api.php",
-                            params={"action": "opensearch", "search": name, "limit": 1, "format": "json"},
-                            headers=wiki_headers
-                        )
-                        if search_resp.status_code == 200:
-                            t = search_resp.json()[1]
-                            if t:
-                                wiki_title = t[0]
-                    except Exception:
-                        pass
-                            
-                    # 2. Если не нашли по названию, ищем по координатам
-                    if not wiki_title and "location" in p:
-                        lat = p["location"].get("latitude")
-                        lon = p["location"].get("longitude")
-                        if lat and lon:
+                    # Получаем фото через Google Places Photo API
+                    photos = p.get("photos", [])
+                    if photos:
+                        photo_ref = photos[0].get("name", "")
+                        if photo_ref:
                             try:
-                                geo_resp = await client.get(
-                                    f"{wiki_base}/w/api.php",
-                                    params={"action": "query", "list": "geosearch", "gscoord": f"{lat}|{lon}", "gsradius": 500, "gslimit": 1, "format": "json"},
-                                    headers=wiki_headers
+                                photo_url = f"https://google-map-places-new-v2.p.rapidapi.com/v1/{photo_ref}/media"
+                                photo_resp = await client.get(
+                                    photo_url,
+                                    headers={"x-rapidapi-key": rapidapi_key, "x-rapidapi-host": "google-map-places-new-v2.p.rapidapi.com"},
+                                    params={"maxWidthPx": "800", "skipHttpRedirect": "true"}
                                 )
-                                if geo_resp.status_code == 200:
-                                    geo_res = geo_resp.json().get("query", {}).get("geosearch", [])
-                                    if geo_res:
-                                        wiki_title = geo_res[0]["title"]
+                                if photo_resp.status_code == 200:
+                                    image_url = photo_resp.json().get("photoUri")
                             except Exception:
                                 pass
-                    
-                    # 3. Ищем фото в Wikipedia
-                    if wiki_title:
-                        try:
-                            sr = await client.get(
-                                f"{wiki_base}/api/rest_v1/page/summary/{url_quote(wiki_title)}",
-                                headers=wiki_headers
-                            )
-                            if sr.status_code == 200:
-                                source_url = sr.json().get("thumbnail", {}).get("source", "")
-                                bad_words = [".svg", "logo", "flag", "icon", "symbol", "эмблема", "логотип", "герб", "stamp", "marka", "марка", "map", "карта"]
-                                if source_url and not any(w in source_url.lower() for w in bad_words):
-                                    image_url = source_url
-
-                            if not image_url:
-                                img_resp = await client.get(
-                                    f"{wiki_base}/w/api.php",
-                                    params={"action": "query", "prop": "images", "titles": wiki_title, "redirects": 1, "format": "json", "imlimit": 50},
-                                    headers=wiki_headers
-                                )
-                                images_list = []
-                                for pid, page in img_resp.json().get("query", {}).get("pages", {}).items():
-                                    for img in page.get("images", []):
-                                        title = img["title"]
-                                        if title.lower().endswith((".jpg", ".jpeg", ".webp")):
-                                            images_list.append(title)
-                                
-                                if images_list:
-                                    info_resp = await client.get(
-                                        f"{wiki_base}/w/api.php",
-                                        params={"action": "query", "titles": "|".join(images_list[:15]), "prop": "imageinfo", "iiprop": "url|size", "iiurlwidth": 800, "format": "json"},
-                                        headers=wiki_headers
-                                    )
-                                    valid_photos = []
-                                    for pid, page in info_resp.json().get("query", {}).get("pages", {}).items():
-                                        info = page.get("imageinfo", [{}])[0]
-                                        url = info.get("thumburl") or info.get("url")
-                                        size = info.get("size", 0)
-                                        if url and size > 80000:
-                                            valid_photos.append((size, url))
-                                    
-                                    if valid_photos:
-                                        valid_photos.sort(key=lambda x: x[0], reverse=True)
-                                        image_url = valid_photos[0][1]
-                        except Exception:
-                            pass
-
-                    # 4. Fallback: Google Places Photo (если Wikipedia не дала фото)
-                    if not image_url:
-                        photos = p.get("photos", [])
-                        if photos:
-                            photo_ref = photos[0].get("name", "")
-                            if photo_ref:
-                                try:
-                                    photo_url = f"https://google-map-places-new-v2.p.rapidapi.com/v1/{photo_ref}/media"
-                                    photo_resp = await client.get(
-                                        photo_url,
-                                        headers={"x-rapidapi-key": rapidapi_key, "x-rapidapi-host": "google-map-places-new-v2.p.rapidapi.com"},
-                                        params={"maxWidthPx": "800", "skipHttpRedirect": "true"}
-                                    )
-                                    if photo_resp.status_code == 200:
-                                        image_url = photo_resp.json().get("photoUri")
-                                except Exception:
-                                    pass
 
                     results.append({
                         "name": name,
