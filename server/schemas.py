@@ -63,6 +63,19 @@ class DailyForecast(BaseModel):
     wind_speed: Optional[float] = None
     source: Optional[str] = "forecast"
 
+class ItineraryEventCreate(BaseModel):
+    event_date: date
+    time: Optional[str] = None
+    title: str
+    description: Optional[str] = None
+
+class ItineraryEventOut(ItineraryEventCreate):
+    id: int
+    checklist_id: int
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
 
 class ChecklistCreate(BaseModel):
     city: str
@@ -86,3 +99,4 @@ class ChecklistCreate(BaseModel):
 
 class ChecklistOut(ChecklistCreate):
     slug: str
+    events: Optional[List[ItineraryEventOut]] = []

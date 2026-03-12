@@ -429,6 +429,165 @@ const EsimSection = React.memo(({ city, lang }) => {
   );
 });
 
+// === Itinerary Section ===
+const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner }) => {
+  const [events, setEvents] = useState(checklist?.events || []);
+  const [addingDay, setAddingDay] = useState(null);
+  const [newEvent, setNewEvent] = useState({ time: "", title: "", description: "" });
+  const [loading, setLoading] = useState(false);
+  const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
+  const token = localStorage.getItem("token");
+
+  // Sync state if checklist changes externally 
+  useEffect(() => {
+    if (checklist?.events) setEvents(checklist.events);
+  }, [checklist]);
+
+  if (!checklist || !checklist.start_date || !checklist.end_date) return null;
+
+  // Generate days timeline
+  const startDt = new Date(checklist.start_date);
+  const endDt = new Date(checklist.end_date);
+  const days = [];
+  let curr = new Date(startDt);
+  while (curr <= endDt) {
+    days.push(new Date(curr));
+    curr.setDate(curr.getDate() + 1);
+  }
+
+  const handleAddSubmit = async (dateStr) => {
+    if (!newEvent.title) return alert("Введите название события");
+    setLoading(true);
+    try {
+      const resp = await fetch(`${API_URL}/checklists/${slug}/events`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({
+          event_date: dateStr,
+          time: newEvent.time || null,
+          title: newEvent.title,
+          description: newEvent.description || null
+        })
+      });
+      if (resp.ok) {
+        const ev = await resp.json();
+        setEvents([...events, ev]);
+        setAddingDay(null);
+        setNewEvent({ time: "", title: "", description: "" });
+      } else {
+        alert("Ошибка при сохранении события");
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Сбой сети");
+    }
+    setLoading(false);
+  };
+
+  const handleRemoveEvent = async (eventId) => {
+    if (!window.confirm("Удалить событие?")) return;
+    try {
+      const resp = await fetch(`${API_URL}/events/${eventId}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (resp.ok) {
+        setEvents(events.filter(ev => ev.id !== eventId));
+      } else {
+        alert("Ошибка при удалении");
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  return (
+    <div className="travel-section itinerary-section">
+      <h3 className="section-title">📅 {t.itineraryTitle}</h3>
+      <div className="itinerary-timeline">
+        {days.map((d, index) => {
+          const dStr = d.toISOString().split("T")[0];
+          const hasEvents = events.filter(e => e.event_date === dStr).sort((a, b) => (a.time||"").localeCompare(b.time||""));
+          const isAdding = addingDay === dStr;
+
+          return (
+            <div key={dStr} className="itinerary-day-block">
+              <div className="itinerary-day-header">
+                <strong>{t.dayRoute} {index + 1}</strong>
+                <span className="itinerary-day-date">
+                   • {d.toLocaleDateString(lang === "en" ? "en-US" : "ru-RU", { weekday: 'short', month: 'short', day: 'numeric' })}
+                </span>
+              </div>
+              
+              <div className="itinerary-events-list">
+                {hasEvents.length === 0 && !isAdding && (
+                  <div className="itinerary-empty">{t.noEvents}</div>
+                )}
+                {hasEvents.map(ev => (
+                  <div key={ev.id} className="itinerary-event-card">
+                    {ev.time && <div className="itinerary-event-time">{ev.time}</div>}
+                    <div className="itinerary-event-content">
+                      <div className="itinerary-event-title">{ev.title}</div>
+                      {ev.description && <div className="itinerary-event-desc">{ev.description}</div>}
+                    </div>
+                    {isOwner && (
+                       <button className="del-evt-btn" onClick={() => handleRemoveEvent(ev.id)} title="Удалить">×</button>
+                    )}
+                  </div>
+                ))}
+
+                {/* Add new event slot */}
+                {isOwner && (
+                  <div className="itinerary-add-slot">
+                    {!isAdding ? (
+                      <button className="add-evt-btn" onClick={() => setAddingDay(dStr)}>
+                        {t.addEvent}
+                      </button>
+                    ) : (
+                      <div className="itinerary-form">
+                         <div className="itinerary-form-row">
+                            <input 
+                               type="time" 
+                               value={newEvent.time} 
+                               onChange={e => setNewEvent({...newEvent, time: e.target.value})} 
+                               title={t.eventTimePlaceholder}
+                            />
+                            <input 
+                               type="text" 
+                               value={newEvent.title}
+                               onChange={e => setNewEvent({...newEvent, title: e.target.value})} 
+                               placeholder={t.eventTitlePlaceholder}
+                               autoFocus
+                            />
+                         </div>
+                         <input 
+                            type="text" 
+                            className="full-w"
+                            value={newEvent.description}
+                            onChange={e => setNewEvent({...newEvent, description: e.target.value})} 
+                            placeholder={t.eventDescPlaceholder}
+                         />
+                         <div className="itinerary-form-actions">
+                           <button className="action-btn primary" onClick={() => handleAddSubmit(dStr)} disabled={loading}>
+                             {t.saveEventBtn}
+                           </button>
+                           <button className="action-btn" onClick={() => { setAddingDay(null); setNewEvent({ time:"", title:"", description:""}); }}>
+                             {t.cancel}
+                           </button>
+                         </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+});
+
 const App = ({ page }) => {
   const { id } = useParams(); // slug из URL
   const navigate = useNavigate();
@@ -1094,6 +1253,16 @@ const App = ({ page }) => {
                       ))}
                     </div>
                   </div>
+                )}
+
+                {/* Itinerary Section */}
+                {result && result.start_date && result.end_date && savedSlug && (
+                  <ItinerarySection 
+                    checklist={result}
+                    lang={lang} 
+                    slug={savedSlug} 
+                    isOwner={true} 
+                  />
                 )}
 
                 {/* Attractions */}

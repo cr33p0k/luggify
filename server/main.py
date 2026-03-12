@@ -2203,6 +2203,49 @@ async def update_checklist_privacy(
     await db.refresh(checklist)
     return checklist
 
+# === Itinerary / Events API ===
+
+@app.post("/checklists/{slug}/events", response_model=schemas.ItineraryEventOut)
+async def add_checklist_event(
+    slug: str,
+    event_in: schemas.ItineraryEventCreate,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user)
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    if checklist.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Нет прав редактировать расписание")
+    
+    return await crud.create_itinerary_event(db, checklist_id=checklist.id, data=event_in)
+
+@app.delete("/events/{event_id}")
+async def remove_itinerary_event(
+    event_id: int,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user)
+):
+    # Verify ownership through the event's checklist
+    result = await db.execute(select(models.ItineraryEvent).where(models.ItineraryEvent.id == event_id))
+    event = result.scalar_one_or_none()
+    if not event:
+        raise HTTPException(status_code=404, detail="Событие не найдено")
+        
+    checklist = await crud.get_checklist_by_id(db, event.checklist_id)
+    if not checklist or checklist.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Нет прав удалять это событие")
+        
+    success = await crud.delete_itinerary_event(db, event_id)
+    if not success:
+         raise HTTPException(status_code=500, detail="Ошибка при удалении")
+    return {"status": "ok"}
+
+    checklist.is_public = privacy.is_public
+    await db.commit()
+    await db.refresh(checklist)
+    return checklist
+
 
 @app.delete("/checklist/{slug}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_checklist(slug: str, db: AsyncSession = Depends(get_db)):

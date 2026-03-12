@@ -140,6 +140,16 @@ export const TRANSLATIONS = {
         subsEmptyState: "Здесь пока пусто.",
         followersStat: "Подписчики",
         followingStat: "Подписки",
+
+        // Itinerary
+        itineraryTitle: "Маршрут и расписание",
+        addEvent: "+ Добавить событие",
+        eventTimePlaceholder: "Время (14:30)",
+        eventTitlePlaceholder: "Название (Ужин, Музей...)",
+        eventDescPlaceholder: "Описание или адрес (необязательно)",
+        saveEventBtn: "Сохранить",
+        noEvents: "План на этот день пока пуст",
+        dayRoute: "День"
     },
     en: {
         heroTitle: "Where to?",
@@ -255,5 +265,15 @@ export const TRANSLATIONS = {
         subsEmptyState: "It's empty here.",
         followersStat: "Followers",
         followingStat: "Following",
+
+        // Itinerary
+        itineraryTitle: "Trip Itinerary",
+        addEvent: "+ Add event",
+        eventTimePlaceholder: "Time (14:30)",
+        eventTitlePlaceholder: "Title (Dinner, Museum...)",
+        eventDescPlaceholder: "Description or address (optional)",
+        saveEventBtn: "Save",
+        noEvents: "No plans for this day yet",
+        dayRoute: "Day"
     }
 };

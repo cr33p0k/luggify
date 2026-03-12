@@ -60,6 +60,22 @@ class Checklist(Base):
     # Привязка к пользователю (nullable — для обратной совместимости)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     user = relationship("User", back_populates="checklists")
+    
+    # События маршрута
+    events = relationship("ItineraryEvent", back_populates="checklist", cascade="all, delete-orphan")
+
+class ItineraryEvent(Base):
+    __tablename__ = "itinerary_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    checklist_id = Column(Integer, ForeignKey("checklists.id", ondelete="CASCADE"), nullable=False, index=True)
+    event_date = Column(Date, nullable=False)
+    time = Column(String, nullable=True) # e.g. "14:30"
+    title = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+    checklist = relationship("Checklist", back_populates="events")
 
 class CityAttraction(Base):
     __tablename__ = "city_attractions"
