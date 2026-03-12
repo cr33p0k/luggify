@@ -653,7 +653,7 @@ async def get_attractions(
             url = "https://google-map-places-new-v2.p.rapidapi.com/v1/places:searchText"
             payload = {
                 "textQuery": f"top tourist attractions in {city_name}",
-                "languageCode": "en",
+                "languageCode": lang,
                 "maxResultCount": limit
             }
             headers = {
@@ -662,9 +662,6 @@ async def get_attractions(
                 "Content-Type": "application/json",
                 "X-Goog-FieldMask": "places.displayName,places.rating,places.googleMapsUri,places.userRatingCount,places.location,places.photos"
             }
-
-            results_en = []
-            results_ru = []
 
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(url, json=payload, headers=headers)
@@ -675,86 +672,61 @@ async def get_attractions(
                     places = []
 
                 if not places:
-                    cache_key_ru = f"{city_name}_ru_{limit}".lower()
-                    cached_obj_ru = await crud.get_city_attractions(db, cache_key_ru)
-                    cache_key_en = f"{city_name}_en_{limit}".lower()
-                    cached_obj_en = await crud.get_city_attractions(db, cache_key_en)
-                    
-                    if lang == "ru" and cached_obj_ru:
-                        return {"attractions": cached_obj_ru.data}
-                    elif lang == "en" and cached_obj_en:
-                        return {"attractions": cached_obj_en.data}
-                    elif cached_obj_ru:
-                        return {"attractions": cached_obj_ru.data}
-                    elif cached_obj_en:
-                        return {"attractions": cached_obj_en.data}
+                    cached_obj = await crud.get_city_attractions(db, cache_key)
+                    if cached_obj:
+                        return {"attractions": cached_obj.data}
                     return {"attractions": []}
                     
                 wiki_headers = {"User-Agent": "LuggifyBot/1.0 (hello@luggify.app)"}
                 
                 for p in places:
-                    local_name_en = p.get("displayName", {}).get("text", "")
-                    if not local_name_en:
+                    name = p.get("displayName", {}).get("text", "")
+                    if not name:
                         continue
                         
-                    maps_url = p.get("googleMapsUri", f"https://www.google.com/search?q={url_quote(local_name_en)}")
+                    maps_url = p.get("googleMapsUri", f"https://www.google.com/maps/search/?api=1&query={url_quote(name + ', ' + city_name)}")
                     image_url = None
-                    wiki_title_en = None
+                    wiki_title = None
                     
-                    # 1. Запрашиваем название статьи в EN Wiki
+                    # 1. Запрашиваем название статьи в Wikipedia
+                    wiki_lang = "ru" if lang == "ru" else "en"
+                    wiki_base = f"https://{wiki_lang}.wikipedia.org"
                     try:
                         search_resp = await client.get(
-                            "https://en.wikipedia.org/w/api.php",
-                            params={"action": "opensearch", "search": local_name_en, "limit": 1, "format": "json"},
+                            f"{wiki_base}/w/api.php",
+                            params={"action": "opensearch", "search": name, "limit": 1, "format": "json"},
                             headers=wiki_headers
                         )
                         if search_resp.status_code == 200:
                             t = search_resp.json()[1]
                             if t:
-                                wiki_title_en = t[0]
+                                wiki_title = t[0]
                     except Exception:
                         pass
                             
                     # 2. Если не нашли по названию, ищем по координатам
-                    if not wiki_title_en and "location" in p:
+                    if not wiki_title and "location" in p:
                         lat = p["location"].get("latitude")
                         lon = p["location"].get("longitude")
                         if lat and lon:
                             try:
                                 geo_resp = await client.get(
-                                    "https://en.wikipedia.org/w/api.php",
+                                    f"{wiki_base}/w/api.php",
                                     params={"action": "query", "list": "geosearch", "gscoord": f"{lat}|{lon}", "gsradius": 500, "gslimit": 1, "format": "json"},
                                     headers=wiki_headers
                                 )
                                 if geo_resp.status_code == 200:
                                     geo_res = geo_resp.json().get("query", {}).get("geosearch", [])
                                     if geo_res:
-                                        wiki_title_en = geo_res[0]["title"]
+                                        wiki_title = geo_res[0]["title"]
                             except Exception:
                                 pass
-
-                    local_name_ru = local_name_en
                     
-                    # 3. Переводим на русский через Langlinks и ищем фото
-                    if wiki_title_en:
-                        try:
-                            ll_resp = await client.get(
-                                "https://en.wikipedia.org/w/api.php",
-                                params={"action": "query", "titles": wiki_title_en, "prop": "langlinks", "lllang": "ru", "format": "json"},
-                                headers=wiki_headers
-                            )
-                            if ll_resp.status_code == 200:
-                                pages = ll_resp.json().get("query", {}).get("pages", {})
-                                for pid, page_data in pages.items():
-                                    ll = page_data.get("langlinks", [])
-                                    if ll:
-                                        local_name_ru = ll[0].get("*", local_name_en)
-                        except Exception:
-                            pass
-
+                    # 3. Ищем фото в Wikipedia
+                    if wiki_title:
                         try:
                             sr = await client.get(
-                                f"https://en.wikipedia.org/api/rest_v1/page/summary/{url_quote(wiki_title_en)}",
+                                f"{wiki_base}/api/rest_v1/page/summary/{url_quote(wiki_title)}",
                                 headers=wiki_headers
                             )
                             if sr.status_code == 200:
@@ -765,8 +737,8 @@ async def get_attractions(
 
                             if not image_url:
                                 img_resp = await client.get(
-                                    "https://en.wikipedia.org/w/api.php",
-                                    params={"action": "query", "prop": "images", "titles": wiki_title_en, "redirects": 1, "format": "json", "imlimit": 50},
+                                    f"{wiki_base}/w/api.php",
+                                    params={"action": "query", "prop": "images", "titles": wiki_title, "redirects": 1, "format": "json", "imlimit": 50},
                                     headers=wiki_headers
                                 )
                                 images_list = []
@@ -778,7 +750,7 @@ async def get_attractions(
                                 
                                 if images_list:
                                     info_resp = await client.get(
-                                        "https://en.wikipedia.org/w/api.php",
+                                        f"{wiki_base}/w/api.php",
                                         params={"action": "query", "titles": "|".join(images_list[:15]), "prop": "imageinfo", "iiprop": "url|size", "iiurlwidth": 800, "format": "json"},
                                         headers=wiki_headers
                                     )
@@ -814,22 +786,15 @@ async def get_attractions(
                                 except Exception:
                                     pass
 
-                    results_en.append({
-                        "name": local_name_en,
-                        "image": image_url,
-                        "link": maps_url,
-                    })
-                    results_ru.append({
-                        "name": local_name_ru,
+                    results.append({
+                        "name": name,
                         "image": image_url,
                         "link": maps_url,
                     })
 
-            if results_en and results_ru:
-                await crud.save_city_attractions(db, f"{city_name}_en_{limit}".lower(), results_en)
-                await crud.save_city_attractions(db, f"{city_name}_ru_{limit}".lower(), results_ru)
-                
-                return {"attractions": results_ru if lang == "ru" else results_en}
+            if results:
+                await crud.save_city_attractions(db, cache_key, results)
+                return {"attractions": results}
                 
         except Exception as e:
             print(f"Attractions API V2 error: {e}")
