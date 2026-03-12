@@ -653,7 +653,7 @@ async def get_attractions(
             url = "https://google-map-places-new-v2.p.rapidapi.com/v1/places:searchText"
             payload = {
                 "textQuery": f"top tourist attractions in {city_name}",
-                "languageCode": "en", # Always English to avoid IP blocks and standardize cache
+                "languageCode": "en",
                 "maxResultCount": limit
             }
             headers = {
@@ -663,7 +663,8 @@ async def get_attractions(
                 "X-Goog-FieldMask": "places.displayName,places.rating,places.googleMapsUri,places.userRatingCount,places.location,places.photos"
             }
 
-            results = []
+            results_en = []
+            results_ru = []
 
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(url, json=payload, headers=headers)
@@ -674,14 +675,19 @@ async def get_attractions(
                     places = []
 
                 if not places:
-                    cached_obj = await crud.get_city_attractions(db, cache_key)
-                    if cached_obj:
-                        return {"attractions": cached_obj.data}
-                    # Fallback check
-                    fallback_key = f"{city_name}_en_{limit}".lower() if lang == "ru" else f"{city_name}_ru_{limit}".lower()
-                    fallback_obj = await crud.get_city_attractions(db, fallback_key)
-                    if fallback_obj:
-                        return {"attractions": fallback_obj.data}
+                    cache_key_ru = f"{city_name}_ru_{limit}".lower()
+                    cached_obj_ru = await crud.get_city_attractions(db, cache_key_ru)
+                    cache_key_en = f"{city_name}_en_{limit}".lower()
+                    cached_obj_en = await crud.get_city_attractions(db, cache_key_en)
+                    
+                    if lang == "ru" and cached_obj_ru:
+                        return {"attractions": cached_obj_ru.data}
+                    elif lang == "en" and cached_obj_en:
+                        return {"attractions": cached_obj_en.data}
+                    elif cached_obj_ru:
+                        return {"attractions": cached_obj_ru.data}
+                    elif cached_obj_en:
+                        return {"attractions": cached_obj_en.data}
                     return {"attractions": []}
                     
                 wiki_headers = {"User-Agent": "LuggifyBot/1.0 (hello@luggify.app)"}
@@ -691,8 +697,7 @@ async def get_attractions(
                     if not local_name_en:
                         continue
                         
-                    maps_url = p.get("googleMapsUri", f"https://www.google.com/maps/search/?api=1&query={url_quote(local_name_en + ', ' + city_name)}")
-
+                    maps_url = p.get("googleMapsUri", f"https://www.google.com/search?q={url_quote(local_name_en)}")
                     image_url = None
                     wiki_title_en = None
                     
@@ -709,8 +714,8 @@ async def get_attractions(
                                 wiki_title_en = t[0]
                     except Exception:
                         pass
-
-                    # 2. Fallback: ищем по координатам если не нашли по названию
+                            
+                    # 2. Если не нашли по названию, ищем по координатам
                     if not wiki_title_en and "location" in p:
                         lat = p["location"].get("latitude")
                         lon = p["location"].get("longitude")
@@ -727,9 +732,26 @@ async def get_attractions(
                                         wiki_title_en = geo_res[0]["title"]
                             except Exception:
                                 pass
-                            
-                    # 3. Ищем фото
+
+                    local_name_ru = local_name_en
+                    
+                    # 3. Переводим на русский через Langlinks и ищем фото
                     if wiki_title_en:
+                        try:
+                            ll_resp = await client.get(
+                                "https://en.wikipedia.org/w/api.php",
+                                params={"action": "query", "titles": wiki_title_en, "prop": "langlinks", "lllang": "ru", "format": "json"},
+                                headers=wiki_headers
+                            )
+                            if ll_resp.status_code == 200:
+                                pages = ll_resp.json().get("query", {}).get("pages", {})
+                                for pid, page_data in pages.items():
+                                    ll = page_data.get("langlinks", [])
+                                    if ll:
+                                        local_name_ru = ll[0].get("*", local_name_en)
+                        except Exception:
+                            pass
+
                         try:
                             sr = await client.get(
                                 f"https://en.wikipedia.org/api/rest_v1/page/summary/{url_quote(wiki_title_en)}",
@@ -773,7 +795,7 @@ async def get_attractions(
                                         image_url = valid_photos[0][1]
                         except Exception:
                             pass
-                        
+
                     # 4. Fallback: Google Places Photo (если Wikipedia не дала фото)
                     if not image_url:
                         photos = p.get("photos", [])
@@ -792,15 +814,22 @@ async def get_attractions(
                                 except Exception:
                                     pass
 
-                    results.append({
+                    results_en.append({
                         "name": local_name_en,
                         "image": image_url,
                         "link": maps_url,
                     })
+                    results_ru.append({
+                        "name": local_name_ru,
+                        "image": image_url,
+                        "link": maps_url,
+                    })
 
-            if results:
-                await crud.save_city_attractions(db, cache_key, results)
-                return {"attractions": results}
+            if results_en and results_ru:
+                await crud.save_city_attractions(db, f"{city_name}_en_{limit}".lower(), results_en)
+                await crud.save_city_attractions(db, f"{city_name}_ru_{limit}".lower(), results_ru)
+                
+                return {"attractions": results_ru if lang == "ru" else results_en}
                 
         except Exception as e:
             print(f"Attractions API V2 error: {e}")
