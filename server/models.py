@@ -62,7 +62,7 @@ class Checklist(Base):
     user = relationship("User", back_populates="checklists")
     
     # События маршрута
-    events = relationship("ItineraryEvent", back_populates="checklist", cascade="all, delete-orphan")
+    events = relationship("ItineraryEvent", back_populates="checklist", cascade="all, delete-orphan", lazy="selectin")
 
 class ItineraryEvent(Base):
     __tablename__ = "itinerary_events"
