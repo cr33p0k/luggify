@@ -660,7 +660,7 @@ async def get_attractions(
                 "x-rapidapi-key": rapidapi_key,
                 "x-rapidapi-host": "google-map-places-new-v2.p.rapidapi.com",
                 "Content-Type": "application/json",
-                "X-Goog-FieldMask": "places.displayName,places.rating,places.googleMapsUri,places.userRatingCount,places.location"
+                "X-Goog-FieldMask": "places.displayName,places.rating,places.googleMapsUri,places.userRatingCount,places.location,places.photos"
             }
 
             results = []
@@ -774,6 +774,24 @@ async def get_attractions(
                         except Exception:
                             pass
                         
+                    # 4. Fallback: Google Places Photo (если Wikipedia не дала фото)
+                    if not image_url:
+                        photos = p.get("photos", [])
+                        if photos:
+                            photo_ref = photos[0].get("name", "")
+                            if photo_ref:
+                                try:
+                                    photo_url = f"https://google-map-places-new-v2.p.rapidapi.com/v1/{photo_ref}/media"
+                                    photo_resp = await client.get(
+                                        photo_url,
+                                        headers={"x-rapidapi-key": rapidapi_key, "x-rapidapi-host": "google-map-places-new-v2.p.rapidapi.com"},
+                                        params={"maxWidthPx": "800", "skipHttpRedirect": "true"}
+                                    )
+                                    if photo_resp.status_code == 200:
+                                        image_url = photo_resp.json().get("photoUri")
+                                except Exception:
+                                    pass
+
                     results.append({
                         "name": local_name_en,
                         "image": image_url,
