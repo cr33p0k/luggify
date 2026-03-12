@@ -231,3 +231,27 @@ async def save_city_attractions(db: AsyncSession, city_name: str, data: list):
     await db.commit()
     await db.refresh(new_attraction)
     return new_attraction
+
+# === Itinerary Events CRUD ===
+
+async def create_itinerary_event(db: AsyncSession, checklist_id: int, data: schemas.ItineraryEventCreate):
+    new_event = models.ItineraryEvent(
+        checklist_id=checklist_id,
+        event_date=data.event_date,
+        time=data.time,
+        title=data.title,
+        description=data.description
+    )
+    db.add(new_event)
+    await db.commit()
+    await db.refresh(new_event)
+    return new_event
+
+async def delete_itinerary_event(db: AsyncSession, event_id: int):
+    result = await db.execute(select(models.ItineraryEvent).where(models.ItineraryEvent.id == event_id))
+    event = result.scalar_one_or_none()
+    if event:
+        await db.delete(event)
+        await db.commit()
+        return True
+    return False
