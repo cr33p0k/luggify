@@ -85,7 +85,12 @@ export const TRANSLATIONS = {
         searchReturnTickets: "Искать билеты туда и обратно",
 
         // Hotels
-        hotelsTitle: "Отели",
+        hotelsTitle: "Жильё",
+        adults: "Взрослые",
+        children: "Дети",
+        childAge: "Возраст ребенка",
+        guests: "гостей",
+        doneBtn: "Готово",
         searchingHotels: "Ищем отели…",
         showHotels: "Показать отели",
         goToBooking: "Перейти на Booking.com",
@@ -213,7 +218,12 @@ export const TRANSLATIONS = {
         searchReturnTickets: "Search round-trip tickets",
 
         // Hotels
-        hotelsTitle: "Hotels",
+        hotelsTitle: "Accommodation",
+        adults: "Adults",
+        children: "Children",
+        childAge: "Child Age",
+        guests: "guests",
+        doneBtn: "Done",
         searchingHotels: "Searching for hotels…",
         showHotels: "Show hotels",
         goToBooking: "Go to Booking.com",

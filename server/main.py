@@ -910,6 +910,8 @@ async def search_hotels(
     check_out: str = Query(None, description="YYYY-MM-DD"),
     price_min: int = Query(None, description="Min price per night in RUB"),
     price_max: int = Query(None, description="Max price per night in RUB"),
+    adults: int = Query(2, description="Number of adults"),
+    children_ages: str = Query(None, description="Comma-separated children ages"),
 ):
     """Поиск отелей через RapidAPI booking-com18 (ntd119) — с фото, ценами, рейтингом"""
     # Используем полное имя города (напр. "Paris, France") для точного поиска
@@ -957,7 +959,9 @@ async def search_hotels(
         print(f"Hotels search: {city_name} is in Russia. Routing to ru_widgets.")
         
         # Sutochno: прямая ссылка в SPA поисковик
-        sutochno_target = f"https://sutochno.ru/front/searchapp/search?guests_adults=1&occupied={t_check_in};{t_check_out}&term={url_quote(city_short)}"
+        sutochno_target = f"https://sutochno.ru/front/searchapp/search?guests_adults={adults}&occupied={t_check_in};{t_check_out}&term={url_quote(city_short)}"
+        if children_ages:
+            sutochno_target += f"&guests_childrens={children_ages}"
         
         # Ostrovok: хардкодим ID популярных городов, чтобы гарантировать идеальный предзаполненный поиск
         ostrovok_map = {
@@ -979,11 +983,16 @@ async def search_hotels(
         }
 
         o_dates = f"{d_in.strftime('%d.%m.%Y')}-{d_out.strftime('%d.%m.%Y')}"
+        
+        o_guests = str(adults)
+        if children_ages:
+            o_guests += f"and{children_ages.replace(',', '.')}"
+
         o_data = ostrovok_map.get(c_lower)
         if o_data:
-            ostrovok_target = f"https://ostrovok.ru/hotel/{o_data['slug']}/?q={o_data['id']}&dates={o_dates}"
+            ostrovok_target = f"https://ostrovok.ru/hotel/{o_data['slug']}/?q={o_data['id']}&dates={o_dates}&guests={o_guests}"
         else:
-            ostrovok_target = f"https://ostrovok.ru/?q={url_quote(city_short)}&dates={o_dates}"
+            ostrovok_target = f"https://ostrovok.ru/?q={url_quote(city_short)}&dates={o_dates}&guests={o_guests}"
         
         if TRAVELPAYOUTS_MARKER:
             ostrovok_link = f"https://tp.media/r?marker={TRAVELPAYOUTS_MARKER}&p=7038&u={url_quote(ostrovok_target)}&campaign_id=459"

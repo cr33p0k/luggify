@@ -233,14 +233,19 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
   const [provider, setProvider] = useState(null);
   const [links, setLinks] = useState({});
 
+  const [adults, setAdults] = useState(2);
+  const [childrenAges, setChildrenAges] = useState([]);
+  const [showGuestMenu, setShowGuestMenu] = useState(false);
+
   const doFetch = () => {
     if (!city) return;
     setLoading(true);
     setLoaded(false);
     setTriggered(true);
-    const params = new URLSearchParams({ city });
+    const params = new URLSearchParams({ city, adults });
     if (startDate) params.append("check_in", startDate);
     if (endDate) params.append("check_out", endDate);
+    if (childrenAges.length > 0) params.append("children_ages", childrenAges.join(","));
     fetch(`${API_URL}/hotels/search?${params}`)
       .then(r => r.json())
       .then(d => {
@@ -260,7 +265,8 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
   ];
   const isRussia = cLower.includes("россия") || cLower.includes("russia") || ruCities.some(rc => cLower.includes(rc));
 
-  const bookingDirectLink = `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(city.split(",")[0].trim())}${startDate ? `&checkin=${startDate}` : ""}${endDate ? `&checkout=${endDate}` : ""}&group_adults=1`;
+  const childrenQuery = childrenAges.length > 0 ? `&group_children=${childrenAges.length}` + childrenAges.map(age => `&age=${age}`).join("") : "";
+  const bookingDirectLink = `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(city.split(",")[0].trim())}${startDate ? `&checkin=${startDate}` : ""}${endDate ? `&checkout=${endDate}` : ""}&group_adults=${adults}${childrenQuery}&no_rooms=1`;
 
   useEffect(() => {
     if (!city || triggered) return;
@@ -286,6 +292,59 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
       )}
       {!triggered ? (
         <div className="hotels-filter-wrap">
+          <div className="guest-selector-container">
+            <button className="guest-selector-toggle" onClick={() => setShowGuestMenu(!showGuestMenu)}>
+              <span>👥 {adults} {t.adults.toLowerCase()}{childrenAges.length > 0 ? `, ${childrenAges.length} ${t.children.toLowerCase()}` : ""}</span>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: showGuestMenu ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}><polyline points="6 9 12 15 18 9"></polyline></svg>
+            </button>
+            {showGuestMenu && (
+              <div className="guest-selector-dropdown">
+                <div className="guest-row">
+                  <div className="guest-info">
+                    <span className="guest-label">{t.adults}</span>
+                  </div>
+                  <div className="guest-controls">
+                    <button onClick={() => setAdults(Math.max(1, adults - 1))} className="guest-control-btn">-</button>
+                    <span className="guest-value">{adults}</span>
+                    <button onClick={() => setAdults(adults + 1)} className="guest-control-btn">+</button>
+                  </div>
+                </div>
+                <div className="guest-row">
+                  <div className="guest-info">
+                    <span className="guest-label">{t.children}</span>
+                  </div>
+                  <div className="guest-controls">
+                    <button onClick={() => setChildrenAges(childrenAges.slice(0, -1))} className="guest-control-btn" disabled={childrenAges.length === 0}>-</button>
+                    <span className="guest-value">{childrenAges.length}</span>
+                    <button onClick={() => setChildrenAges([...childrenAges, 7])} className="guest-control-btn">+</button>
+                  </div>
+                </div>
+                {childrenAges.length > 0 && (
+                  <div className="children-ages-wrap">
+                    {childrenAges.map((age, idx) => (
+                      <div key={idx} className="child-age-row">
+                        <span className="child-age-label">{t.childAge} {idx + 1}</span>
+                        <select 
+                          value={age} 
+                          onChange={(e) => {
+                            const newAges = [...childrenAges];
+                            newAges[idx] = parseInt(e.target.value, 10);
+                            setChildrenAges(newAges);
+                          }}
+                          className="child-age-select"
+                        >
+                          {[...Array(18)].map((_, i) => (
+                            <option key={i} value={i}>{i}</option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <button className="guest-done-btn" onClick={() => setShowGuestMenu(false)}>{t.doneBtn}</button>
+              </div>
+            )}
+          </div>
           <div className="hotels-buttons-row">
             <button className="flights-search-btn" onClick={doFetch}>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
