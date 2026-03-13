@@ -290,9 +290,8 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
           </svg>
         </a>
       )}
-      {!triggered ? (
-        <div className="hotels-filter-wrap">
-          <div className="guest-selector-container">
+      <div className="hotels-filter-wrap">
+        <div className="guest-selector-container">
             <button className="guest-selector-toggle" onClick={() => setShowGuestMenu(!showGuestMenu)}>
               <span>👥 {adults} {t.adults.toLowerCase()}{childrenAges.length > 0 ? `, ${childrenAges.length} ${t.children.toLowerCase()}` : ""}</span>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: showGuestMenu ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}><polyline points="6 9 12 15 18 9"></polyline></svg>
@@ -351,7 +350,7 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
                 <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
                 <polyline points="9 22 9 12 15 12 15 22" />
               </svg>
-              {t.showHotels}
+              {triggered ? (lang === 'en' ? "Update Search" : "Обновить поиск") : t.showHotels}
             </button>
             {!isRussia && (
               <a href={bookingDirectLink} target="_blank" rel="noopener noreferrer" className="booking-secondary-btn" title={t.searchDirectlyBooking}>
@@ -365,7 +364,7 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
             )}
           </div>
         </div>
-      ) : loading ? (
+      {loading ? (
         <div className="loading-spinner-wrap">
           <div className="loading-spinner" />
           <span className="loading-text">{t.searchingHotels}</span>
