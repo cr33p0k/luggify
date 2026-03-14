@@ -283,6 +283,7 @@
     top: 10px;
     right: 10px;
     display: flex;
+    flex-direction: column;
     gap: 4px;
     opacity: 0;
     transition: opacity 0.2s;
@@ -313,10 +314,10 @@
     background: rgba(0, 0, 0, 0.4);
     border: none;
     color: var(--text-secondary, #888);
-    font-size: 1rem;
+    font-size: 0.85rem;
     cursor: pointer;
-    width: 28px;
-    height: 28px;
+    width: 24px;
+    height: 24px;
     border-radius: 50%;
     display: flex;
     align-items: center;

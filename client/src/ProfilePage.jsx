@@ -439,6 +439,7 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                     <div className="checklists-grid">
                         {checklists.map((cl) => {
                             const isOwner = cl.user_id === user?.id;
+                            const isShared = !isOwner || (cl.backpacks && cl.backpacks.length > 0);
                             return (
                             <div
                                 key={cl.slug}
@@ -449,23 +450,23 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                                     {isOwner && (
                                         <>
                                             <button
-                                                className={`privacy-btn ${!cl.is_public ? "private" : ""}`}
-                                                onClick={(e) => toggleChecklistPrivacy(e, cl.slug, cl.is_public)}
-                                                title={cl.is_public ? t.publicStatus : t.hiddenStatus}
-                                            >
-                                                {cl.is_public ? "👁️" : "🔒"}
-                                            </button>
-                                            <button
                                                 className="delete-btn"
                                                 onClick={(e) => deleteChecklist(e, cl.slug)}
                                                 title={t.deleteChecklistBtn}
                                             >
                                                 ✕
                                             </button>
+                                            <button
+                                                className={`privacy-btn ${!cl.is_public ? "private" : ""}`}
+                                                onClick={(e) => toggleChecklistPrivacy(e, cl.slug, cl.is_public)}
+                                                title={cl.is_public ? t.publicStatus : t.hiddenStatus}
+                                            >
+                                                {cl.is_public ? "👁️" : "🔒"}
+                                            </button>
                                         </>
                                     )}
                                 </div>
-                                <div className="preview-city">{cl.city}{!isOwner && <span className="shared-badge" title={lang === 'en' ? 'Shared checklist' : 'Совместный чеклист'}>👥</span>}</div>
+                                <div className="preview-city">{cl.city}{isShared && <span className="shared-badge" title={lang === 'en' ? 'Shared checklist' : 'Совместный чеклист'}>👥</span>}</div>
                                 <div className="preview-dates">
                                     {formatDate(cl.start_date)} — {formatDate(cl.end_date)}
                                 </div>

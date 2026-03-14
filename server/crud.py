@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload
 import models
 import schemas
 import uuid
@@ -181,6 +182,7 @@ async def get_checklists_by_user_id(db: AsyncSession, user_id: int):
     """Получение всех чеклистов пользователя"""
     result = await db.execute(
         select(models.Checklist)
+        .options(selectinload(models.Checklist.backpacks))
         .where(models.Checklist.user_id == user_id)
         .order_by(models.Checklist.id.desc())
     )

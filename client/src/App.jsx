@@ -1294,16 +1294,15 @@ const App = ({ page }) => {
       return;
     }
 
-    const newRemoved = [...removedItems, item];
-    setRemovedItems(newRemoved);
-    syncChecklist({ removed_items: newRemoved });
-
     setResult(prev => {
       const next = { ...prev };
       const bp = next.backpacks.find(b => b.id === myBp.id);
-      if (bp && !bp.items.includes(item)) {
-        bp.items = [...bp.items, item];
-        syncBackpackItems(bp.id, { items: bp.items });
+      if (bp) {
+        if (!bp.items) bp.items = [];
+        if (!bp.items.includes(item)) {
+          bp.items = [...bp.items, item];
+          syncBackpackItems(bp.id, { items: bp.items });
+        }
       }
       return next;
     });
@@ -1314,9 +1313,11 @@ const App = ({ page }) => {
       const next = { ...prev };
       const bp = next.backpacks.find(b => b.id.toString() === fromBpId.toString());
       if (bp) {
-        if (!bp.removed_items) bp.removed_items = [];
-        bp.removed_items = [...bp.removed_items, item];
-        syncBackpackItems(bp.id, { removed_items: bp.removed_items });
+        if (!bp.items) bp.items = [];
+        if (bp.items.includes(item)) {
+          bp.items = bp.items.filter(i => i !== item);
+          syncBackpackItems(bp.id, { items: bp.items });
+        }
       }
       return next;
     });
@@ -1742,6 +1743,16 @@ const App = ({ page }) => {
                     }
 
                     let items = targetItems.filter(item => !targetRemoved.includes(item));
+                    
+                    if (activeTab === "shared" && result.backpacks) {
+                      // Filter out items that are currently in any backpack
+                      const allBackpackItems = new Set();
+                      result.backpacks.forEach(bp => {
+                        if (bp.items) bp.items.forEach(i => allBackpackItems.add(i));
+                      });
+                      items = items.filter(item => !allBackpackItems.has(item));
+                    }
+
                     let columns = 3;
                     if (isTablet) columns = 2;
                     if (isMobile) columns = 1;
