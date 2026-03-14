@@ -11,7 +11,7 @@ import asyncio
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
 import crud, models, schemas
 from database import SessionLocal, async_engine, get_db
 from typing import List, Optional
@@ -94,6 +94,13 @@ class ChecklistStateUpdate(BaseModel):
     removed_items: Optional[List[str]] = None
     added_items: Optional[List[str]] = None
     is_public: Optional[bool] = None
+    items: Optional[List[str]] = None
+
+class BackpackStateUpdate(BaseModel):
+    checked_items: Optional[List[str]] = None
+    removed_items: Optional[List[str]] = None
+    added_items: Optional[List[str]] = None
+    items: Optional[List[str]] = None
 
 class UserPrivacyUpdate(BaseModel):
     is_stats_public: bool
@@ -325,9 +332,18 @@ async def get_my_checklists(
     user=Depends(require_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Получение всех чеклистов текущего пользователя"""
-    checklists = await crud.get_checklists_by_user_id(db, user.id)
-    return checklists
+    """Получение всех чеклистов текущего пользователя (собственные + совместные)"""
+    own_checklists = await crud.get_checklists_by_user_id(db, user.id)
+    shared_checklists = await crud.get_shared_checklists_by_user_id(db, user.id)
+    
+    # Merge, avoiding duplicates
+    own_slugs = {c.slug for c in own_checklists}
+    all_checklists = list(own_checklists)
+    for c in shared_checklists:
+        if c.slug not in own_slugs:
+            all_checklists.append(c)
+    
+    return all_checklists
 
 
 # === Feature: Gamification (Achievements + Levels) ===
@@ -2033,7 +2049,10 @@ async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):
         is_public=getattr(checklist, 'is_public', True),
         origin_city=getattr(checklist, 'origin_city', None),
         daily_forecast=forecast,
-        events=checklist.events or []
+        events=checklist.events or [],
+        backpacks=checklist.backpacks or [],
+        invite_token=checklist.invite_token,
+        hidden_sections=checklist.hidden_sections or [],
     )
 
     # Категории для чеклиста (для фронта)
@@ -2176,6 +2195,200 @@ async def remove_itinerary_event(
     await db.refresh(checklist)
     return checklist
 
+# === Shared Backpacks API ===
+
+@app.post("/checklists/{slug}/invite-token", response_model=dict)
+async def generate_invite_token(
+    slug: str,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user)
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    if checklist.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Только владелец может генерировать ссылки")
+        
+    token = await crud.generate_checklist_invite_token(db, slug)
+    if not token:
+        raise HTTPException(status_code=500, detail="Ошибка генерации токена")
+        
+    return {"invite_token": token}
+
+
+@app.post("/join/{invite_token}", response_model=schemas.ChecklistOut)
+async def join_shared_checklist(
+    invite_token: str,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user)
+):
+    checklist = await crud.get_checklist_by_invite_token(db, invite_token)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Неверная или устаревшая ссылка")
+        
+    # Create backpack if not owner and not exist
+    if checklist.user_id != user.id:
+        await crud.create_user_backpack(db, checklist.id, user.id)
+        
+    # Reload checklist to return fully loaded relationships
+    await db.refresh(checklist)
+    return checklist
+
+
+@app.patch("/backpacks/{backpack_id}/state", response_model=schemas.UserBackpackOut)
+async def update_backpack_state(
+    backpack_id: int,
+    state: BackpackStateUpdate = Body(...),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user)
+):
+    # Verify owner
+    import models
+    from sqlalchemy.future import select
+    res = await db.execute(select(models.UserBackpack).where(models.UserBackpack.id == backpack_id))
+    bp = res.scalar_one_or_none()
+    
+    if not bp:
+        raise HTTPException(status_code=404, detail="Рюкзак не найден")
+    if bp.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Нет прав редактировать чужой рюкзак")
+        
+    updated_bp = await crud.update_backpack_items(
+        db, 
+        backpack_id, 
+        schemas.UserBackpackUpdate(
+            checked_items=state.checked_items,
+            removed_items=state.removed_items,
+            added_items=state.added_items,
+            items=state.items
+        )
+    )
+    return updated_bp
+
+# Toggle section visibility
+@app.patch("/checklists/{slug}/hidden-sections")
+async def update_hidden_sections(
+    slug: str,
+    payload: dict = Body(...),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user)
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    if checklist.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Только владелец может управлять видимостью разделов")
+    
+    hidden = payload.get("hidden_sections", [])
+    checklist.hidden_sections = hidden
+    await db.commit()
+    await db.refresh(checklist)
+    return {"hidden_sections": checklist.hidden_sections}
+
+@app.post("/checklists/{slug}/invite/{target_user_id}")
+async def notify_invite(
+    slug: str,
+    target_user_id: int,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user)
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    
+    # Check if target user is already the owner
+    if checklist.user_id == target_user_id:
+        raise HTTPException(status_code=409, detail="Этот пользователь — владелец чеклиста")
+    
+    # Check if target user is already a collaborator (has a backpack)
+    existing_bp = await db.execute(
+        select(models.UserBackpack).where(
+            models.UserBackpack.checklist_id == checklist.id,
+            models.UserBackpack.user_id == target_user_id
+        )
+    )
+    if existing_bp.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Пользователь уже в этом чеклисте")
+    
+    # Generate invite token if not exists
+    if not checklist.invite_token:
+        await crud.generate_checklist_invite_token(db, slug)
+        await db.refresh(checklist)
+    
+    # Create backpack for the owner if not exists
+    if checklist.user_id == user.id:
+        await crud.create_user_backpack(db, checklist.id, user.id)
+    
+    # Create notification for target user
+    new_notif = models.Notification(
+        user_id=target_user_id,
+        type="checklist_invitation",
+        content=f"{user.username} пригласил(а) вас в чеклист {checklist.city}",
+        link=f"/checklist/{slug}",
+        is_read=False,
+        extra_data={"token": checklist.invite_token} if checklist.invite_token else None
+    )
+    db.add(new_notif)
+    await db.commit()
+    return {"status": "ok"}
+
+# === Notification Endpoints ===
+
+@app.get("/notifications", response_model=List[schemas.NotificationOut])
+async def get_notifications(
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user)
+):
+    from sqlalchemy import desc
+    res = await db.execute(
+        select(models.Notification)
+        .where(models.Notification.user_id == user.id)
+        .order_by(desc(models.Notification.created_at))
+        .limit(20)
+    )
+    return res.scalars().all()
+
+@app.patch("/notifications/{notif_id}/read", response_model=schemas.NotificationOut)
+async def mark_notification_read(
+    notif_id: int,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user)
+):
+    res = await db.execute(
+        select(models.Notification).where(models.Notification.id == notif_id)
+    )
+    notif = res.scalar_one_or_none()
+    if not notif:
+        raise HTTPException(status_code=404, detail="Уведомление не найдено")
+    if notif.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Нет прав")
+    
+    notif.is_read = True
+    await db.commit()
+    await db.refresh(notif)
+    return notif
+
+@app.patch("/notifications/checklist/{slug}/read")
+async def mark_checklist_notification_read(
+    slug: str,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user)
+):
+    target_link = f"/checklist/{slug}"
+    # Mark all invitation notifications for this checklist as read
+    await db.execute(
+        update(models.Notification)
+        .where(
+            models.Notification.user_id == user.id,
+            models.Notification.link == target_link,
+            models.Notification.type == "checklist_invitation"
+        )
+        .values(is_read=True)
+    )
+    await db.commit()
+    return {"status": "ok"}
+
+# === End Shared Backpacks ===
 
 @app.delete("/checklist/{slug}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_checklist(slug: str, db: AsyncSession = Depends(get_db)):

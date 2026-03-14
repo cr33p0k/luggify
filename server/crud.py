@@ -187,6 +187,17 @@ async def get_checklists_by_user_id(db: AsyncSession, user_id: int):
     return result.scalars().all()
 
 
+async def get_shared_checklists_by_user_id(db: AsyncSession, user_id: int):
+    """Получение чеклистов, в которых пользователь является коллаборатором (имеет рюкзак)"""
+    result = await db.execute(
+        select(models.Checklist)
+        .join(models.UserBackpack, models.UserBackpack.checklist_id == models.Checklist.id)
+        .where(models.UserBackpack.user_id == user_id)
+        .order_by(models.Checklist.id.desc())
+    )
+    return result.scalars().all()
+
+
 async def save_or_update_tg_checklist(db: AsyncSession, data: schemas.ChecklistCreate):
     # Всегда создаём новый чеклист
     return await create_checklist(db, data)
@@ -274,3 +285,59 @@ async def delete_itinerary_event(db: AsyncSession, event_id: int):
         await db.commit()
         return True
     return False
+
+# === Shared Backpacks CRUD ===
+
+async def get_backpack_by_user(db: AsyncSession, checklist_id: int, user_id: int):
+    result = await db.execute(select(models.UserBackpack).where(
+        models.UserBackpack.checklist_id == checklist_id,
+        models.UserBackpack.user_id == user_id
+    ))
+    return result.scalar_one_or_none()
+
+async def create_user_backpack(db: AsyncSession, checklist_id: int, user_id: int):
+    existing = await get_backpack_by_user(db, checklist_id, user_id)
+    if existing:
+        return existing
+        
+    new_backpack = models.UserBackpack(
+        checklist_id=checklist_id,
+        user_id=user_id,
+        items=[],
+        checked_items=[],
+        added_items=[],
+        removed_items=[]
+    )
+    db.add(new_backpack)
+    await db.commit()
+    await db.refresh(new_backpack)
+    return new_backpack
+
+async def update_backpack_items(db: AsyncSession, backpack_id: int, data: schemas.UserBackpackUpdate):
+    result = await db.execute(select(models.UserBackpack).where(models.UserBackpack.id == backpack_id))
+    backpack = result.scalar_one_or_none()
+    if not backpack:
+        return None
+
+    update_data = data.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(backpack, key, value)
+        
+    await db.commit()
+    await db.refresh(backpack)
+    return backpack
+
+async def generate_checklist_invite_token(db: AsyncSession, checklist_slug: str):
+    checklist = await get_checklist_by_slug(db, checklist_slug)
+    if not checklist:
+        return None
+    if not checklist.invite_token:
+        # Generate short unique token
+        checklist.invite_token = str(uuid.uuid4())[:8]
+        await db.commit()
+        await db.refresh(checklist)
+    return checklist.invite_token
+
+async def get_checklist_by_invite_token(db: AsyncSession, token: str):
+    result = await db.execute(select(models.Checklist).where(models.Checklist.invite_token == token))
+    return result.scalar_one_or_none()

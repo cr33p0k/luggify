@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import App from './App.jsx';
 import ProfilePage from './ProfilePage.jsx';
 import PublicProfilePage from './PublicProfilePage.jsx';
+import JoinPage from './JoinPage.jsx';
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
@@ -13,6 +14,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
         <Route path="/checklist/:id" element={<App />} />
         <Route path="/profile" element={<App page="profile" />} />
         <Route path="/u/:username" element={<PublicProfilePage />} />
+        <Route path="/join/:token" element={<JoinPage />} />
       </Routes>
     </BrowserRouter>
   </React.StrictMode>

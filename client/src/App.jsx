@@ -11,6 +11,163 @@ import "./AuthModal.css";
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 import { TRANSLATIONS, formatDuration, pluralize } from "./i18n";
 
+const NotificationBell = ({ authHeaders, lang, navigate }) => {
+  const [notifications, setNotifications] = useState([]);
+  const [isOpen, setIsOpen] = useState(false);
+  const unreadCount = notifications.filter(n => !n.is_read).length;
+
+  const fetchNotifications = () => {
+    fetch(`${API_URL}/notifications`, { headers: authHeaders })
+      .then(r => r.ok ? r.json() : [])
+      .then(setNotifications)
+      .catch(e => console.error("Error fetching notifications:", e));
+  };
+
+  useEffect(() => {
+    fetchNotifications();
+    const timer = setInterval(fetchNotifications, 30000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const markRead = async (id, link) => {
+    try {
+      await fetch(`${API_URL}/notifications/${id}/read`, {
+        method: "PATCH",
+        headers: authHeaders
+      });
+      setNotifications(prev => prev.map(n => n.id === id ? { ...n, is_read: true } : n));
+      if (link && typeof link === 'string') {
+        navigate(link);
+        setIsOpen(false);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleInviteAction = async (e, notif, action) => {
+    e.stopPropagation();
+    const token = notif.extra_data?.token;
+    if (!token && action === 'accept') return;
+
+    try {
+      if (action === 'accept') {
+        const res = await fetch(`${API_URL}/join/${token}`, {
+          method: "POST",
+          headers: authHeaders
+        });
+        if (res.ok) {
+          const checklist = await res.json();
+          if (window.location.pathname.includes(`/checklist/${checklist.slug}`)) {
+            window.location.reload();
+          } else {
+            navigate(`/checklist/${checklist.slug}`);
+          }
+          setIsOpen(false);
+        }
+      }
+      
+      // Always mark as read
+      await fetch(`${API_URL}/notifications/${notif.id}/read`, {
+        method: "PATCH",
+        headers: authHeaders
+      });
+      setNotifications(prev => prev.map(n => n.id === notif.id ? { ...n, is_read: true } : n));
+      
+      if (action === 'decline') {
+        // Just refresh if we declined to update unread count locally
+        fetchNotifications();
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const markAllRead = async () => {
+    const unreadIds = notifications.filter(n => !n.is_read).map(n => n.id);
+    for (const id of unreadIds) {
+      fetch(`${API_URL}/notifications/${id}/read`, { method: "PATCH", headers: authHeaders }).catch(e => console.error(e));
+    }
+    setNotifications(prev => prev.map(n => ({ ...n, is_read: true })));
+  };
+
+  return (
+    <div className="notification-bell-container">
+      <button className="bell-btn" onClick={() => setIsOpen(!isOpen)}>
+        <svg 
+          width="20" 
+          height="20" 
+          viewBox="0 0 24 24" 
+          fill="none" 
+          stroke="currentColor" 
+          strokeWidth="2.5" 
+          strokeLinecap="round" 
+          strokeLinejoin="round"
+          className="bell-svg"
+        >
+          <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+          <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+        </svg>
+        {unreadCount > 0 && <span className="bell-badge">{unreadCount}</span>}
+      </button>
+
+      {isOpen && (
+        <div className="notifications-dropdown">
+          <div className="notif-header">
+            <span>{lang === 'ru' ? 'Уведомления' : 'Notifications'}</span>
+            {notifications.length > 0 && (
+              <button 
+                className={`mark-all-btn ${unreadCount > 0 ? 'has-unread' : 'all-read'}`} 
+                onClick={markAllRead}
+                title={lang === 'ru' ? 'Прочитать всё' : 'Mark all read'}
+              >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M1 12l5 5L17 6" />
+                  <path d="M7 12l5 5L23 6" />
+                </svg>
+              </button>
+            )}
+          </div>
+          <div className="notif-list">
+            {notifications.length > 0 ? notifications.map(n => (
+              <div 
+                key={n.id} 
+                className={`notif-item ${!n.is_read ? 'unread' : ''}`}
+                onClick={() => n.type !== 'checklist_invitation' && markRead(n.id, n.link)}
+              >
+                <div className="notif-content">{n.content}</div>
+                {n.type === 'checklist_invitation' && !n.is_read && (
+                  <div className="notif-actions">
+                    <button 
+                      className="notif-action-btn accept"
+                      onClick={(e) => handleInviteAction(e, n, 'accept')}
+                    >
+                      {lang === 'ru' ? 'Принять' : 'Accept'}
+                    </button>
+                    <button 
+                      className="notif-action-btn decline"
+                      onClick={(e) => handleInviteAction(e, n, 'decline')}
+                    >
+                      {lang === 'ru' ? 'Отклонить' : 'Decline'}
+                    </button>
+                  </div>
+                )}
+                <div className="notif-time">
+                  {new Date(n.created_at).toLocaleDateString(lang === 'ru' ? 'ru-RU' : 'en-US', { hour: '2-digit', minute: '2-digit' })}
+                </div>
+              </div>
+            )) : (
+              <div className="notif-empty">
+                {lang === 'ru' ? 'Нет уведомлений' : 'No notifications'}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 // === Sub-components for travel services ===
 
 const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
@@ -513,7 +670,7 @@ const EsimSection = React.memo(({ city, lang }) => {
 });
 
 // === Itinerary Section ===
-const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner }) => {
+const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwnerId, currentUserId, hiddenSections, onToggleVisibility }) => {
   const [events, setEvents] = useState(checklist?.events || []);
   const [addingDay, setAddingDay] = useState(null);
   const [newEvent, setNewEvent] = useState({ time: "", title: "", description: "", address: "" });
@@ -619,11 +776,24 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner }) => {
 
   return (
     <div className={`forecast-section ${!showItinerary ? 'collapsed' : ''}`}>
-      <div className="forecast-header" onClick={() => setShowItinerary(!showItinerary)}>
-        <h3><span>📅 {t.itineraryTitle}</span></h3>
-        <button className="collapse-toggle">
-          <span className={`chevron ${showItinerary ? 'up' : ''}`}>▾</span>
-        </button>
+      <div className="forecast-header">
+        <div className="forecast-header-left" onClick={() => setShowItinerary(!showItinerary)}>
+          <h3><span>📅 {t.itineraryTitle || "План поездки"}</span></h3>
+        </div>
+        <div className="forecast-header-actions">
+          {realOwnerId === currentUserId && (
+            <span 
+              className={`section-visibility-toggle ${hiddenSections?.includes('itinerary') ? 'hidden' : 'visible'}`}
+              onClick={(e) => { e.stopPropagation(); onToggleVisibility('itinerary'); }}
+              title={hiddenSections?.includes('itinerary') ? 'План скрыт от других' : 'План виден всем'}
+            >
+              {hiddenSections?.includes('itinerary') ? '🔒' : '🔓'}
+            </span>
+          )}
+          <button className="collapse-toggle" onClick={() => setShowItinerary(!showItinerary)}>
+            <span className={`chevron ${showItinerary ? 'up' : ''}`}>▾</span>
+          </button>
+        </div>
       </div>
 
       {showItinerary && (
@@ -796,6 +966,13 @@ const App = ({ page }) => {
   const [removedItems, setRemovedItems] = useState([]);
   const [addItemMode, setAddItemMode] = useState(false);
   const [newItem, setNewItem] = useState("");
+  const [activeTab, setActiveTab] = useState("shared");
+  const [showInviteModal, setShowInviteModal] = useState(false);
+  const [inviteToken, setInviteToken] = useState("");
+  const [followers, setFollowers] = useState([]);
+
+  // Computed: can current user edit this checklist?
+  const isOwnerOrCollaborator = user && result && (result.user_id === user.id || (result.backpacks && result.backpacks.some(b => b.user_id === user.id)));
 
   const handleAuth = (userData, accessToken) => {
     setUser(userData);
@@ -815,6 +992,7 @@ const App = ({ page }) => {
     setToken(null);
     localStorage.removeItem("token");
     localStorage.removeItem("user");
+    navigate('/');
   };
 
   const authHeaders = token
@@ -851,6 +1029,15 @@ const App = ({ page }) => {
       setCheckedItems(initial);
     }
   }, [result, savedSlug]);
+
+  useEffect(() => {
+    if (result && user && result.backpacks) {
+      const myBp = result.backpacks.find(b => b.user_id === user.id);
+      if (myBp && activeTab === "shared") {
+        setActiveTab(myBp.id.toString());
+      }
+    }
+  }, [result?.backpacks, user]);
 
   // Сохраняем отмеченные в localStorage при изменении
   useEffect(() => {
@@ -977,38 +1164,200 @@ const App = ({ page }) => {
     }
   };
 
+  const syncChecklist = async (payload) => {
+    try {
+      if (!authHeaders.Authorization || !savedSlug) return;
+      await fetch(`${API_URL}/checklist/${savedSlug}/state`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: JSON.stringify(payload)
+      });
+    } catch (e) { console.error("Checklist sync error:", e); }
+  };
+
+  const syncBackpackItems = async (backpackId, payload) => {
+    try {
+      if (!authHeaders.Authorization) return;
+      await fetch(`${API_URL}/backpacks/${backpackId}/state`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: JSON.stringify(payload)
+      });
+    } catch (e) { console.error("Backpack sync error:", e); }
+  };
+
   const handleCheck = (item) => {
-    setCheckedItems(prev => ({
-      ...prev,
-      [item]: !prev[item]
-    }));
+    if (!isOwnerOrCollaborator) return;
+    if (activeTab === "shared") {
+      const newChecked = { ...checkedItems, [item]: !checkedItems[item] };
+      setCheckedItems(newChecked);
+      syncChecklist({ checked_items: Object.keys(newChecked).filter(k => newChecked[k]) });
+    } else {
+      setResult(prev => {
+        const next = { ...prev };
+        const bp = next.backpacks?.find(b => b.id.toString() === activeTab);
+        if (bp) {
+          const isChecked = !bp.checked_items.includes(item);
+          bp.checked_items = isChecked ? [...bp.checked_items, item] : bp.checked_items.filter(i => i !== item);
+          syncBackpackItems(activeTab, { checked_items: bp.checked_items });
+        }
+        return next;
+      });
+    }
   };
 
   const handleRemoveItem = (item) => {
-    setRemovedItems(prev => [...prev, item]);
+    if (!isOwnerOrCollaborator) return;
+    if (activeTab === "shared") {
+      const newRemoved = [...removedItems, item];
+      setRemovedItems(newRemoved);
+      syncChecklist({ removed_items: newRemoved });
+    } else {
+      setResult(prev => {
+        const next = { ...prev };
+        const bp = next.backpacks?.find(b => b.id.toString() === activeTab);
+        if (bp) {
+          bp.removed_items = [...bp.removed_items, item];
+          syncBackpackItems(activeTab, { removed_items: bp.removed_items });
+        }
+        return next;
+      });
+    }
   };
 
   const handleRestoreAll = () => {
-    setRemovedItems([]);
+    if (!isOwnerOrCollaborator) return;
+    if (activeTab === "shared") {
+      setRemovedItems([]);
+      syncChecklist({ removed_items: [] });
+    } else {
+      setResult(prev => {
+        const next = { ...prev };
+        const bp = next.backpacks?.find(b => b.id.toString() === activeTab);
+        if (bp) {
+          bp.removed_items = [];
+          syncBackpackItems(activeTab, { removed_items: [] });
+        }
+        return next;
+      });
+    }
   };
 
   const resetChecklist = () => {
-    const reset = {};
-    result.items.forEach(item => {
-      reset[item] = false;
-    });
-    setCheckedItems(reset);
+    if (!isOwnerOrCollaborator) return;
+    if (activeTab === "shared") {
+      const reset = {};
+      result.items.forEach(item => { reset[item] = false; });
+      setCheckedItems(reset);
+      syncChecklist({ checked_items: [] });
+    } else {
+      setResult(prev => {
+        const next = { ...prev };
+        const bp = next.backpacks?.find(b => b.id.toString() === activeTab);
+        if (bp) {
+          bp.checked_items = [];
+          syncBackpackItems(activeTab, { checked_items: [] });
+        }
+        return next;
+      });
+    }
   };
 
   const handleAddItem = () => {
+    if (!isOwnerOrCollaborator) return;
     if (!newItem.trim()) return;
-    if (result.items.includes(newItem.trim())) return;
-    setResult(prev => ({
-      ...prev,
-      items: [...prev.items, newItem.trim()]
-    }));
+    if (activeTab === "shared") {
+      if (result.items.includes(newItem.trim())) return;
+      const newItems = [...result.items, newItem.trim()];
+      setResult(prev => ({ ...prev, items: newItems }));
+      syncChecklist({ items: newItems });
+    } else {
+      setResult(prev => {
+        const next = { ...prev };
+        const bp = next.backpacks?.find(b => b.id.toString() === activeTab);
+        if (bp && !bp.items.includes(newItem.trim())) {
+          bp.items = [...bp.items, newItem.trim()];
+          syncBackpackItems(activeTab, { items: bp.items });
+        }
+        return next;
+      });
+    }
     setNewItem("");
     setAddItemMode(false);
+  };
+
+  const handleMoveToBackpack = (item) => {
+    if (!user || !result || !result.backpacks) return;
+    const myBp = result.backpacks.find(b => b.user_id === user.id);
+    if (!myBp) {
+      alert("У вас еще нет рюкзака. Он создастся при принятии приглашения.");
+      return;
+    }
+
+    const newRemoved = [...removedItems, item];
+    setRemovedItems(newRemoved);
+    syncChecklist({ removed_items: newRemoved });
+
+    setResult(prev => {
+      const next = { ...prev };
+      const bp = next.backpacks.find(b => b.id === myBp.id);
+      if (bp && !bp.items.includes(item)) {
+        bp.items = [...bp.items, item];
+        syncBackpackItems(bp.id, { items: bp.items });
+      }
+      return next;
+    });
+  };
+
+  const handleMoveToShared = (item, fromBpId) => {
+    setResult(prev => {
+      const next = { ...prev };
+      const bp = next.backpacks.find(b => b.id.toString() === fromBpId.toString());
+      if (bp) {
+        if (!bp.removed_items) bp.removed_items = [];
+        bp.removed_items = [...bp.removed_items, item];
+        syncBackpackItems(bp.id, { removed_items: bp.removed_items });
+      }
+      return next;
+    });
+
+    let newSharedItems = result.items || [];
+    let newRemoved = [...removedItems];
+    if (!newSharedItems.includes(item)) {
+      newSharedItems = [...newSharedItems, item];
+      syncChecklist({ items: newSharedItems });
+    } else {
+      newRemoved = newRemoved.filter(i => i !== item);
+      setRemovedItems(newRemoved);
+      syncChecklist({ removed_items: newRemoved });
+    }
+    setResult(prev => ({ ...prev, items: newSharedItems }));
+  };
+
+  const handleToggleSectionVisibility = async (section) => {
+    if (!result || result.user_id !== user?.id) return;
+    
+    const isHidden = result.hidden_sections?.includes(section);
+    let newHidden = [];
+    if (isHidden) {
+      newHidden = result.hidden_sections.filter(s => s !== section);
+    } else {
+      newHidden = [...(result.hidden_sections || []), section];
+    }
+
+    try {
+      const res = await fetch(`${API_URL}/checklists/${savedSlug || id}/hidden-sections`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: JSON.stringify({ hidden_sections: newHidden })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setResult(prev => ({ ...prev, hidden_sections: data.hidden_sections }));
+      }
+    } catch (e) {
+      console.error("Error toggling section visibility:", e);
+    }
   };
 
   const formatDate = (isoDate) => {
@@ -1049,6 +1398,11 @@ const App = ({ page }) => {
                 </div>
                 <span className="navbar-username">{user.username}</span>
               </div>
+              <NotificationBell 
+                authHeaders={authHeaders} 
+                lang={lang} 
+                navigate={navigate} 
+              />
               <button
                 className="navbar-logout-btn icon-btn"
                 onClick={handleLogout}
@@ -1256,21 +1610,138 @@ const App = ({ page }) => {
 
             {result && (
               <div className="results-section">
-                <h2>
-                  <span>{result.city}</span>
-                  <span className="checklist-dates">
-                    {new Date(result.start_date || destinations[0]?.dates?.start).toLocaleDateString("ru-RU", { day: 'numeric', month: 'long' })}
-                    {" — "}
-                    {new Date(result.end_date || destinations[destinations.length - 1]?.dates?.end).toLocaleDateString("ru-RU", { day: 'numeric', month: 'long' })}
-                  </span>
+                <h2 className="checklist-header">
+                  <div className="checklist-title-group">
+                    <span className="checklist-city-name">{result.city}</span>
+                    <span className="checklist-dates">
+                      {(() => {
+                        const renderPart = (dateStr) => {
+                          if (!dateStr) return null;
+                          const d = new Date(dateStr);
+                          const formatted = d.toLocaleDateString("ru-RU", { day: 'numeric', month: 'long' });
+                          const match = formatted.match(/^(\d+)\s+(.+)$/);
+                          if (match) {
+                            return <><span className="date-num">{match[1]}</span> {match[2]}</>;
+                          }
+                          return formatted;
+                        };
+                        return (
+                          <>
+                            {renderPart(result.start_date || destinations[0]?.dates?.start)}
+                            {" — "}
+                            {renderPart(result.end_date || destinations[destinations.length - 1]?.dates?.end)}
+                          </>
+                        );
+                      })()}
+                    </span>
+                  </div>
+                  {result.user_id === user?.id && (
+                    <button 
+                      className="invite-action-btn" 
+                      onClick={async () => {
+                        setShowInviteModal(true);
+                        if (user?.username) {
+                          fetch(`${API_URL}/users/${user.username}/followers`, { headers: authHeaders })
+                            .then(r => r.ok ? r.json() : [])
+                            .then(data => setFollowers(data))
+                            .catch(e => console.error(e));
+                        }
+                        if (!result.invite_token) {
+                          const res = await fetch(`${API_URL}/checklists/${savedSlug || id}/invite-token`, {
+                            method: "POST",
+                            headers: authHeaders
+                          });
+                          if (res.ok) {
+                            const data = await res.json();
+                            setInviteToken(data.invite_token);
+                          }
+                        } else {
+                          setInviteToken(result.invite_token);
+                        }
+                      }}
+                    >
+                      + Пригласить
+                    </button>
+                  )}
                 </h2>
 
-                {/* Если это мульти-город, показываем маршрут визуально? Пока просто заголовок */}
+                {/* Вкладки рюкзаков */}
+                {(savedSlug || id) && (result.user_id === user?.id || (result.backpacks && result.backpacks.length > 0)) && (
+                  <div className="backpack-tabs-container">
+                    <div className="backpack-tabs">
+                      <div 
+                        className={`backpack-tab ${activeTab === "shared" ? "active" : ""}`}
+                        onClick={() => setActiveTab("shared")}
+                      >
+                        ⛺ <span className="tab-label">Общие вещи</span>
+                        {result.user_id === user?.id && (
+                          <span 
+                            className={`tab-visibility-toggle ${result.hidden_sections?.includes('shared') ? 'hidden' : 'visible'}`}
+                            onClick={(e) => { e.stopPropagation(); handleToggleSectionVisibility('shared'); }}
+                            title={result.hidden_sections?.includes('shared') ? 'Скрыто от других' : 'Видно всем'}
+                          >
+                            {result.hidden_sections?.includes('shared') ? '🔒' : '🔓'}
+                          </span>
+                        )}
+                      </div>
+                      {result.backpacks && result.backpacks.map(bp => (
+                        <div
+                          key={bp.id}
+                          className={`backpack-tab ${activeTab === bp.id.toString() ? "active" : ""}`}
+                          onClick={() => setActiveTab(bp.id.toString())}
+                        >
+                          🎒 <span className="tab-label">{bp.user?.username || `id:${bp.user_id}`}</span>
+                          {result.user_id === user?.id && (
+                            <span 
+                              className={`tab-visibility-toggle ${result.hidden_sections?.includes(`backpack:${bp.id}`) ? 'hidden' : 'visible'}`}
+                              onClick={(e) => { e.stopPropagation(); handleToggleSectionVisibility(`backpack:${bp.id}`); }}
+                              title={result.hidden_sections?.includes(`backpack:${bp.id}`) ? 'Скрыто от других' : 'Видно всем'}
+                            >
+                              {result.hidden_sections?.includes(`backpack:${bp.id}`) ? '🔒' : '🔓'}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+
+
                 <div className="checklist-card">
                   {(() => {
+                    const isOwnerOrCollaborator = user && result && (result.user_id === user.id || (result.backpacks && result.backpacks.some(b => b.user_id === user.id)));
+                    const isOwner = user && result && result.user_id === user.id;
+                    const isSharedHidden = !isOwnerOrCollaborator && result.hidden_sections?.includes('shared');
+                    const isBackpacksHidden = !isOwnerOrCollaborator && result.hidden_sections?.includes('backpacks');
+                    
+                    if (activeTab === 'shared' && isSharedHidden) {
+                      return <div className="section-restricted-msg">🔒 {result.user?.username || 'Владелец'} ограничил просмотр общего списка</div>;
+                    }
+                    if (activeTab !== 'shared') {
+                      const isThisBpIsHidden = !isOwnerOrCollaborator && result.hidden_sections?.includes(`backpack:${activeTab}`);
+                      if (isBackpacksHidden || isThisBpIsHidden) {
+                        return <div className="section-restricted-msg">🔒 {result.user?.username || 'Владелец'} ограничил просмотр этого рюкзака</div>;
+                      }
+                    }
+                    
                     const isMobile = window.innerWidth <= 600;
                     const isTablet = window.innerWidth > 600 && window.innerWidth <= 900;
-                    let items = (result.items || []).filter(item => !removedItems.includes(item));
+
+                    let targetItems = result.items || [];
+                    let targetRemoved = removedItems;
+                    let targetChecked = checkedItems;
+
+                    if (activeTab !== "shared" && result.backpacks) {
+                       const bp = result.backpacks.find(b => b.id.toString() === activeTab);
+                       if (bp) {
+                         targetItems = bp.items || [];
+                         targetRemoved = bp.removed_items || [];
+                         targetChecked = (bp.checked_items || []).reduce((acc, cur) => { acc[cur] = true; return acc; }, {});
+                       }
+                    }
+
+                    let items = targetItems.filter(item => !targetRemoved.includes(item));
                     let columns = 3;
                     if (isTablet) columns = 2;
                     if (isMobile) columns = 1;
@@ -1278,27 +1749,49 @@ const App = ({ page }) => {
                     const cols = Array.from({ length: columns }, (_, i) => items.slice(i * perCol, (i + 1) * perCol));
                     return (
                       <div className="checklist-multicolumn">
+                        {items.length === 0 && <div className="empty-state" style={{padding:"20px", color:"#888"}}>Список пуст.</div>}
                         {cols.map((col, idx) => (
                           <div className="checklist-category" key={idx}>
                             <div className="checklist">
                               {col.map((item) => (
                                 <label
                                   key={item}
-                                  className={`checklist-label${checkedItems[item] ? " checked" : ""}`}
+                                  className={`checklist-label${targetChecked[item] ? " checked" : ""}`}
                                 >
                                   <input
                                     type="checkbox"
                                     className="checklist-checkbox"
-                                    checked={checkedItems[item] || false}
+                                    checked={targetChecked[item] || false}
                                     onChange={() => handleCheck(item)}
+                                    disabled={!isOwnerOrCollaborator}
                                   />
                                   {item}
-                                  <button
-                                    className="checklist-remove-btn"
-                                    title="Удалить"
-                                    onClick={e => { e.preventDefault(); handleRemoveItem(item); }}
-                                    tabIndex={-1}
-                                  >×</button>
+                                  {isOwnerOrCollaborator && (
+                                    <span className="item-action-group">
+                                      {activeTab === "shared" && result?.backpacks?.some(b => b.user_id === user?.id) && (
+                                        <button
+                                          className="checklist-action-btn"
+                                          title="Взять себе (Перенести в рюкзак)"
+                                          onClick={e => { e.preventDefault(); handleMoveToBackpack(item); }}
+                                          tabIndex={-1}
+                                        >🎒</button>
+                                      )}
+                                      {activeTab !== "shared" && (
+                                        <button
+                                          className="checklist-action-btn"
+                                          title="Вернуть в общий список"
+                                          onClick={e => { e.preventDefault(); handleMoveToShared(item, activeTab); }}
+                                          tabIndex={-1}
+                                        >⛺</button>
+                                      )}
+                                      <button
+                                        className="checklist-remove-btn"
+                                        title="Удалить"
+                                        onClick={e => { e.preventDefault(); handleRemoveItem(item); }}
+                                        tabIndex={-1}
+                                      >×</button>
+                                    </span>
+                                  )}
                                 </label>
                               ))}
                             </div>
@@ -1309,38 +1802,44 @@ const App = ({ page }) => {
                   })()}
 
                   <div className="checklist-actions">
-                    <button className="action-btn" onClick={resetChecklist}>Сбросить отметки</button>
-                    <button className="action-btn" onClick={() => setAddItemMode(v => !v)}>
-                      {addItemMode ? "Отмена" : "+ Добавить вещь"}
-                    </button>
-                    {addItemMode && (
+                    {isOwnerOrCollaborator && (
                       <>
-                        <input
-                          className="add-item-input"
-                          type="text"
-                          value={newItem}
-                          onChange={e => setNewItem(e.target.value)}
-                          placeholder="Новая вещь"
-                          onKeyDown={e => { if (e.key === "Enter") handleAddItem(); }}
-                          autoFocus
-                        />
-                        <button className="action-btn primary" onClick={handleAddItem}>OK</button>
+                        <button className="action-btn" onClick={resetChecklist}>Сбросить отметки</button>
+                        <button className="action-btn" onClick={() => setAddItemMode(v => !v)}>
+                          {addItemMode ? "Отмена" : "+ Добавить вещь"}
+                        </button>
+                        {addItemMode && (
+                          <>
+                            <input
+                              className="add-item-input"
+                              type="text"
+                              value={newItem}
+                              onChange={e => setNewItem(e.target.value)}
+                              placeholder="Новая вещь"
+                              onKeyDown={e => { if (e.key === "Enter") handleAddItem(); }}
+                              autoFocus
+                            />
+                            <button className="action-btn primary" onClick={handleAddItem}>OK</button>
+                          </>
+                        )}
+                        {removedItems.length > 0 && (
+                          <button className="action-btn" onClick={handleRestoreAll}>
+                            Восстановить удалённые
+                          </button>
+                        )}
                       </>
                     )}
-                    {removedItems.length > 0 && (
-                      <button className="action-btn" onClick={handleRestoreAll}>
-                        Восстановить удалённые
-                      </button>
-                    )}
-                    {(savedSlug || id) && (
+                    {isOwnerOrCollaborator && (savedSlug || id) && (
                       <button className="action-btn" onClick={() => {
                         const slug = savedSlug || id;
                         window.open(`${API_URL}/checklist/${slug}/calendar`, '_blank');
                       }}>  {t.exportCalendar || "В календарь"}</button>
                     )}
-                    <button className="action-btn" onClick={() => window.print()}>
-                      {t.print || "Печать"}
-                    </button>
+                    {isOwnerOrCollaborator && (
+                      <button className="action-btn" onClick={() => window.print()}>
+                        {t.print || "Печать"}
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -1428,12 +1927,24 @@ const App = ({ page }) => {
 
                 {/* Itinerary Section */}
                 {result && result.start_date && result.end_date && savedSlug && (
-                  <ItinerarySection 
-                    checklist={result}
-                    lang={lang} 
-                    slug={savedSlug} 
-                    isOwner={true} 
-                  />
+                  <div className="itinerary-wrapper">
+                    {!isOwnerOrCollaborator && result.hidden_sections?.includes('itinerary') ? (
+                      <div className="section-restricted-msg" style={{ background: 'var(--bg-secondary)' }}>
+                        🔒 {result.user?.username || 'Владелец'} ограничил просмотр плана поездки
+                      </div>
+                    ) : (
+                      <ItinerarySection 
+                        checklist={result}
+                        lang={lang} 
+                        slug={savedSlug} 
+                        isOwner={!!isOwnerOrCollaborator}
+                        realOwnerId={result.user_id}
+                        currentUserId={user?.id}
+                        hiddenSections={result.hidden_sections}
+                        onToggleVisibility={handleToggleSectionVisibility}
+                      />
+                    )}
+                  </div>
                 )}
 
                 {/* Attractions */}
@@ -1461,9 +1972,81 @@ const App = ({ page }) => {
           </>
         )}
       </div>
+
+      {/* Модальное окно приглашения */}
+      {showInviteModal && (
+        <div className="modal-overlay" onClick={() => setShowInviteModal(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setShowInviteModal(false)}>&times;</button>
+            <h3 style={{marginTop: 0}}>🔗 Пригласить в путешествие</h3>
+
+            <p className="invite-modal-desc">Ваши подписчики:</p>
+            <div className="invite-followers-list">
+              {followers.length > 0 ? followers.map(f => (
+                <div key={f.id} className="invite-follower-item">
+                  <div className="follower-avatar-small">
+                    {f.avatar && (f.avatar.startsWith("data:image") || f.avatar.startsWith("http")) ? (
+                      <img src={f.avatar} alt="Avatar" />
+                    ) : (
+                      f.avatar ? f.avatar : f.username.charAt(0).toUpperCase()
+                    )}
+                  </div>
+                  <span className="follower-name">{f.username}</span>
+                  <button 
+                    className="follower-invite-btn"
+                    onClick={async (e) => {
+                      const btn = e.currentTarget;
+                      btn.disabled = true;
+                      btn.innerText = "Отправлено";
+                      try {
+                        const res = await fetch(`${API_URL}/checklists/${savedSlug || id}/invite/${f.id}`, {
+                          method: "POST",
+                          headers: authHeaders
+                        });
+                        if (res.status === 409) {
+                          btn.innerText = lang === 'ru' ? "Уже в чеклисте" : "Already in list";
+                          btn.style.opacity = "0.5";
+                        }
+                      } catch (err) {
+                        console.error(err);
+                        btn.disabled = false;
+                        btn.innerText = lang === 'ru' ? "Пригласить" : "Invite";
+                      }
+                    }}
+                  >
+                    Пригласить
+                  </button>
+                </div>
+              )) : (
+                <div className="empty-subscribers" style={{textAlign:"center", color:"#666", padding:"20px"}}>У вас пока нет подписчиков</div>
+              )}
+            </div>
+
+            <p className="invite-modal-desc" style={{marginTop: "25px"}}>Или отправьте им ссылку для присоединения к чеклисту:</p>
+            {inviteToken ? (
+              <div className="invite-link-box">
+                <input 
+                  type="text" 
+                  readOnly 
+                  value={`${window.location.origin}/join/${inviteToken}`} 
+                  className="invite-input"
+                />
+                <button 
+                  className="copy-btn action-btn primary"
+                  onClick={() => {
+                    navigator.clipboard.writeText(`${window.location.origin}/join/${inviteToken}`);
+                    alert("Ссылка скопирована!");
+                  }}
+                >Копировать</button>
+              </div>
+            ) : (
+              <div className="loading-spinner" style={{margin: "20px auto"}}></div>
+            )}
+          </div>
+        </div>
+      )}
     </>
   );
 };
 
 export default App;
-

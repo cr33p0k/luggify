@@ -27,6 +27,9 @@ class User(Base):
     # Связь с чеклистами
     checklists = relationship("Checklist", back_populates="user")
 
+    # Notifications
+    notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
+
     # Подписки (на кого подписан этот юзер)
     following = relationship(
         "User",
@@ -56,13 +59,39 @@ class Checklist(Base):
     added_items = Column(ARRAY(String), nullable=True)
     daily_forecast = Column(JSON, nullable=True) 
     is_public = Column(Boolean, default=True)
+    hidden_sections = Column(ARRAY(String), default=[], server_default="{}")
 
     # Привязка к пользователю (nullable — для обратной совместимости)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     user = relationship("User", back_populates="checklists")
     
+    # Инвайт-ссылка для расшаривания (опционально)
+    invite_token = Column(String, unique=True, index=True, nullable=True)
+
+    # Рюкзаки пользователей (личные вещи внутри общего чеклиста)
+    backpacks = relationship("UserBackpack", back_populates="checklist", cascade="all, delete-orphan", lazy="selectin")
+
     # События маршрута
     events = relationship("ItineraryEvent", back_populates="checklist", cascade="all, delete-orphan", lazy="selectin")
+
+class UserBackpack(Base):
+    __tablename__ = "user_backpacks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    checklist_id = Column(Integer, ForeignKey("checklists.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    
+    # Списки вещей конкретного пользователя
+    items = Column(ARRAY(String), default=[])
+    checked_items = Column(ARRAY(String), default=[])
+    added_items = Column(ARRAY(String), default=[])
+    removed_items = Column(ARRAY(String), default=[])
+    
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    checklist = relationship("Checklist", back_populates="backpacks")
+    user = relationship("User", lazy="joined")
 
 class ItineraryEvent(Base):
     __tablename__ = "itinerary_events"
@@ -85,3 +114,17 @@ class CityAttraction(Base):
     city_name = Column(String, unique=True, index=True, nullable=False) # lowercase
     data = Column(JSON, nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+class Notification(Base):
+    __tablename__ = "notifications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    type = Column(String, nullable=False) # e.g. "checklist_invitation"
+    content = Column(String, nullable=False)
+    link = Column(String, nullable=True) # e.g. "/checklists/some-slug"
+    is_read = Column(Boolean, default=False)
+    extra_data = Column(JSON, nullable=True) # For tokens or other metadata
+    created_at = Column(DateTime, server_default=func.now())
+
+    user = relationship("User", back_populates="notifications")

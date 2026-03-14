@@ -1,4 +1,4 @@
-from typing import Optional, List
+from typing import Optional, List, Any, Dict
 from pydantic import BaseModel, EmailStr
 from datetime import date, datetime
 
@@ -100,6 +100,27 @@ class ChecklistCreate(BaseModel):
     tg_user_id: Optional[str] = None
     user_id: Optional[int] = None
     is_public: bool = True
+    invite_token: Optional[str] = None
+    hidden_sections: Optional[List[str]] = []
+
+    class Config:
+        from_attributes = True
+
+
+class UserBackpackBase(BaseModel):
+    items: Optional[List[str]] = []
+    checked_items: Optional[List[str]] = []
+    added_items: Optional[List[str]] = []
+    removed_items: Optional[List[str]] = []
+
+class UserBackpackUpdate(UserBackpackBase):
+    pass
+
+class UserBackpackOut(UserBackpackBase):
+    id: int
+    checklist_id: int
+    user_id: int
+    user: UserOut
 
     class Config:
         from_attributes = True
@@ -107,4 +128,19 @@ class ChecklistCreate(BaseModel):
 
 class ChecklistOut(ChecklistCreate):
     slug: str
+    invite_token: Optional[str] = None
     events: Optional[List[ItineraryEventOut]] = []
+    backpacks: Optional[List[UserBackpackOut]] = []
+
+class NotificationOut(BaseModel):
+    id: int
+    user_id: int
+    type: str
+    content: str
+    link: Optional[str] = None
+    is_read: bool
+    extra_data: Optional[Dict[str, Any]] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

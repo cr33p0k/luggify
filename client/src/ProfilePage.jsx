@@ -437,29 +437,35 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                     )}
 
                     <div className="checklists-grid">
-                        {checklists.map((cl) => (
+                        {checklists.map((cl) => {
+                            const isOwner = cl.user_id === user?.id;
+                            return (
                             <div
                                 key={cl.slug}
                                 className="checklist-preview-card"
                                 onClick={() => navigate(`/checklist/${cl.slug}`)}
                             >
                                 <div className="card-actions">
-                                    <button
-                                        className={`privacy-btn ${!cl.is_public ? "private" : ""}`}
-                                        onClick={(e) => toggleChecklistPrivacy(e, cl.slug, cl.is_public)}
-                                        title={cl.is_public ? t.publicStatus : t.hiddenStatus}
-                                    >
-                                        {cl.is_public ? "👁️" : "🔒"}
-                                    </button>
-                                    <button
-                                        className="delete-btn"
-                                        onClick={(e) => deleteChecklist(e, cl.slug)}
-                                        title={t.deleteChecklistBtn}
-                                    >
-                                        ✕
-                                    </button>
+                                    {isOwner && (
+                                        <>
+                                            <button
+                                                className={`privacy-btn ${!cl.is_public ? "private" : ""}`}
+                                                onClick={(e) => toggleChecklistPrivacy(e, cl.slug, cl.is_public)}
+                                                title={cl.is_public ? t.publicStatus : t.hiddenStatus}
+                                            >
+                                                {cl.is_public ? "👁️" : "🔒"}
+                                            </button>
+                                            <button
+                                                className="delete-btn"
+                                                onClick={(e) => deleteChecklist(e, cl.slug)}
+                                                title={t.deleteChecklistBtn}
+                                            >
+                                                ✕
+                                            </button>
+                                        </>
+                                    )}
                                 </div>
-                                <div className="preview-city">📍 {cl.city}</div>
+                                <div className="preview-city">{cl.city}{!isOwner && <span className="shared-badge" title={lang === 'en' ? 'Shared checklist' : 'Совместный чеклист'}>👥</span>}</div>
                                 <div className="preview-dates">
                                     {formatDate(cl.start_date)} — {formatDate(cl.end_date)}
                                 </div>
@@ -470,7 +476,8 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                                     {pluralize(cl.items.length, ['вещь', 'вещи', 'вещей'], ['item', 'items'], lang)}
                                 </div>
                             </div>
-                        ))}
+                        );
+                        })}
                     </div>
                 </div>
             )}
