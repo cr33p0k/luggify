@@ -251,19 +251,40 @@ const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
 const AttractionsSection = React.memo(({ city, lang }) => {
   if (!city) return null;
 
-  const cities = city.includes(" + ") ? city.split(" + ").map(c => c.trim()) : [city];
-  const isMulti = cities.length > 1;
-  const limit = isMulti ? 5 : 10;
+  const citiesList = city.includes(" + ") ? city.split(" + ").map(c => c.trim()) : [city];
+  const [activeCity, setActiveCity] = useState(citiesList[0] || "");
+  const limit = citiesList.length > 1 ? 5 : 10;
 
   return (
     <div className="travel-section">
       <h3 className="section-title">🏛 {TRANSLATIONS[lang].whatToSee}</h3>
-      {cities.map((c, idx) => (
-        <div key={c + idx}>
-          {isMulti && <h4 className="attractions-city-title">📍 {c}</h4>}
-          <AttractionsCityBlock city={c} lang={lang} limit={limit} />
+      {citiesList.length > 1 && (
+        <div className="city-tabs">
+          {citiesList.map((c, i) => (
+            <button
+              key={i}
+              className={`city-tab ${activeCity === c ? "active" : ""}`}
+              onClick={() => setActiveCity(c)}
+            >
+              {c.split(",")[0]}
+            </button>
+          ))}
         </div>
-      ))}
+      )}
+      <div key={activeCity}>
+        <AttractionsCityBlock city={activeCity} lang={lang} limit={limit} />
+      </div>
+      <div style={{ display: "flex", justifyContent: "center", marginTop: "1rem" }}>
+        <a
+          href={`https://www.google.com/search?q=${encodeURIComponent((lang === "ru" ? "Достопримечательности " : "Attractions ") + activeCity.split(",")[0])}`}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flights-search-btn"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          {TRANSLATIONS[lang].showMoreAttractions || "Показать больше"}
+        </a>
+      </div>
     </div>
   );
 });
@@ -382,6 +403,9 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang }
 });
 
 const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
+  const citiesList = city ? city.split("+").map(c => c.trim()) : [];
+  const [activeCity, setActiveCity] = useState(citiesList[0] || "");
+
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -395,15 +419,15 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
   const [showGuestMenu, setShowGuestMenu] = useState(false);
 
   const doFetch = () => {
-    if (!city) return;
+    if (!activeCity) return;
     setLoading(true);
     setLoaded(false);
     setTriggered(true);
-    const params = new URLSearchParams({ city, adults });
+    const params = new URLSearchParams({ city: activeCity, adults });
     if (startDate) params.append("check_in", startDate);
     if (endDate) params.append("check_out", endDate);
     if (childrenAges.length > 0) params.append("children_ages", childrenAges.join(","));
-    fetch(`${API_URL}/hotels/search?${params}`)
+    fetch(`${API_URL}/hotels/search?${params}&limit_per_city=${citiesList.length > 1 ? 5 : 10}`)
       .then(r => r.json())
       .then(d => {
         setData(d.hotels || []);
@@ -414,7 +438,7 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
       .finally(() => { setLoading(false); setLoaded(true); });
   };
 
-  const cLower = city ? city.toLowerCase() : "";
+  const cLower = activeCity ? activeCity.toLowerCase() : "";
   const ruCities = [
     "москва", "санкт-петербург", "питер", "спб", "сочи", "казань",
     "новосибирск", "екатеринбург", "нижний новгород", "краснодар",
@@ -423,15 +447,19 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
   const isRussia = cLower.includes("россия") || cLower.includes("russia") || ruCities.some(rc => cLower.includes(rc));
 
   const childrenQuery = childrenAges.length > 0 ? `&group_children=${childrenAges.length}` + childrenAges.map(age => `&age=${age}`).join("") : "";
-  const bookingDirectLink = `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(city.split(",")[0].trim())}${startDate ? `&checkin=${startDate}` : ""}${endDate ? `&checkout=${endDate}` : ""}&group_adults=${adults}${childrenQuery}&no_rooms=1`;
+  const bookingDirectLink = activeCity ? `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(activeCity.split(",")[0].trim())}${startDate ? `&checkin=${startDate}` : ""}${endDate ? `&checkout=${endDate}` : ""}&group_adults=${adults}${childrenQuery}&no_rooms=1` : "#";
 
   useEffect(() => {
-    if (!city || triggered) return;
+    if (!activeCity) return;
+    setTriggered(false);
+    setData([]);
+    setProvider(null);
+    setLoaded(false);
     if (isRussia) {
       doFetch();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [city]);
+  }, [activeCity]);
 
   if (!city) return null;
 
@@ -440,6 +468,19 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
   return (
     <div className="travel-section">
       <h3 className="section-title">🏨 {t.hotelsTitle}</h3>
+      {citiesList.length > 1 && (
+        <div className="city-tabs">
+          {citiesList.map((c, i) => (
+            <button
+              key={i}
+              className={`city-tab ${activeCity === c ? "active" : ""}`}
+              onClick={() => setActiveCity(c)}
+            >
+              {c.split(",")[0]}
+            </button>
+          ))}
+        </div>
+      )}
       {loaded && data.length > 0 && provider !== "ru_widgets" && !isRussia && (
         <a href={bookingDirectLink} target="_blank" rel="noopener noreferrer" className="booking-corner-link" title={t.goToBooking}>
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -595,16 +636,21 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
 });
 
 const EsimSection = React.memo(({ city, lang }) => {
+  const citiesList = city ? (city.includes(" + ") ? city.split(" + ").map(c => c.trim()) : [city]) : [];
+  const [activeCity, setActiveCity] = useState(citiesList[0] || "");
+
   const [data, setData] = useState(null);
   const [browseLink, setBrowseLink] = useState("");
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    if (!city) return;
+    if (!activeCity) return;
+    setData(null);
+    setBrowseLink("");
     setLoading(true);
     setLoaded(false);
-    const params = new URLSearchParams({ city, lang });
+    const params = new URLSearchParams({ city: activeCity, lang });
     fetch(`${API_URL}/esim/search?${params}`)
       .then(r => r.json())
       .then(d => {
@@ -613,7 +659,7 @@ const EsimSection = React.memo(({ city, lang }) => {
       })
       .catch(() => setData(null))
       .finally(() => { setLoading(false); setLoaded(true); });
-  }, [city, lang]);
+  }, [activeCity, lang]);
 
   if (loaded && !data && !browseLink) return null;
   if (!loaded && !loading) return null;
@@ -623,6 +669,19 @@ const EsimSection = React.memo(({ city, lang }) => {
   return (
     <div className="travel-section">
       <h3 className="section-title">📱 {t.esimTitle}</h3>
+      {citiesList.length > 1 && (
+        <div className="city-tabs">
+          {citiesList.map((c, i) => (
+            <button
+              key={i}
+              className={`city-tab ${activeCity === c ? "active" : ""}`}
+              onClick={() => setActiveCity(c)}
+            >
+              {c.split(",")[0]}
+            </button>
+          ))}
+        </div>
+      )}
       {loading ? (
         <div className="skeleton-grid">
           <div className="skeleton-card short" />
@@ -938,7 +997,7 @@ const App = ({ page }) => {
   const t = TRANSLATIONS[lang];
 
   const [destinations, setDestinations] = useState([
-    { id: 1, city: null, dates: { start: null, end: null } }
+    { id: 1, city: null, dates: { start: null, end: null }, transport: "plane" }
   ]);
   const [options, setOptions] = useState({
     trip_type: "vacation",
@@ -951,6 +1010,7 @@ const App = ({ page }) => {
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [originCity, setOriginCity] = useState("");
+  const [returnTransport, setReturnTransport] = useState("plane");
   const [showAuth, setShowAuth] = useState(false);
   const [showForecast, setShowForecast] = useState(true); // Collapsible forecast state
   const [user, setUser] = useState(() => {
@@ -1073,7 +1133,7 @@ const App = ({ page }) => {
   const handleAddDestination = () => {
     setDestinations([
       ...destinations,
-      { id: Date.now(), city: null, dates: { start: null, end: null } }
+      { id: Date.now(), city: null, dates: { start: null, end: null }, transport: "plane" }
     ]);
   };
 
@@ -1110,8 +1170,8 @@ const App = ({ page }) => {
           city: d.city.fullName,
           start_date: d.dates.start,
           end_date: d.dates.end,
-          trip_type: options.trip_type, // Global for now
-          transport: options.transport, // Global for now
+          trip_type: options.trip_type,
+          transport: d.transport || "plane",
         })),
         gender: options.gender,
         traveling_with_pet: options.traveling_with_pet,
@@ -1119,6 +1179,7 @@ const App = ({ page }) => {
         has_chronic_diseases: options.has_chronic_diseases,
         language: lang,
         origin_city: originCity?.fullName || originCity || "",
+        return_transport: returnTransport,
       };
 
       const res = await fetch(`${API_URL}/generate-multi-city`, {
@@ -1485,8 +1546,29 @@ const App = ({ page }) => {
                           value={dest.city}
                           onSelect={(val) => updateDestination(dest.id, "city", val)}
                           lang={lang}
-                        />
+                        >
+                          {/* Per-destination Transport Selection */}
+                          <div className="inline-transport-selector" style={{ background: "transparent", border: "none", padding: 0, gap: "2px" }}>
+                            {[
+                              { id: "plane", icon: "✈️" },
+                              { id: "train", icon: "🚆" },
+                              { id: "car", icon: "🚗" },
+                              { id: "bus", icon: "🚌" },
+                            ].map(type => (
+                              <button
+                                key={type.id}
+                                className={`transport-btn ${dest.transport === type.id ? "active" : ""}`}
+                                onClick={() => updateDestination(dest.id, "transport", type.id)}
+                                title={t[type.id] || type.id}
+                                style={{ padding: "4px", fontSize: "1.05rem", minWidth: "24px", opacity: dest.transport === type.id ? 1 : 0.4 }}
+                              >
+                                {type.icon}
+                              </button>
+                            ))}
+                          </div>
+                        </CitySelect>
                       </div>
+
                       <div className="form-field">
                         <DateRangePicker
                           value={dest.dates}
@@ -1495,37 +1577,39 @@ const App = ({ page }) => {
                           minDate={index > 0 ? (destinations[index - 1].dates.end ? new Date(destinations[index - 1].dates.end) : new Date()) : new Date()}
                         />
                       </div>
+
                       {index < destinations.length - 1 && <div className="destination-divider">↓</div>}
                     </div>
                   ))}
 
-                  <div className="form-actions">
-                    <button className="add-city-btn" onClick={handleAddDestination}>
+                  <div className="form-actions" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "1rem" }}>
+                    <button className="add-city-btn" onClick={handleAddDestination} style={{ width: "auto" }}>
                       {t.addCity}
                     </button>
-                  </div>
-                  {/* Options */}
-                  {/* Transport Selection */}
-                  <div className="trip-type-selector">
-                    <label className="section-label">Транспорт:</label>
-                    <div className="trip-types">
-                      {[
-                        { id: "plane", label: t.plane },
-                        { id: "train", label: t.train },
-                        { id: "car", label: t.car },
-                        { id: "bus", label: t.bus },
-                      ].map(type => (
-                        <div
-                          key={type.id}
-                          className={`trip-type-chip ${options.transport === type.id ? "active" : ""}`}
-                          onClick={() => setOptions({ ...options, transport: type.id })}
-                        >
-                          {type.label}
-                        </div>
-                      ))}
+
+                    {/* Return transport selector */}
+                    <div className="return-transport-row" style={{ marginTop: 0, paddingTop: 0, borderTop: "none" }}>
+                      <label className="section-label" style={{ marginBottom: 0 }}>{t.returnTransport || "Обратно:"}</label>
+                      <div className="inline-transport-selector">
+                        {[
+                          { id: "plane", icon: "✈️" },
+                          { id: "train", icon: "🚆" },
+                          { id: "car", icon: "🚗" },
+                          { id: "bus", icon: "🚌" },
+                        ].map(type => (
+                          <button
+                            key={type.id}
+                            className={`transport-btn ${returnTransport === type.id ? "active" : ""}`}
+                            onClick={() => setReturnTransport(type.id)}
+                            title={t[type.id] || type.id}
+                          >
+                            {type.icon}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   </div>
-
+                  {/* Option Selections (Transport removed, now per-destination) */}
                   {/* Gender Selection */}
                   <div className="trip-type-selector">
                     <label className="section-label">Пол:</label>
@@ -1921,7 +2005,7 @@ const App = ({ page }) => {
                           <div className="timeline-dot" />
                           {i < destinations.length - 1 && <div className="timeline-line" />}
                           <div className="timeline-info">
-                            <div className="timeline-city">{dest.city || "..."}</div>
+                            <div className="timeline-city">{typeof dest.city === "object" ? (dest.city?.name || dest.city?.fullName || "...") : (dest.city || "...")}</div>
                             {dest.dates?.start && (
                               <div className="timeline-dates">
                                 {new Date(dest.dates.start).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}
@@ -1963,10 +2047,37 @@ const App = ({ page }) => {
                   <AttractionsSection city={result.city} lang={lang} />
                 )}
 
-                {/* Flights */}
-                {result && result.city && (
-                  <FlightsSection key={"fl-" + result.city} city={result.city} startDate={result.start_date || destinations[0]?.dates?.start} returnDate={result.end_date || destinations[destinations.length - 1]?.dates?.end} origin={originCity?.fullName || originCity || result.origin_city || ""} lang={lang} />
-                )}
+                {/* Flights — only for cities with plane transport */}
+                {(() => {
+                  if (!result || !result.city) return null;
+                  const allCities = result.city.split(" + ").map(c => c.trim());
+                  const transports = result.transports || [];
+                  // transports array: [to_city0, to_city1, ..., return_transport]
+                  // Last element is the return transport
+                  const returnTr = transports.length > allCities.length ? transports[transports.length - 1] : (transports.length > 0 ? "plane" : "plane");
+                  // Outbound: filter cities where transport is "plane"
+                  const outboundCities = transports.length > 0
+                    ? allCities.filter((_, i) => (transports[i] || "plane") === "plane")
+                    : allCities;
+                  // Return: show if return transport is plane, from the last city
+                  const lastCity = allCities[allCities.length - 1];
+                  const showReturn = returnTr === "plane";
+                  // If no outbound and no return — hide section entirely
+                  if (outboundCities.length === 0 && !showReturn) return null;
+                  // Build the outbound city string
+                  const outboundCity = outboundCities.length > 0 ? outboundCities[0] : null;
+                  return (
+                    <FlightsSection
+                      key={"fl-" + (outboundCity || lastCity)}
+                      city={outboundCity || lastCity}
+                      startDate={result.start_date || destinations[0]?.dates?.start}
+                      returnDate={showReturn ? (result.end_date || destinations[destinations.length - 1]?.dates?.end) : null}
+                      returnCity={showReturn ? lastCity : null}
+                      origin={originCity?.fullName || originCity || result.origin_city || ""}
+                      lang={lang}
+                    />
+                  );
+                })()}
 
                 {/* Hotels */}
                 {result && result.city && (

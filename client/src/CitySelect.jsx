@@ -35,12 +35,17 @@ const TRANSLATIONS = {
   }
 };
 
-const CitySelect = ({ value, onSelect, lang = "ru", label }) => {
+const CitySelect = ({ value, onSelect, lang = "ru", label, children }) => {
   const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
 
   return (
-    <div className="input-group">
-      <label>{label || t.label}</label>
+    <div className="input-group" style={{ position: "relative" }}>
+      <label style={{ display: "block", marginBottom: "0.5rem" }}>{label || t.label}</label>
+      {children && (
+        <div style={{ position: "absolute", right: 0, top: "-4px", zIndex: 2 }}>
+          {children}
+        </div>
+      )}
       <AsyncSelect
         classNamePrefix="react-select"
         cacheOptions

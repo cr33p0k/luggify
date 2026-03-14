@@ -1649,6 +1649,46 @@ input[type="date"]:focus,
   flex-wrap: wrap;
 }
 
+/* === Segmented City Tabs === */
+.city-tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+  padding: 4px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.city-tabs::-webkit-scrollbar {
+  display: none;
+}
+.city-tab {
+  flex: 1;
+  min-width: max-content;
+  white-space: nowrap;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 16px;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.city-tab:hover {
+  color: white;
+  background: rgba(255, 255, 255, 0.05);
+}
+.city-tab.active {
+  background: var(--orange);
+  color: white;
+  font-weight: 600;
+  box-shadow: 0 4px 12px rgba(255, 153, 0, 0.3);
+}
+
 .booking-corner-link {
   position: absolute;
   top: 1.25rem;
@@ -2470,6 +2510,51 @@ input[type="date"]:focus,
   color: var(--text-secondary);
   position: relative;
   top: 1px;
+}
+
+
+.inline-transport-selector {
+  display: flex;
+  gap: 0.25rem;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  width: fit-content;
+}
+
+.return-transport-row {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+
+.transport-btn {
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.2s;
+  opacity: 0.5;
+}
+
+.transport-btn:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.transport-btn.active {
+  opacity: 1;
+  background: var(--bg-active);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .backpack-tab:hover {

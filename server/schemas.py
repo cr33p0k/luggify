@@ -102,6 +102,7 @@ class ChecklistCreate(BaseModel):
     is_public: bool = True
     invite_token: Optional[str] = None
     hidden_sections: Optional[List[str]] = []
+    transports: Optional[List[str]] = None
 
     class Config:
         from_attributes = True

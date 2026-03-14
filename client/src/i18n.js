@@ -56,6 +56,7 @@ export const TRANSLATIONS = {
         routeTitle: "Маршрут",
 
         // Options
+        returnTransport: "Обратно:",
         plane: "✈️ Самолёт",
         train: "🚆 Поезд",
         car: "🚗 Авто",
@@ -71,6 +72,7 @@ export const TRANSLATIONS = {
 
         // Attractions
         whatToSee: "Что посмотреть",
+        showMoreAttractions: "Показать больше",
         searchingAttractions: "Ищем интересные места…",
         openInGoogleMaps: "Открыть в Google Картах",
 
@@ -189,6 +191,7 @@ export const TRANSLATIONS = {
         routeTitle: "Route",
 
         // Options
+        returnTransport: "Return:",
         plane: "✈️ Plane",
         train: "🚆 Train",
         car: "🚗 Car",
@@ -204,6 +207,7 @@ export const TRANSLATIONS = {
 
         // Attractions
         whatToSee: "What to See",
+        showMoreAttractions: "Show more",
         searchingAttractions: "Searching for interesting places…",
         openInGoogleMaps: "Open in Google Maps",
 

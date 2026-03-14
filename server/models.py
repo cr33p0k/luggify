@@ -60,6 +60,7 @@ class Checklist(Base):
     daily_forecast = Column(JSON, nullable=True) 
     is_public = Column(Boolean, default=True)
     hidden_sections = Column(ARRAY(String), default=[], server_default="{}")
+    transports = Column(ARRAY(String), nullable=True)
 
     # Привязка к пользователю (nullable — для обратной совместимости)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)

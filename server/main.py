@@ -78,6 +78,7 @@ class MultiCityPackingRequest(BaseModel):
     has_chronic_diseases: bool = False
     language: str = "ru"
     origin_city: str = ""
+    return_transport: str = "plane"
 
 class ChecklistResponse(schemas.ChecklistOut):
     daily_forecast: list[schemas.DailyForecast]
@@ -1891,7 +1892,7 @@ async def calculate_packing_data(
         "end_date": end_dt.date()
     }
 
-async def create_checklist_from_items(db, items, city, start_date, end_date, avg_temp, conditions, daily_forecast, user_id=None, language="ru", origin_city=""):
+async def create_checklist_from_items(db, items, city, start_date, end_date, avg_temp, conditions, daily_forecast, user_id=None, language="ru", origin_city="", transports=None):
     # Categorization logic
     mapping = get_category_map(language)
     categories = {k: [] for k in mapping.keys()}
@@ -1926,6 +1927,7 @@ async def create_checklist_from_items(db, items, city, start_date, end_date, avg
         daily_forecast=[schemas.DailyForecast(**d) if isinstance(d, dict) else d for d in daily_forecast] if daily_forecast else None,
         user_id=user_id,
         origin_city=origin_city or None,
+        transports=transports,
     )
     checklist = await crud.create_checklist(db, checklist_data)
     
@@ -1945,6 +1947,7 @@ async def create_checklist_from_items(db, items, city, start_date, end_date, avg
         user_id=checklist.user_id,
         is_public=getattr(checklist, 'is_public', True),
         origin_city=checklist.origin_city,
+        transports=checklist.transports,
         daily_forecast=daily_forecast
     )
 
@@ -1959,7 +1962,8 @@ async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db),
         data["avg_temp"], data["conditions"], data["daily_forecast"],
         current_user.id if current_user else None,
         language=req.language,
-        origin_city=req.origin_city
+        origin_city=req.origin_city,
+        transports=[req.transport] if req.transport else None
     )
 
 @app.post("/generate-multi-city", response_model=ChecklistResponse)
@@ -1970,8 +1974,11 @@ async def generate_multi_city(req: MultiCityPackingRequest, db: AsyncSession = D
     conditions = set()
     cities = []
     
+    transports = []
+    
     for seg in req.segments:
         cities.append(seg.city.split(",")[0])
+        transports.append(seg.transport)
         data = await calculate_packing_data(
             seg.city, seg.start_date, seg.end_date, seg.trip_type, seg.transport,
             req.gender, req.traveling_with_pet, req.has_allergies, req.has_chronic_diseases, req.language
@@ -1991,12 +1998,16 @@ async def generate_multi_city(req: MultiCityPackingRequest, db: AsyncSession = D
     min_date = datetime.strptime(req.segments[0].start_date, "%Y-%m-%d").date()
     max_date = datetime.strptime(req.segments[-1].end_date, "%Y-%m-%d").date()
     
+    # Append return transport as the last element
+    transports.append(req.return_transport)
+    
     return await create_checklist_from_items(
         db, all_items, display_city, min_date, max_date,
         avg_temp, list(conditions), all_forecast,
         current_user.id if current_user else None,
         language=req.language,
-        origin_city=req.origin_city
+        origin_city=req.origin_city,
+        transports=transports
     )
 
 @app.post("/save-tg-checklist", response_model=schemas.ChecklistOut)
@@ -2048,6 +2059,7 @@ async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):
         user_id=checklist.user_id,
         is_public=getattr(checklist, 'is_public', True),
         origin_city=getattr(checklist, 'origin_city', None),
+        transports=getattr(checklist, 'transports', None),
         daily_forecast=forecast,
         events=checklist.events or [],
         backpacks=checklist.backpacks or [],
