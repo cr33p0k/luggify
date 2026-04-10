@@ -55,6 +55,21 @@ async def get_user_by_tg_id(db: AsyncSession, tg_id: str):
     return result.scalar_one_or_none()
 
 
+async def update_user(db: AsyncSession, user_id: int, user_update: schemas.UserUpdate):
+    """Обновление данных пользователя"""
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        return None
+    
+    update_data = user_update.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(user, key, value)
+        
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
 async def create_user_from_telegram(db: AsyncSession, tg_id: str, username: str, first_name: str = None):
     """Создание пользователя из Telegram данных"""
     display_name = username or first_name or f"tg_{tg_id}"
@@ -121,6 +136,106 @@ async def get_following(db: AsyncSession, user_id: int):
     )
     result = await db.execute(stmt)
     return result.scalars().all()
+
+
+# === Follow Request CRUD ===
+
+async def create_follow_request(db: AsyncSession, from_user_id: int, to_user_id: int):
+    """Create a pending follow request"""
+    # Check if request already exists
+    stmt = select(models.FollowRequest).where(
+        models.FollowRequest.from_user_id == from_user_id,
+        models.FollowRequest.to_user_id == to_user_id,
+        models.FollowRequest.status == "pending"
+    )
+    result = await db.execute(stmt)
+    existing = result.scalar_one_or_none()
+    if existing:
+        return None  # Already has a pending request
+
+    req = models.FollowRequest(
+        from_user_id=from_user_id,
+        to_user_id=to_user_id,
+        status="pending"
+    )
+    db.add(req)
+    await db.commit()
+    await db.refresh(req)
+    return req
+
+async def get_follow_request(db: AsyncSession, from_user_id: int, to_user_id: int):
+    """Check if a pending follow request exists"""
+    stmt = select(models.FollowRequest).where(
+        models.FollowRequest.from_user_id == from_user_id,
+        models.FollowRequest.to_user_id == to_user_id,
+        models.FollowRequest.status == "pending"
+    )
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
+
+async def get_pending_follow_requests(db: AsyncSession, user_id: int):
+    """Get all pending incoming follow requests for a user"""
+    stmt = (
+        select(models.FollowRequest)
+        .where(
+            models.FollowRequest.to_user_id == user_id,
+            models.FollowRequest.status == "pending"
+        )
+        .order_by(models.FollowRequest.created_at.desc())
+    )
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+async def accept_follow_request(db: AsyncSession, request_id: int, owner_id: int):
+    """Accept a follow request: auto-follow + delete request"""
+    stmt = select(models.FollowRequest).where(
+        models.FollowRequest.id == request_id,
+        models.FollowRequest.to_user_id == owner_id,
+        models.FollowRequest.status == "pending"
+    )
+    result = await db.execute(stmt)
+    req = result.scalar_one_or_none()
+    if not req:
+        return False
+
+    # Auto-follow
+    await follow_user(db, req.from_user_id, req.to_user_id)
+
+    # Delete the request
+    await db.delete(req)
+    await db.commit()
+    return True
+
+async def decline_follow_request(db: AsyncSession, request_id: int, owner_id: int):
+    """Decline a follow request"""
+    stmt = select(models.FollowRequest).where(
+        models.FollowRequest.id == request_id,
+        models.FollowRequest.to_user_id == owner_id,
+        models.FollowRequest.status == "pending"
+    )
+    result = await db.execute(stmt)
+    req = result.scalar_one_or_none()
+    if not req:
+        return False
+
+    await db.delete(req)
+    await db.commit()
+    return True
+
+async def cancel_follow_request(db: AsyncSession, from_user_id: int, to_user_id: int):
+    """Cancel a pending follow request (by the requester)"""
+    stmt = select(models.FollowRequest).where(
+        models.FollowRequest.from_user_id == from_user_id,
+        models.FollowRequest.to_user_id == to_user_id,
+        models.FollowRequest.status == "pending"
+    )
+    result = await db.execute(stmt)
+    req = result.scalar_one_or_none()
+    if not req:
+        return False
+    await db.delete(req)
+    await db.commit()
+    return True
 
 
 # === Checklist CRUD ===

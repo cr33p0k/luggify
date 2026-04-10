@@ -23,23 +23,36 @@ from auth import (
 load_dotenv()
 
 
+def _parse_csv_env(name: str, defaults: list[str]) -> list[str]:
+    raw = os.getenv(name, "")
+    parsed = [item.strip() for item in raw.split(",") if item.strip()]
+    return parsed or defaults
+
+
 # Open-Meteo API (бесплатный, без ключа)
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HISTORICAL_URL = "https://archive-api.open-meteo.com/v1/archive"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 from translations import WMO_CODES, get_item, get_category_map
 
+default_cors_origins = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "https://luggify.vercel.app",
+    "https://www.luggify.vercel.app",
+]
+cors_allowed_origins = _parse_csv_env("CORS_ALLOWED_ORIGINS", default_cors_origins)
+cors_allowed_origin_regex = os.getenv(
+    "CORS_ALLOWED_ORIGIN_REGEX",
+    r"https://.*\.(vercel\.app|up\.railway\.app)",
+)
+
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "https://luggify.vercel.app",
-        "https://www.luggify.vercel.app",
-    ],
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origins=cors_allowed_origins,
+    allow_origin_regex=cors_allowed_origin_regex,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
@@ -111,9 +124,18 @@ class ChecklistPrivacyUpdate(BaseModel):
 
 # ==================== AUTH ENDPOINTS ====================
 
+class VerifyEmailRequest(BaseModel):
+    email: str
+    code: str
+    device_id: Optional[str] = None
+    user_agent: Optional[str] = None
+
+class ResendCodeRequest(BaseModel):
+    email: str
+
 @app.post("/auth/register", response_model=schemas.Token)
 async def register(data: schemas.UserCreate, db: AsyncSession = Depends(get_db)):
-    """Регистрация нового пользователя"""
+    """Регистрация нового пользователя с отправкой кода подтверждения"""
     # Проверяем уникальность email
     existing = await crud.get_user_by_email(db, data.email)
     if existing:
@@ -124,6 +146,19 @@ async def register(data: schemas.UserCreate, db: AsyncSession = Depends(get_db))
         raise HTTPException(status_code=400, detail="Пользователь с таким именем уже существует")
     # Создаём пользователя
     user = await crud.create_user(db, data)
+    
+    # Generate and send verification code
+    from email_service import generate_verification_code, send_verification_email
+    code = generate_verification_code()
+    user.email_verification_code = code
+    user.code_expires_at = datetime.now() + timedelta(minutes=10)
+    user.is_email_verified = False
+    await db.commit()
+    await db.refresh(user)
+    
+    # Send email (fire and forget — don't block registration)
+    await send_verification_email(data.email, code, data.username)
+    
     # Генерируем токен
     access_token = create_access_token(data={"sub": str(user.id)})
     return {
@@ -133,12 +168,138 @@ async def register(data: schemas.UserCreate, db: AsyncSession = Depends(get_db))
     }
 
 
-@app.post("/auth/login", response_model=schemas.Token)
-async def login(data: schemas.UserLogin, db: AsyncSession = Depends(get_db)):
+@app.post("/auth/verify-email")
+async def verify_email(data: VerifyEmailRequest, db: AsyncSession = Depends(get_db)):
+    """Подтверждение email по коду"""
+    user = await crud.get_user_by_email(db, data.email)
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    if user.is_email_verified:
+        return {"verified": True, "message": "Email уже подтверждён"}
+    
+    if not user.email_verification_code:
+        raise HTTPException(status_code=400, detail="Код подтверждения не был отправлен")
+    
+    if user.code_expires_at and user.code_expires_at < datetime.now():
+        raise HTTPException(status_code=400, detail="Код истёк. Запросите новый")
+    
+    if user.email_verification_code != data.code:
+        raise HTTPException(status_code=400, detail="Неверный код подтверждения")
+    
+    # Mark email as verified
+    user.is_email_verified = True
+    user.email_verification_code = None
+    user.code_expires_at = None
+    
+    # Save the device as trusted if provided
+    if data.device_id:
+        new_device = models.UserDevice(
+            user_id=user.id,
+            device_id=data.device_id,
+            user_agent=data.user_agent
+        )
+        db.add(new_device)
+        
+    await db.commit()
+    
+    return {"verified": True, "message": "Email успешно подтверждён"}
+
+
+@app.post("/auth/resend-code")
+async def resend_code(data: ResendCodeRequest, db: AsyncSession = Depends(get_db)):
+    """Повторная отправка кода подтверждения"""
+    user = await crud.get_user_by_email(db, data.email)
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    
+    if user.is_email_verified:
+        return {"message": "Email уже подтверждён"}
+    
+    from email_service import generate_verification_code, send_verification_email
+    code = generate_verification_code()
+    user.email_verification_code = code
+    user.code_expires_at = datetime.now() + timedelta(minutes=10)
+    await db.commit()
+    
+    success = await send_verification_email(data.email, code, user.username)
+    if not success:
+        raise HTTPException(status_code=500, detail="Не удалось отправить письмо")
+    
+    return {"message": "Код отправлен повторно"}
+
+
+@app.post("/auth/login")
+async def login(data: schemas.UserLogin, response: Response, db: AsyncSession = Depends(get_db)):
     """Авторизация пользователя"""
     user = await crud.get_user_by_email(db, data.email)
     if not user or not verify_password(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Неверный email или пароль")
+    
+    # Check device ID
+    if data.device_id:
+        stmt = select(models.UserDevice).where(
+            models.UserDevice.user_id == user.id,
+            models.UserDevice.device_id == data.device_id
+        )
+        res_device = await db.execute(stmt)
+        trusted_device = res_device.scalar_one_or_none()
+        
+        if not trusted_device:
+            # Device not trusted, require verification
+            from email_service import generate_verification_code, send_verification_email
+            code = generate_verification_code()
+            user.email_verification_code = code
+            user.code_expires_at = datetime.now() + timedelta(minutes=10)
+            await db.commit()
+            
+            await send_verification_email(user.email, code, user.username)
+            response.status_code = status.HTTP_202_ACCEPTED
+            return {"status": "verification_required", "message": "Новое устройство. Код подтверждения отправлен на почту."}
+
+    # Generate token if trusted or no device tracking (legacy)
+    access_token = create_access_token(data={"sub": str(user.id)})
+    
+    # Update last_used_at for trusted device
+    if data.device_id and trusted_device:
+        trusted_device.last_used_at = datetime.now()
+        await db.commit()
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": schemas.UserOut.model_validate(user),
+    }
+
+@app.post("/auth/verify-device-login", response_model=schemas.Token)
+async def verify_device_login(data: schemas.VerifyDeviceLogin, db: AsyncSession = Depends(get_db)):
+    """Подтверждение входа с нового устройства"""
+    user = await crud.get_user_by_email(db, data.email)
+    if not user or not verify_password(data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Неверный email или пароль")
+        
+    if not user.email_verification_code:
+        raise HTTPException(status_code=400, detail="Код подтверждения не был запрошен")
+    if user.code_expires_at and user.code_expires_at < datetime.now():
+        raise HTTPException(status_code=400, detail="Код истёк. Запросите новый")
+    if user.email_verification_code != data.code:
+        raise HTTPException(status_code=400, detail="Неверный код подтверждения")
+        
+    # Mark code as used
+    user.email_verification_code = None
+    user.code_expires_at = None
+    
+    # Save the device as trusted if requested AND device_id provided
+    if data.remember_device and data.device_id:
+        new_device = models.UserDevice(
+            user_id=user.id,
+            device_id=data.device_id,
+            user_agent=data.user_agent
+        )
+        db.add(new_device)
+        
+    await db.commit()
+    
     access_token = create_access_token(data={"sub": str(user.id)})
     return {
         "access_token": access_token,
@@ -154,6 +315,25 @@ async def get_me(user=Depends(require_current_user), db: AsyncSession = Depends(
     following = await crud.get_following(db, user.id)
     
     user_out = schemas.UserOut.model_validate(user)
+    user_out.followers_count = len(followers)
+    user_out.following_count = len(following)
+    return user_out
+
+
+@app.patch("/auth/me", response_model=schemas.UserOut)
+async def update_me(update_data: schemas.UserUpdate, user=Depends(require_current_user), db: AsyncSession = Depends(get_db)):
+    """Обновление профиля текущего пользователя (описание, аватар, соцсети)"""
+    updated_user = await crud.update_user(db, user_id=user.id, user_update=update_data)
+    if not updated_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Пользователь не найден"
+        )
+    
+    followers = await crud.get_followers(db, user.id)
+    following = await crud.get_following(db, user.id)
+    
+    user_out = schemas.UserOut.model_validate(updated_user)
     user_out.followers_count = len(followers)
     user_out.following_count = len(following)
     return user_out
@@ -230,29 +410,41 @@ async def get_public_profile(
         # Или полную, если user разрешил? Обычно полную, но флаг 'is_stats_public' это и значит)
         
         # Лучше считать полную статистику, раз пользователь разрешил её показывать
+        all_stats_checklists = await get_all_user_checklists(db, user.id)
         stats = {
-            "total_trips": len(checklists),
-            "total_days": sum((c.end_date - c.start_date).days + 1 for c in checklists if c.start_date and c.end_date),
-            "unique_cities": len({c.city.split(",")[0].strip() for c in checklists if c.city}),
-            "unique_countries": len({c.city.split(",")[-1].strip() for c in checklists if c.city and "," in c.city}),
-            "upcoming_trips": sum(1 for c in checklists if c.start_date and c.start_date > datetime.now().date())
+            "total_trips": len(all_stats_checklists),
+            "total_days": sum((c.end_date - c.start_date).days + 1 for c in all_stats_checklists if c.start_date and c.end_date),
+            "unique_cities": len({c.city.split(",")[0].strip() for c in all_stats_checklists if c.city}),
+            "unique_countries": len({c.city.split(",")[-1].strip() for c in all_stats_checklists if c.city and "," in c.city}),
+            "upcoming_trips": sum(1 for c in all_stats_checklists if c.start_date and c.start_date > datetime.now().date())
         }
 
     followers = await crud.get_followers(db, user.id)
     following = await crud.get_following(db, user.id)
     
     is_following = False
+    follow_status = None  # null, "following", "requested"
     if current_user:
         is_following = any(f.id == current_user.id for f in followers)
+        if is_following:
+            follow_status = "following"
+        else:
+            # Check for pending follow request
+            pending_req = await crud.get_follow_request(db, current_user.id, user.id)
+            if pending_req:
+                follow_status = "requested"
 
     return {
         "username": user.username,
         "created_at": user.created_at,
         "avatar": user.avatar,
+        "bio": user.bio,
+        "social_links": user.social_links,
         "is_stats_public": user.is_stats_public,
         "followers_count": len(followers),
         "following_count": len(following),
         "is_following": is_following,
+        "follow_status": follow_status,
         "stats": stats,
         "checklists": public_checklists
     }
@@ -266,22 +458,53 @@ async def follow_user_endpoint(username: str, user=Depends(require_current_user)
         raise HTTPException(status_code=404, detail="Пользователь не найден")
     if target_user.id == user.id:
         raise HTTPException(status_code=400, detail="Нельзя подписаться на самого себя")
+    
+    # If target profile is private, create a follow request instead of direct follow
+    if not target_user.is_stats_public:
+        # Check if already following
+        followers = await crud.get_followers(db, target_user.id)
+        if any(f.id == user.id for f in followers):
+            raise HTTPException(status_code=400, detail="Вы уже подписаны на этого пользователя")
         
+        req = await crud.create_follow_request(db, user.id, target_user.id)
+        if not req:
+            raise HTTPException(status_code=400, detail="Запрос уже отправлен")
+        
+        # Create notification for target user
+        new_notif = models.Notification(
+            user_id=target_user.id,
+            type="follow_request",
+            content=f"{user.username} хочет подписаться на вас",
+            link=f"/u/{user.username}",
+            is_read=False,
+            extra_data={"request_id": req.id, "from_user_id": user.id}
+        )
+        db.add(new_notif)
+        await db.commit()
+        
+        return {"status": "requested"}
+    
+    # Public profile — direct follow
     success = await crud.follow_user(db, user.id, target_user.id)
     if not success:
         raise HTTPException(status_code=400, detail="Вы уже подписаны на этого пользователя")
-    return {"message": "Успешная подписка"}
+    return {"status": "followed"}
 
 @app.delete("/users/{username}/follow")
 async def unfollow_user_endpoint(username: str, user=Depends(require_current_user), db: AsyncSession = Depends(get_db)):
     target_user = await crud.get_user_by_username(db, username)
     if not target_user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
-        
+    
+    # Try to unfollow first
     success = await crud.unfollow_user(db, user.id, target_user.id)
     if not success:
-        raise HTTPException(status_code=400, detail="Вы не подписаны на этого пользователя")
-    return {"message": "Успешная отписка"}
+        # Maybe there's a pending request to cancel
+        cancelled = await crud.cancel_follow_request(db, user.id, target_user.id)
+        if not cancelled:
+            raise HTTPException(status_code=400, detail="Вы не подписаны на этого пользователя")
+        return {"status": "request_cancelled"}
+    return {"status": "unfollowed"}
 
 @app.get("/users/{username}/followers", response_model=List[schemas.UserOut])
 async def get_user_followers(username: str, current_user: Optional[models.User] = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -326,6 +549,64 @@ async def get_user_following(username: str, current_user: Optional[models.User] 
         enriched_following.append(f_out)
         
     return enriched_following
+
+# === Follow Request Endpoints ===
+
+@app.get("/follow-requests", response_model=List[schemas.FollowRequestOut])
+async def get_follow_requests(user=Depends(require_current_user), db: AsyncSession = Depends(get_db)):
+    """Get all pending incoming follow requests for the current user"""
+    requests = await crud.get_pending_follow_requests(db, user.id)
+    result = []
+    for req in requests:
+        from_user_out = schemas.UserOut.model_validate(req.from_user)
+        result.append(schemas.FollowRequestOut(
+            id=req.id,
+            from_user=from_user_out,
+            status=req.status,
+            created_at=req.created_at
+        ))
+    return result
+
+@app.post("/follow-requests/{request_id}/accept")
+async def accept_follow_request_endpoint(request_id: int, user=Depends(require_current_user), db: AsyncSession = Depends(get_db)):
+    """Accept a follow request — auto-follows the requester"""
+    # Get request info before accepting (for notification)
+    stmt = select(models.FollowRequest).where(
+        models.FollowRequest.id == request_id,
+        models.FollowRequest.to_user_id == user.id,
+        models.FollowRequest.status == "pending"
+    )
+    result = await db.execute(stmt)
+    req = result.scalar_one_or_none()
+    if not req:
+        raise HTTPException(status_code=404, detail="Запрос не найден")
+    
+    from_user_id = req.from_user_id
+    
+    success = await crud.accept_follow_request(db, request_id, user.id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Запрос не найден")
+    
+    # Notify the requester that their request was accepted
+    new_notif = models.Notification(
+        user_id=from_user_id,
+        type="follow_accepted",
+        content=f"{user.username} принял(а) ваш запрос на подписку",
+        link=f"/u/{user.username}",
+        is_read=False
+    )
+    db.add(new_notif)
+    await db.commit()
+    
+    return {"status": "accepted"}
+
+@app.post("/follow-requests/{request_id}/decline")
+async def decline_follow_request_endpoint(request_id: int, user=Depends(require_current_user), db: AsyncSession = Depends(get_db)):
+    """Decline a follow request"""
+    success = await crud.decline_follow_request(db, request_id, user.id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Запрос не найден")
+    return {"status": "declined"}
 
 
 @app.get("/my-checklists", response_model=List[schemas.ChecklistOut])
@@ -452,13 +733,24 @@ def compute_achievements(checklists):
     return {"achievements": results, "level": level, "unlocked_count": unlocked_count}
 
 
+async def get_all_user_checklists(db: AsyncSession, user_id: int):
+    """Возвращает список всех чеклистов: и собственные, и те, куда добавили"""
+    owned = await crud.get_checklists_by_user_id(db, user_id)
+    shared = await crud.get_shared_checklists_by_user_id(db, user_id)
+    # Объединяем и убираем дубликаты (хотя их быть не должно по логике)
+    all_checklists = {c.id: c for c in owned}
+    for c in shared:
+        all_checklists[c.id] = c
+    return list(all_checklists.values())
+
+
 @app.get("/my-achievements")
 async def get_my_achievements(
     user=Depends(require_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Достижения и уровень пользователя"""
-    checklists = await crud.get_checklists_by_user_id(db, user.id)
+    """Достижения и уровень пользователя (включая совместные чеклисты)"""
+    checklists = await get_all_user_checklists(db, user.id)
     return compute_achievements(checklists)
 
 
@@ -469,8 +761,8 @@ async def get_my_feedback_stats(
     user=Depends(require_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Статистика предпочтений: что чаще удаляют/добавляют"""
-    checklists = await crud.get_checklists_by_user_id(db, user.id)
+    """Статистика предпочтений: что чаще удаляют/добавляют (включая совместные)"""
+    checklists = await get_all_user_checklists(db, user.id)
 
     removed_counts = {}
     added_counts = {}
@@ -495,8 +787,8 @@ async def get_my_stats(
     user=Depends(require_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Статистика путешествий пользователя"""
-    checklists = await crud.get_checklists_by_user_id(db, user.id)
+    """Статистика путешествий пользователя (включая совместные)"""
+    checklists = await get_all_user_checklists(db, user.id)
     
     total_trips = len(checklists)
     total_days = 0
@@ -1798,10 +2090,60 @@ async def calculate_packing_data(
 
     avg_temp = round(sum(temps) / len(temps), 1) if temps else None
     
+    # Calculate trip duration
+    start_dt_date = start_dt if isinstance(start_dt, type(start_dt)) else start_dt
+    end_dt_date = end_dt if isinstance(end_dt, type(end_dt)) else end_dt
+    try:
+        trip_days = (end_dt.date() - start_dt.date()).days + 1
+    except:
+        trip_days = (end_dt - start_dt).days + 1
+    trip_days = max(trip_days, 1)
+    
     # Items Generation
     items = set()
 
-    # Weather based items
+    # ========== BASE ESSENTIALS (always included) ==========
+    items.update([
+        get_item("underwear", language),
+        get_item("socks", language),
+        get_item("pajamas", language),
+        get_item("towel", language),
+        get_item("copies_docs", language),
+    ])
+    
+    # Base hygiene (always)
+    items.update([
+        get_item("toothbrush", language),
+        get_item("deodorant", language),
+        get_item("soap", language),
+        get_item("shampoo", language),
+        get_item("hairbrush", language),
+        get_item("sanitizer", language),
+        get_item("tissues", language),
+    ])
+    
+    # Base tech (always)
+    items.update([
+        get_item("phone", language),
+        get_item("charger", language),
+        get_item("headphones", language),
+    ])
+    
+    # Base pharmacy (always)
+    items.update([
+        get_item("painkillers", language),
+        get_item("plasters", language),
+        get_item("activated_charcoal", language),
+    ])
+
+    # ========== DURATION-BASED QUANTITIES ==========
+    if trip_days > 7:
+        items.add(get_item("laundry_bag", language))
+        items.add(get_item("packing_cubes", language))
+    if trip_days > 3:
+        items.add(get_item("dry_shampoo", language))
+
+    # ========== WEATHER-BASED ITEMS ==========
     if hums := [h for h in humidities if h > 80]:
          items.add(get_item("styling", language))
     if uvs := [u for u in uv_indices if u > 5]:
@@ -1814,71 +2156,118 @@ async def calculate_packing_data(
     if any("mountain" in c.lower() or "гора" in c.lower() for c in conditions):
         items.update([get_item("trekking_shoes", language), get_item("first_aid_kit", language), get_item("thermos", language), get_item("map_compass", language)])
 
+    # ========== HEALTH CONDITIONS ==========
     if has_allergies:
         items.update([get_item("antihistamine", language), get_item("allergies_list", language)])
     if has_chronic_diseases:
         items.update([get_item("meds_personal", language), get_item("meds_regular", language), get_item("med_report", language)])
 
+    # ========== GENDER ITEMS ==========
     if gender == "female":
-        items.update([get_item("makeup", language), get_item("hygiene_fem", language), get_item("makeup_remover", language)])
+        items.update([get_item("makeup", language), get_item("hygiene_fem", language), get_item("makeup_remover", language), get_item("cotton_pads", language), get_item("nail_kit", language)])
         if avg_temp and avg_temp > 15:
             items.add(get_item("dress", language))
     elif gender == "male":
         items.add(get_item("shaving_kit", language))
 
+    # ========== TRANSPORT ITEMS ==========
     if transport == "plane":
-        items.update([get_item("neck_pillow", language), get_item("earplugs", language), get_item("powerbank_hand", language), get_item("liquids_bag", language)])
+        items.update([get_item("neck_pillow", language), get_item("earplugs", language), get_item("powerbank_hand", language), get_item("liquids_bag", language), get_item("eye_mask", language)])
     elif transport == "train":
-        items.update([get_item("slippers_train", language), get_item("mug", language), get_item("powerbank", language), get_item("clothes_train", language), get_item("wipes", language)])
+        items.update([get_item("slippers_train", language), get_item("mug", language), get_item("powerbank", language), get_item("clothes_train", language), get_item("wipes", language), get_item("eye_mask", language)])
     elif transport == "car":
         items.update([get_item("license", language), get_item("car_charger", language), get_item("snacks_water", language), get_item("playlist", language), get_item("sunglasses_driver", language)])
     elif transport == "bus":
-        items.update([get_item("neck_pillow", language), get_item("earplugs", language), get_item("snacks_water", language), get_item("wipes", language)])
+        items.update([get_item("neck_pillow", language), get_item("earplugs", language), get_item("snacks_water", language), get_item("wipes", language), get_item("eye_mask", language)])
 
-    # Basic items based on categories logic (simplified/deduplicated logic from categories map)
-    # We will return the raw set of items, and let the caller categorize if needed, or better yet, category logic should be here too?
-    # Actually, the caller re-categorizes everything. So we just need to return `items` set, plus weather info.
-    
-    # ... Wait, the category mapping in `generate_list` had logic for clothes based on temp.
-    # We need that logic here.
-    
+    # ========== TEMPERATURE-BASED CLOTHING ==========
     min_temp = min(daily_data[d]["temp_min"] for d in daily_data) if daily_data else 15
     max_temp = max(daily_data[d]["temp_max"] for d in daily_data) if daily_data else 20
     
-    if min_temp < 0:
+    if min_temp < -10:
+        # Extreme cold
+        items.update([get_item("jacket_warm", language), get_item("hat", language), get_item("scarf", language), get_item("gloves", language), get_item("thermo", language), get_item("boots_winter", language), get_item("socks_warm", language), get_item("hand_cream", language), get_item("chapstick", language)])
+    elif min_temp < 0:
+        # Cold
         items.update([get_item("jacket_warm", language), get_item("hat", language), get_item("scarf", language), get_item("gloves", language), get_item("thermo", language), get_item("boots_winter", language), get_item("socks_warm", language)])
     elif min_temp < 10:
-        items.update([get_item("jacket_light", language), get_item("sweater", language), get_item("jeans", language), get_item("sneakers", language)])
-    elif max_temp > 20:
-        items.update([get_item("tshirt", language), get_item("shorts", language), get_item("cap", language), get_item("shoes_light", language)])
+        # Cool
+        items.update([get_item("jacket_light", language), get_item("sweater", language), get_item("jeans", language), get_item("sneakers", language), get_item("hoodie", language)])
+    elif min_temp < 18:
+        # Mild
+        items.update([get_item("tshirt", language), get_item("jeans", language), get_item("sneakers", language), get_item("jacket_light", language), get_item("long_sleeve", language)])
     else:
-        items.update([get_item("tshirt", language), get_item("jeans", language), get_item("sneakers", language)])
-        
-    if any("rain" in c.lower() or "дождь" in c.lower() for c in conditions):
-        items.update([get_item("raincoat", language), get_item("shoes_waterproof", language)])
+        # Warm
+        items.update([get_item("tshirt", language), get_item("shorts", language), get_item("cap", language), get_item("shoes_light", language)])
+    
+    # Rain gear
+    if any("rain" in c.lower() or "дождь" in c.lower() or "ливень" in c.lower() or "морось" in c.lower() for c in conditions):
+        items.update([get_item("raincoat", language), get_item("umbrella", language)])
     if max_temp > 22:
-        items.update([get_item("sunglasses", language), get_item("cap", language)])
+        items.update([get_item("sunglasses", language), get_item("cap", language), get_item("sunscreen", language)])
     if max_temp > 20:
         items.add(get_item("water_bottle", language))
+    
+    # Temperature range is large (>15°C difference) — need layers
+    if daily_data and (max_temp - min_temp) > 15:
+        items.update([get_item("hoodie", language), get_item("long_sleeve", language)])
         
+    # ========== PET ITEMS ==========
     if traveling_with_pet:
         items.update([get_item("vet_passport", language), get_item("pet_food", language), get_item("pet_bowl", language), get_item("leash", language), get_item("pet_pads", language), get_item("pet_toy", language)])
 
+    # ========== TRIP TYPE ITEMS ==========
     if trip_type == "business":
-        items.update([get_item("suit", language), get_item("shirts", language), get_item("shoes_formal", language), get_item("laptop", language), get_item("business_cards", language)])
+        items.update([get_item("suit", language), get_item("shirts", language), get_item("shoes_formal", language), get_item("laptop", language), get_item("business_cards", language), get_item("perfume", language)])
     elif trip_type == "active":
-        items.update([get_item("sportswear", language), get_item("sneakers", language), get_item("backpack_walk", language), get_item("water_bottle", language)])
+        items.update([get_item("sportswear", language), get_item("sneakers", language), get_item("backpack_walk", language), get_item("water_bottle", language), get_item("first_aid_kit", language), get_item("motion_sickness", language)])
     elif trip_type == "beach":
-        items.update([get_item("swimsuit", language), get_item("pareo", language), get_item("flipflops", language), get_item("beach_towel", language), get_item("after_sun", language), get_item("beach_bag", language), get_item("sunscreen", language)])
+        items.update([get_item("swimsuit", language), get_item("pareo", language), get_item("flipflops", language), get_item("beach_towel", language), get_item("after_sun", language), get_item("beach_bag", language), get_item("sunscreen_50", language)])
     elif trip_type == "winter":
-        items.update([get_item("ski_suit", language), get_item("thermo", language), get_item("fleece", language), get_item("mittens", language), get_item("goggles", language), get_item("wind_cream", language)])
+        items.update([get_item("ski_suit", language), get_item("thermo", language), get_item("fleece", language), get_item("mittens", language), get_item("goggles", language), get_item("wind_cream", language), get_item("hand_cream", language), get_item("chapstick", language)])
+    elif trip_type == "family":
+        items.update([get_item("baby_food", language), get_item("diapers", language), get_item("baby_wipes", language), get_item("stroller", language), get_item("kids_toys", language), get_item("kids_clothes", language), get_item("child_meds", language), get_item("baby_sunscreen", language), get_item("sippy_cup", language), get_item("snacks_water", language)])
+    elif trip_type == "romantic":
+        items.update([get_item("fancy_outfit", language), get_item("perfume", language)])
+        if gender == "female":
+            items.update([get_item("heels", language), get_item("jewelry", language)])
+    elif trip_type == "camping":
+        items.update([get_item("tent", language), get_item("sleeping_bag", language), get_item("sleeping_pad", language), get_item("camp_stove", language), get_item("camping_cookware", language), get_item("multitool", language), get_item("matches", language), get_item("headlamp", language), get_item("bug_net", language), get_item("trash_bags", language), get_item("rope", language), get_item("dry_bag", language), get_item("flashlight", language), get_item("first_aid_kit", language)])
+    elif trip_type == "city_break":
+        items.update([get_item("comfy_shoes", language), get_item("city_backpack", language), get_item("portable_charger", language), get_item("guidebook", language), get_item("camera", language)])
+
+    # ========== REGIONAL RECOMMENDATIONS ==========
+    # Tropical countries — insect protection
+    tropical_countries = ["TH", "VN", "KH", "LA", "MM", "ID", "MY", "PH", "IN", "LK", "MV", "BR", "CO", "MX", "CR", "CU", "KE", "TZ", "NG"]
+    if country in tropical_countries:
+        items.update([get_item("insect_spray", language), get_item("bite_cream", language), get_item("diarrhea_meds", language), get_item("sunscreen_50", language)])
+
+    # Muslim / conservative regions — modest clothing
+    conservative_countries = ["SA", "AE", "QA", "OM", "KW", "BH", "IR", "EG", "JO", "MA"]
+    if country in conservative_countries:
+        items.update([get_item("closed_clothing", language), get_item("head_covering", language)])
+
+    # Asian temples
+    temple_countries = ["TH", "KH", "LA", "MM", "IN", "LK", "JP", "CN"]
+    if country in temple_countries:
+        items.add(get_item("closed_clothing", language))
+
+    # Non-slavic countries — phrasebook
+    non_russian_speaking = country not in ["RU", "BY", "KZ", "KG", "UA", "MD"]
+    if non_russian_speaking and country:
+        items.add(get_item("phrasebook", language))
+
+    # 110V countries — voltage converter
+    voltage_110_countries = ["US", "CA", "MX", "JP", "CO", "BR", "CU"]
+    if country in voltage_110_countries:
+        items.add(get_item("converter_110v", language))
 
     # Visa/Adapter logic
-    visa_countries = ["FR", "DE", "IT", "ES", "GB", "US", "CN", "JP", "TR", "EG", "TH", "IN"] # Shortened list for brevity, ideally reuse full list
+    visa_countries = ["FR", "DE", "IT", "ES", "GB", "US", "CN", "JP", "TR", "EG", "TH", "IN", "AU", "NZ", "BR", "CA"]
     if country in visa_countries:
         items.add(get_item("visa", language))
     
-    adapter_countries = ["US", "GB", "AU", "JP", "CN", "CH"]
+    adapter_countries = ["US", "GB", "AU", "JP", "CN", "CH", "IN", "BR", "ZA"]
     if country in adapter_countries:
         items.add(get_item("adapter", language))
 
@@ -1950,6 +2339,38 @@ async def create_checklist_from_items(db, items, city, start_date, end_date, avg
         transports=checklist.transports,
         daily_forecast=daily_forecast
     )
+
+# ==================== AI ASSISTANT ====================
+
+class AIAskRequest(BaseModel):
+    city: str
+    question: str
+    language: str = "ru"
+    start_date: str = ""
+    end_date: str = ""
+    avg_temp: Optional[float] = None
+    trip_type: str = "vacation"
+
+@app.post("/ai/ask")
+async def ai_ask(data: AIAskRequest):
+    """AI-ассистент для путешествий"""
+    from ai_service import ask_travel_ai
+    result = await ask_travel_ai(
+        city=data.city,
+        question=data.question,
+        language=data.language,
+        start_date=data.start_date,
+        end_date=data.end_date,
+        avg_temp=data.avg_temp,
+        trip_type=data.trip_type,
+    )
+    return result
+
+@app.get("/ai/suggestions")
+async def ai_suggestions(language: str = "ru"):
+    """Получить предложенные вопросы для AI-чата"""
+    from ai_service import get_suggestions
+    return {"suggestions": get_suggestions(language)}
 
 @app.post("/generate-packing-list", response_model=ChecklistResponse)
 async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db), current_user=Depends(get_current_user)):

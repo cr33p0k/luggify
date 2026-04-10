@@ -1,12 +1,19 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useEffectEvent } from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
 import CitySelect from "./CitySelect";
 import DateRangePicker from "./DateRangePicker";
 import AuthModal from "./AuthModal";
 import ProfilePage from "./ProfilePage";
-
+import {
+  PlaneIcon, TrainIcon, CarIcon, BusIcon, MaleIcon, FemaleIcon, UnisexIcon,
+  VacationIcon, BusinessIcon, ActiveIcon, BeachIcon, WinterIcon, PetIcon,
+  AllergyIcon, MedsIcon, CalendarIcon, PrintIcon, SparkleIcon, WeatherIcon, UVIcon, LockIcon, UnlockIcon, EyeIcon,
+  ClockIcon, DropletIcon, WindIcon, TentIcon, BackpackIcon, HotelIcon, MuseumIcon, SmartphoneIcon, GlobeIcon
+} from './Icons';
 import "./App.css";
 import "./AuthModal.css";
+import AIChatWidget from "./AIChatWidget";
+import "./AIChatWidget.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 import { TRANSLATIONS, formatDuration, pluralize } from "./i18n";
@@ -16,18 +23,18 @@ const NotificationBell = ({ authHeaders, lang, navigate }) => {
   const [isOpen, setIsOpen] = useState(false);
   const unreadCount = notifications.filter(n => !n.is_read).length;
 
-  const fetchNotifications = () => {
+  const fetchNotifications = useEffectEvent(() => {
     fetch(`${API_URL}/notifications`, { headers: authHeaders })
       .then(r => r.ok ? r.json() : [])
       .then(setNotifications)
       .catch(e => console.error("Error fetching notifications:", e));
-  };
+  });
 
   useEffect(() => {
     fetchNotifications();
-    const timer = setInterval(fetchNotifications, 30000);
+    const timer = setInterval(() => fetchNotifications(), 30000);
     return () => clearInterval(timer);
-  }, []);
+  }, [authHeaders.Authorization, fetchNotifications]);
 
   const markRead = async (id, link) => {
     try {
@@ -66,17 +73,44 @@ const NotificationBell = ({ authHeaders, lang, navigate }) => {
           setIsOpen(false);
         }
       }
-      
+
       // Always mark as read
       await fetch(`${API_URL}/notifications/${notif.id}/read`, {
         method: "PATCH",
         headers: authHeaders
       });
       setNotifications(prev => prev.map(n => n.id === notif.id ? { ...n, is_read: true } : n));
-      
+
       if (action === 'decline') {
         // Just refresh if we declined to update unread count locally
         fetchNotifications();
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleFollowRequestAction = async (e, notif, action) => {
+    e.stopPropagation();
+    const requestId = notif.extra_data?.request_id;
+    if (!requestId) return;
+
+    try {
+      const res = await fetch(`${API_URL}/follow-requests/${requestId}/${action}`, {
+        method: "POST",
+        headers: authHeaders
+      });
+      if (res.ok) {
+        // Mark notification as read
+        await fetch(`${API_URL}/notifications/${notif.id}/read`, {
+          method: "PATCH",
+          headers: authHeaders
+        });
+        setNotifications(prev => prev.map(n =>
+          n.id === notif.id
+            ? { ...n, is_read: true, _handled: action }
+            : n
+        ));
       }
     } catch (err) {
       console.error(err);
@@ -94,14 +128,14 @@ const NotificationBell = ({ authHeaders, lang, navigate }) => {
   return (
     <div className="notification-bell-container">
       <button className="bell-btn" onClick={() => setIsOpen(!isOpen)}>
-        <svg 
-          width="20" 
-          height="20" 
-          viewBox="0 0 24 24" 
-          fill="none" 
-          stroke="currentColor" 
-          strokeWidth="2.5" 
-          strokeLinecap="round" 
+        <svg
+          width="20"
+          height="20"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
           strokeLinejoin="round"
           className="bell-svg"
         >
@@ -116,8 +150,8 @@ const NotificationBell = ({ authHeaders, lang, navigate }) => {
           <div className="notif-header">
             <span>{lang === 'ru' ? 'Уведомления' : 'Notifications'}</span>
             {notifications.length > 0 && (
-              <button 
-                className={`mark-all-btn ${unreadCount > 0 ? 'has-unread' : 'all-read'}`} 
+              <button
+                className={`mark-all-btn ${unreadCount > 0 ? 'has-unread' : 'all-read'}`}
                 onClick={markAllRead}
                 title={lang === 'ru' ? 'Прочитать всё' : 'Mark all read'}
               >
@@ -130,26 +164,51 @@ const NotificationBell = ({ authHeaders, lang, navigate }) => {
           </div>
           <div className="notif-list">
             {notifications.length > 0 ? notifications.map(n => (
-              <div 
-                key={n.id} 
+              <div
+                key={n.id}
                 className={`notif-item ${!n.is_read ? 'unread' : ''}`}
-                onClick={() => n.type !== 'checklist_invitation' && markRead(n.id, n.link)}
+                onClick={() => (n.type !== 'checklist_invitation' && n.type !== 'follow_request') && markRead(n.id, n.link)}
               >
                 <div className="notif-content">{n.content}</div>
                 {n.type === 'checklist_invitation' && !n.is_read && (
                   <div className="notif-actions">
-                    <button 
+                    <button
                       className="notif-action-btn accept"
                       onClick={(e) => handleInviteAction(e, n, 'accept')}
                     >
                       {lang === 'ru' ? 'Принять' : 'Accept'}
                     </button>
-                    <button 
+                    <button
                       className="notif-action-btn decline"
                       onClick={(e) => handleInviteAction(e, n, 'decline')}
                     >
                       {lang === 'ru' ? 'Отклонить' : 'Decline'}
                     </button>
+                  </div>
+                )}
+                {n.type === 'follow_request' && !n.is_read && !n._handled && (
+                  <div className="notif-actions">
+                    <button
+                      className="notif-action-btn accept"
+                      onClick={(e) => handleFollowRequestAction(e, n, 'accept')}
+                    >
+                      {lang === 'ru' ? 'Принять' : 'Accept'}
+                    </button>
+                    <button
+                      className="notif-action-btn decline"
+                      onClick={(e) => handleFollowRequestAction(e, n, 'decline')}
+                    >
+                      {lang === 'ru' ? 'Отклонить' : 'Decline'}
+                    </button>
+                  </div>
+                )}
+                {n.type === 'follow_request' && n._handled && (
+                  <div className="notif-actions">
+                    <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                      {n._handled === 'accept'
+                        ? (lang === 'ru' ? '✓ Принято' : '✓ Accepted')
+                        : (lang === 'ru' ? '✗ Отклонено' : '✗ Declined')}
+                    </span>
                   </div>
                 )}
                 <div className="notif-time">
@@ -209,7 +268,7 @@ const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
                   <div className="attraction-name">{a.name}</div>
                 </div>
               </a>
-              <div 
+              <div
                 className={`attraction-map-btn ${expandedMap === i ? 'active' : ''}`}
                 onClick={() => setExpandedMap(expandedMap === i ? null : i)}
                 title={lang === 'ru' ? 'Показать на карте' : 'Show on map'}
@@ -221,17 +280,17 @@ const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
 
                 {expandedMap === i && (
                   <div className="attraction-map-popup" onClick={e => e.stopPropagation()}>
-                    <a 
-                      href={`https://yandex.ru/maps/?text=${encodeURIComponent(a.name + ' ' + city)}`} 
-                      target="_blank" 
+                    <a
+                      href={`https://yandex.ru/maps/?text=${encodeURIComponent(a.name + ' ' + city)}`}
+                      target="_blank"
                       rel="noopener noreferrer"
                       className="map-link yandex"
                     >
                       Яндекс Карты
                     </a>
-                    <a 
-                      href={a.link || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(a.name + ', ' + city)}`} 
-                      target="_blank" 
+                    <a
+                      href={a.link || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(a.name + ', ' + city)}`}
+                      target="_blank"
                       rel="noopener noreferrer"
                       className="map-link google"
                     >
@@ -249,15 +308,20 @@ const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
 });
 
 const AttractionsSection = React.memo(({ city, lang }) => {
-  if (!city) return null;
-
-  const citiesList = city.includes(" + ") ? city.split(" + ").map(c => c.trim()) : [city];
-  const [activeCity, setActiveCity] = useState(citiesList[0] || "");
+  const citiesList = city ? (city.includes(" + ") ? city.split(" + ").map(c => c.trim()) : [city]) : [];
+  const primaryCity = citiesList[0] || "";
+  const [activeCity, setActiveCity] = useState(primaryCity);
   const limit = citiesList.length > 1 ? 5 : 10;
+
+  useEffect(() => {
+    setActiveCity(primaryCity);
+  }, [primaryCity]);
+
+  if (!city) return null;
 
   return (
     <div className="travel-section">
-      <h3 className="section-title">🏛 {TRANSLATIONS[lang].whatToSee}</h3>
+      <h3 className="section-title" style={{ display: 'flex', alignItems: 'center' }}><MuseumIcon /> {TRANSLATIONS[lang].whatToSee}</h3>
       {citiesList.length > 1 && (
         <div className="city-tabs">
           {citiesList.map((c, i) => (
@@ -281,7 +345,7 @@ const AttractionsSection = React.memo(({ city, lang }) => {
           rel="noopener noreferrer"
           className="flights-search-btn"
         >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
           {TRANSLATIONS[lang].showMoreAttractions || "Показать больше"}
         </a>
       </div>
@@ -319,7 +383,7 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang }
 
   return (
     <div className="travel-section">
-      <h3 className="section-title">✈️ {t.flightsTitle}</h3>
+      <h3 className="section-title" style={{ display: 'flex', alignItems: 'center' }}><PlaneIcon /> {t.flightsTitle}</h3>
       {loading ? (
         <div className="loading-spinner-wrap">
           <div className="loading-spinner" />
@@ -346,9 +410,9 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang }
                           </div>
                         )}
                         <div className="flight-info">
-                          {f.airline && <span>✈ {f.airline}</span>}
+                          {f.airline && <span style={{ display: 'inline-flex', alignItems: 'center' }}><PlaneIcon style={{ width: '16px', height: '16px', marginRight: '4px', marginTop: '-2px' }} /> {f.airline}</span>}
                           <span>{f.transfers === 0 ? t.directFlight : pluralize(f.transfers, ['пересадка', 'пересадки', 'пересадок'], ['stop', 'stops'], lang)}</span>
-                          {f.duration > 0 && <span>⏱ {formatDuration(f.duration, lang)}</span>}
+                          {f.duration > 0 && <span style={{ display: 'inline-flex', alignItems: 'center' }}><ClockIcon style={{ width: '16px', height: '16px', marginRight: '4px', marginTop: '-1px' }} /> {formatDuration(f.duration, lang)}</span>}
                         </div>
                       </a>
                     ))}
@@ -372,9 +436,9 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang }
                           </div>
                         )}
                         <div className="flight-info">
-                          {f.airline && <span>✈ {f.airline}</span>}
+                          {f.airline && <span style={{ display: 'inline-flex', alignItems: 'center' }}><PlaneIcon style={{ width: '16px', height: '16px', marginRight: '4px', marginTop: '-2px' }} /> {f.airline}</span>}
                           <span>{f.transfers === 0 ? t.directFlight : pluralize(f.transfers, ['пересадка', 'пересадки', 'пересадок'], ['stop', 'stops'], lang)}</span>
-                          {f.duration > 0 && <span>⏱ {formatDuration(f.duration, lang)}</span>}
+                          {f.duration > 0 && <span style={{ display: 'inline-flex', alignItems: 'center' }}><ClockIcon style={{ width: '16px', height: '16px', marginRight: '4px', marginTop: '-1px' }} /> {formatDuration(f.duration, lang)}</span>}
                         </div>
                       </a>
                     ))}
@@ -404,7 +468,8 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang }
 
 const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
   const citiesList = city ? city.split("+").map(c => c.trim()) : [];
-  const [activeCity, setActiveCity] = useState(citiesList[0] || "");
+  const primaryCity = citiesList[0] || "";
+  const [activeCity, setActiveCity] = useState(primaryCity);
 
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -450,6 +515,10 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
   const bookingDirectLink = activeCity ? `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(activeCity.split(",")[0].trim())}${startDate ? `&checkin=${startDate}` : ""}${endDate ? `&checkout=${endDate}` : ""}&group_adults=${adults}${childrenQuery}&no_rooms=1` : "#";
 
   useEffect(() => {
+    setActiveCity(primaryCity);
+  }, [primaryCity]);
+
+  useEffect(() => {
     if (!activeCity) return;
     setTriggered(false);
     setData([]);
@@ -467,7 +536,7 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
 
   return (
     <div className="travel-section">
-      <h3 className="section-title">🏨 {t.hotelsTitle}</h3>
+      <h3 className="section-title" style={{ display: 'flex', alignItems: 'center' }}><HotelIcon /> {t.hotelsTitle}</h3>
       {citiesList.length > 1 && (
         <div className="city-tabs">
           {citiesList.map((c, i) => (
@@ -490,83 +559,83 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
       )}
       <div className="hotels-filter-wrap">
         <div className="guest-selector-container">
-            <button className="guest-selector-toggle" onClick={() => setShowGuestMenu(!showGuestMenu)}>
-              <span>👥 {adults} {t.adults.toLowerCase()}{childrenAges.length > 0 ? `, ${childrenAges.length} ${t.children.toLowerCase()}` : ""}</span>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: showGuestMenu ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}><polyline points="6 9 12 15 18 9"></polyline></svg>
-            </button>
-            {showGuestMenu && (
-              <div className="guest-selector-dropdown">
-                <div className="guest-row">
-                  <div className="guest-info">
-                    <span className="guest-label">{t.adults}</span>
-                  </div>
-                  <div className="guest-controls">
-                    <button onClick={() => setAdults(Math.max(1, adults - 1))} className="guest-control-btn">-</button>
-                    <span className="guest-value">{adults}</span>
-                    <button onClick={() => setAdults(adults + 1)} className="guest-control-btn">+</button>
-                  </div>
+          <button className="guest-selector-toggle" onClick={() => setShowGuestMenu(!showGuestMenu)}>
+            <span>👥 {adults} {t.adults.toLowerCase()}{childrenAges.length > 0 ? `, ${childrenAges.length} ${t.children.toLowerCase()}` : ""}</span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: showGuestMenu ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}><polyline points="6 9 12 15 18 9"></polyline></svg>
+          </button>
+          {showGuestMenu && (
+            <div className="guest-selector-dropdown">
+              <div className="guest-row">
+                <div className="guest-info">
+                  <span className="guest-label">{t.adults}</span>
                 </div>
-                <div className="guest-row">
-                  <div className="guest-info">
-                    <span className="guest-label">{t.children}</span>
-                  </div>
-                  <div className="guest-controls">
-                    <button onClick={() => setChildrenAges(childrenAges.slice(0, -1))} className="guest-control-btn" disabled={childrenAges.length === 0}>-</button>
-                    <span className="guest-value">{childrenAges.length}</span>
-                    <button onClick={() => setChildrenAges([...childrenAges, 7])} className="guest-control-btn">+</button>
-                  </div>
+                <div className="guest-controls">
+                  <button onClick={() => setAdults(Math.max(1, adults - 1))} className="guest-control-btn">-</button>
+                  <span className="guest-value">{adults}</span>
+                  <button onClick={() => setAdults(adults + 1)} className="guest-control-btn">+</button>
                 </div>
-                {childrenAges.length > 0 && (
-                  <div className="children-ages-wrap">
-                    {childrenAges.map((age, idx) => (
-                      <div key={idx} className="child-age-row">
-                        <span className="child-age-label">{t.childAge} {idx + 1}</span>
-                        <select 
-                          value={age} 
-                          onChange={(e) => {
-                            const newAges = [...childrenAges];
-                            newAges[idx] = parseInt(e.target.value, 10);
-                            setChildrenAges(newAges);
-                          }}
-                          className="child-age-select"
-                        >
-                          {[...Array(18)].map((_, i) => (
-                            <option key={i} value={i}>{i}</option>
-                          ))}
-                        </select>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <button className="guest-done-btn" onClick={() => {
-                  setShowGuestMenu(false);
-                  if (triggered) doFetch();
-                }}>{t.doneBtn}</button>
               </div>
-            )}
-          </div>
-          <div className="hotels-buttons-row">
-            {!triggered && (
-              <button className="flights-search-btn" onClick={doFetch}>
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-                  <polyline points="9 22 9 12 15 12 15 22" />
-                </svg>
-                {t.showHotels}
-              </button>
-            )}
-            {!isRussia && (
-              <a href={bookingDirectLink} target="_blank" rel="noopener noreferrer" className="booking-secondary-btn" title={t.searchDirectlyBooking}>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-                  <polyline points="15 3 21 3 21 9"></polyline>
-                  <line x1="10" y1="14" x2="21" y2="3"></line>
-                </svg>
-                {t.goToBooking}
-              </a>
-            )}
-          </div>
+              <div className="guest-row">
+                <div className="guest-info">
+                  <span className="guest-label">{t.children}</span>
+                </div>
+                <div className="guest-controls">
+                  <button onClick={() => setChildrenAges(childrenAges.slice(0, -1))} className="guest-control-btn" disabled={childrenAges.length === 0}>-</button>
+                  <span className="guest-value">{childrenAges.length}</span>
+                  <button onClick={() => setChildrenAges([...childrenAges, 7])} className="guest-control-btn">+</button>
+                </div>
+              </div>
+              {childrenAges.length > 0 && (
+                <div className="children-ages-wrap">
+                  {childrenAges.map((age, idx) => (
+                    <div key={idx} className="child-age-row">
+                      <span className="child-age-label">{t.childAge} {idx + 1}</span>
+                      <select
+                        value={age}
+                        onChange={(e) => {
+                          const newAges = [...childrenAges];
+                          newAges[idx] = parseInt(e.target.value, 10);
+                          setChildrenAges(newAges);
+                        }}
+                        className="child-age-select"
+                      >
+                        {[...Array(18)].map((_, i) => (
+                          <option key={i} value={i}>{i}</option>
+                        ))}
+                      </select>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <button className="guest-done-btn" onClick={() => {
+                setShowGuestMenu(false);
+                if (triggered) doFetch();
+              }}>{t.doneBtn}</button>
+            </div>
+          )}
         </div>
+        <div className="hotels-buttons-row">
+          {!triggered && (
+            <button className="flights-search-btn" onClick={doFetch}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                <polyline points="9 22 9 12 15 12 15 22" />
+              </svg>
+              {t.showHotels}
+            </button>
+          )}
+          {!isRussia && (
+            <a href={bookingDirectLink} target="_blank" rel="noopener noreferrer" className="booking-secondary-btn" title={t.searchDirectlyBooking}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
+                <polyline points="15 3 21 3 21 9"></polyline>
+                <line x1="10" y1="14" x2="21" y2="3"></line>
+              </svg>
+              {t.goToBooking}
+            </a>
+          )}
+        </div>
+      </div>
       {loading ? (
         <div className="loading-spinner-wrap">
           <div className="loading-spinner" />
@@ -579,7 +648,7 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
           </div>
           <div className="ru-widgets-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
             <a href={links.ostrovok} target="_blank" rel="noopener noreferrer" className="ru-widget-card" style={{ background: "#1a1a1a", border: "1px solid #333", borderRadius: "12px", padding: "1.5rem", display: "flex", flexDirection: "column", alignItems: "center", textDecoration: "none", transition: "transform 0.2s, border-color 0.2s" }}>
-              <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>🏨</div>
+              <div style={{ fontSize: "2rem", marginBottom: "0.5rem", display: "flex", justifyContent: "center" }}><HotelIcon style={{ width: '32px', height: '32px' }} /></div>
               <h4 style={{ color: "white", margin: "0 0 0.5rem 0" }}>Ostrovok.ru</h4>
               <p style={{ color: "#9ca3af", fontSize: "0.85rem", textAlign: "center", margin: 0 }}>Более миллиона отелей и апартаментов по всей России</p>
               <div style={{ background: "var(--orange)", color: "white", padding: "0.5rem 1rem", borderRadius: "6px", fontSize: "0.85rem", fontWeight: "bold", marginTop: "1rem", width: "100%", textAlign: "center" }}>Поиск на Ostrovok</div>
@@ -603,7 +672,7 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
               {h.image ? (
                 <img src={h.image} alt={h.name} className="hotel-img" loading="lazy" />
               ) : (
-                <div className="hotel-img-placeholder">🏨</div>
+                <div className="hotel-img-placeholder" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}><HotelIcon style={{ width: '32px', height: '32px', color: 'var(--text-secondary)' }} /></div>
               )}
               <div className="hotel-body">
                 <div className="hotel-name">{h.name}</div>
@@ -668,7 +737,7 @@ const EsimSection = React.memo(({ city, lang }) => {
 
   return (
     <div className="travel-section">
-      <h3 className="section-title">📱 {t.esimTitle}</h3>
+      <h3 className="section-title" style={{ display: 'flex', alignItems: 'center' }}><SmartphoneIcon /> {t.esimTitle}</h3>
       {citiesList.length > 1 && (
         <div className="city-tabs">
           {citiesList.map((c, i) => (
@@ -690,7 +759,7 @@ const EsimSection = React.memo(({ city, lang }) => {
         <div className="esim-content">
           {data ? (
             <div className="esim-card">
-              <div className="esim-icon">📱</div>
+              <div className="esim-icon" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}><SmartphoneIcon style={{ width: '32px', height: '32px' }} /></div>
               <div className="esim-details">
                 <div className="esim-country">{data.country}</div>
                 <div className="esim-provider">
@@ -710,7 +779,7 @@ const EsimSection = React.memo(({ city, lang }) => {
           ) : (
             browseLink && (
               <div className="esim-card esim-generic">
-                <div className="esim-icon">🌍</div>
+                <div className="esim-icon" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}><GlobeIcon style={{ width: '32px', height: '32px' }} /></div>
                 <div className="esim-details">
                   <div className="esim-description">
                     {t.esimDescBrowse}
@@ -837,16 +906,16 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
     <div className={`forecast-section ${!showItinerary ? 'collapsed' : ''}`}>
       <div className="forecast-header">
         <div className="forecast-header-left" onClick={() => setShowItinerary(!showItinerary)}>
-          <h3><span>📅 {t.itineraryTitle || "План поездки"}</span></h3>
+          <h3><span style={{ display: 'flex', alignItems: 'center' }}><CalendarIcon /> {t.itineraryTitle || "План поездки"}</span></h3>
         </div>
         <div className="forecast-header-actions">
           {realOwnerId === currentUserId && (
-            <span 
+            <span
               className={`section-visibility-toggle ${hiddenSections?.includes('itinerary') ? 'hidden' : 'visible'}`}
               onClick={(e) => { e.stopPropagation(); onToggleVisibility('itinerary'); }}
               title={hiddenSections?.includes('itinerary') ? 'План скрыт от других' : 'План виден всем'}
             >
-              {hiddenSections?.includes('itinerary') ? '🔒' : '🔓'}
+              {hiddenSections?.includes('itinerary') ? <LockIcon style={{ marginRight: 0 }} /> : <UnlockIcon style={{ marginRight: 0 }} />}
             </span>
           )}
           <button className="collapse-toggle" onClick={() => setShowItinerary(!showItinerary)}>
@@ -860,7 +929,7 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
           <div className="itinerary-timeline">
             {days.map((d, index) => {
               const dStr = d.toISOString().split("T")[0];
-              const hasEvents = events.filter(e => e.event_date === dStr).sort((a, b) => (a.time||"").localeCompare(b.time||""));
+              const hasEvents = events.filter(e => e.event_date === dStr).sort((a, b) => (a.time || "").localeCompare(b.time || ""));
               const isAdding = addingDay === dStr;
 
               return (
@@ -868,10 +937,10 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
                   <div className="itinerary-day-header">
                     <strong>{t.dayRoute} {index + 1}</strong>
                     <span className="itinerary-day-date">
-                       • {d.toLocaleDateString(lang === "en" ? "en-US" : "ru-RU", { weekday: 'short', month: 'short', day: 'numeric' })}
+                      • {d.toLocaleDateString(lang === "en" ? "en-US" : "ru-RU", { weekday: 'short', month: 'short', day: 'numeric' })}
                     </span>
                   </div>
-                  
+
                   <div className="itinerary-events-list">
                     {hasEvents.length === 0 && !isAdding && (
                       <div className="itinerary-empty">{t.noEvents}</div>
@@ -880,13 +949,13 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
                       <div key={ev.id} className="itinerary-event-card">
                         {editingEvent === ev.id ? (
                           /* === Edit Mode === */
-                          <div className="itinerary-form" style={{flex:1}}>
+                          <div className="itinerary-form" style={{ flex: 1 }}>
                             <div className="itinerary-form-row">
-                              <input type="time" value={editData.time || ""} onChange={e => setEditData({...editData, time: e.target.value})} />
-                              <input type="text" value={editData.title} onChange={e => setEditData({...editData, title: e.target.value})} placeholder={t.eventTitlePlaceholder} autoFocus />
+                              <input type="time" value={editData.time || ""} onChange={e => setEditData({ ...editData, time: e.target.value })} />
+                              <input type="text" value={editData.title} onChange={e => setEditData({ ...editData, title: e.target.value })} placeholder={t.eventTitlePlaceholder} autoFocus />
                             </div>
-                            <input type="text" className="full-w" value={editData.description || ""} onChange={e => setEditData({...editData, description: e.target.value})} placeholder={t.eventDescPlaceholder} />
-                            <input type="text" className="full-w" value={editData.address || ""} onChange={e => setEditData({...editData, address: e.target.value})} placeholder={lang === "ru" ? "📍 Адрес" : "📍 Address"} />
+                            <input type="text" className="full-w" value={editData.description || ""} onChange={e => setEditData({ ...editData, description: e.target.value })} placeholder={t.eventDescPlaceholder} />
+                            <input type="text" className="full-w" value={editData.address || ""} onChange={e => setEditData({ ...editData, address: e.target.value })} placeholder={lang === "ru" ? "📍 Адрес" : "📍 Address"} />
                             <div className="itinerary-form-actions">
                               <button className="action-btn primary" onClick={() => handleEditSubmit(ev.id)} disabled={loading}>{t.saveEventBtn}</button>
                               <button className="action-btn" onClick={() => setEditingEvent(null)}>{t.cancel}</button>
@@ -901,8 +970,8 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
                               {ev.description && <div className="itinerary-event-desc">{ev.description}</div>}
                               {ev.address && (
                                 <div className="itinerary-event-address">
-                                  <span 
-                                    className="address-link" 
+                                  <span
+                                    className="address-link"
                                     onClick={(e) => { e.stopPropagation(); setExpandedAddress(expandedAddress === ev.id ? null : ev.id); }}
                                   >
                                     📍 {ev.address}
@@ -936,43 +1005,43 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
                           </button>
                         ) : (
                           <div className="itinerary-form">
-                             <div className="itinerary-form-row">
-                                <input 
-                                   type="time" 
-                                   value={newEvent.time} 
-                                   onChange={e => setNewEvent({...newEvent, time: e.target.value})} 
-                                   title={t.eventTimePlaceholder}
-                                />
-                                <input 
-                                   type="text" 
-                                   value={newEvent.title}
-                                   onChange={e => setNewEvent({...newEvent, title: e.target.value})} 
-                                   placeholder={t.eventTitlePlaceholder}
-                                   autoFocus
-                                />
-                             </div>
-                             <input 
-                                type="text" 
-                                className="full-w"
-                                value={newEvent.description}
-                                onChange={e => setNewEvent({...newEvent, description: e.target.value})} 
-                                placeholder={t.eventDescPlaceholder}
-                             />
-                             <input 
-                                type="text" 
-                                className="full-w"
-                                value={newEvent.address}
-                                onChange={e => setNewEvent({...newEvent, address: e.target.value})} 
-                                placeholder={lang === "ru" ? "📍 Адрес (необязательно)" : "📍 Address (optional)"}
-                             />
-                             <div className="itinerary-form-actions">
-                               <button className="action-btn primary" onClick={() => handleAddSubmit(dStr)} disabled={loading}>
-                                 {t.saveEventBtn}
-                               </button>
-                               <button className="action-btn" onClick={() => { setAddingDay(null); setNewEvent({ time:"", title:"", description:"", address:""}); }}>
-                                 {t.cancel}
-                               </button>
-                             </div>
+                            <div className="itinerary-form-row">
+                              <input
+                                type="time"
+                                value={newEvent.time}
+                                onChange={e => setNewEvent({ ...newEvent, time: e.target.value })}
+                                title={t.eventTimePlaceholder}
+                              />
+                              <input
+                                type="text"
+                                value={newEvent.title}
+                                onChange={e => setNewEvent({ ...newEvent, title: e.target.value })}
+                                placeholder={t.eventTitlePlaceholder}
+                                autoFocus
+                              />
+                            </div>
+                            <input
+                              type="text"
+                              className="full-w"
+                              value={newEvent.description}
+                              onChange={e => setNewEvent({ ...newEvent, description: e.target.value })}
+                              placeholder={t.eventDescPlaceholder}
+                            />
+                            <input
+                              type="text"
+                              className="full-w"
+                              value={newEvent.address}
+                              onChange={e => setNewEvent({ ...newEvent, address: e.target.value })}
+                              placeholder={lang === "ru" ? "📍 Адрес (необязательно)" : "📍 Address (optional)"}
+                            />
+                            <div className="itinerary-form-actions">
+                              <button className="action-btn primary" onClick={() => handleAddSubmit(dStr)} disabled={loading}>
+                                {t.saveEventBtn}
+                              </button>
+                              <button className="action-btn" onClick={() => { setAddingDay(null); setNewEvent({ time: "", title: "", description: "", address: "" }); }}>
+                                {t.cancel}
+                              </button>
+                            </div>
                           </div>
                         )}
                       </div>
@@ -1030,9 +1099,13 @@ const App = ({ page }) => {
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [inviteToken, setInviteToken] = useState("");
   const [followers, setFollowers] = useState([]);
+  const [viewportWidth, setViewportWidth] = useState(() =>
+    typeof window === "undefined" ? 1280 : window.innerWidth
+  );
 
   // Computed: can current user edit this checklist?
   const isOwnerOrCollaborator = user && result && (result.user_id === user.id || (result.backpacks && result.backpacks.some(b => b.user_id === user.id)));
+  const checklistColumns = viewportWidth <= 600 ? 1 : viewportWidth <= 900 ? 2 : 3;
 
   const handleAuth = (userData, accessToken) => {
     setUser(userData);
@@ -1046,6 +1119,16 @@ const App = ({ page }) => {
       localStorage.setItem("user", JSON.stringify(user));
     }
   }, [user]);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setViewportWidth(window.innerWidth);
+    };
+
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   const handleLogout = () => {
     setUser(null);
@@ -1097,7 +1180,7 @@ const App = ({ page }) => {
         setActiveTab(myBp.id.toString());
       }
     }
-  }, [result?.backpacks, user]);
+  }, [activeTab, result, user]);
 
   // Сохраняем отмеченные в localStorage при изменении
   useEffect(() => {
@@ -1203,25 +1286,8 @@ const App = ({ page }) => {
 
       setResult(data);
       setSavedSlug(data.slug || null);
-    } catch (e) {
+    } catch {
       setError("Ошибка при запросе к серверу");
-    }
-  };
-
-  const [saveMsg, setSaveMsg] = useState(null);
-
-  const handleSaveToAccount = async () => {
-    if (!user || !token) {
-      setShowAuth(true);
-      return;
-    }
-    setSaveMsg(null);
-    try {
-      // Чеклист уже сохранён на сервере при генерации, просто показываем подтверждение
-      setSaveMsg("✅ Чеклист сохранён в вашем аккаунте!");
-      setTimeout(() => setSaveMsg(null), 3000);
-    } catch (e) {
-      setSaveMsg("❌ Ошибка сохранения");
     }
   };
 
@@ -1398,7 +1464,7 @@ const App = ({ page }) => {
 
   const handleToggleSectionVisibility = async (section) => {
     if (!result || result.user_id !== user?.id) return;
-    
+
     const isHidden = result.hidden_sections?.includes(section);
     let newHidden = [];
     if (isHidden) {
@@ -1460,10 +1526,10 @@ const App = ({ page }) => {
                 </div>
                 <span className="navbar-username">{user.username}</span>
               </div>
-              <NotificationBell 
-                authHeaders={authHeaders} 
-                lang={lang} 
-                navigate={navigate} 
+              <NotificationBell
+                authHeaders={authHeaders}
+                lang={lang}
+                navigate={navigate}
               />
               <button
                 className="navbar-logout-btn icon-btn"
@@ -1550,17 +1616,17 @@ const App = ({ page }) => {
                           {/* Per-destination Transport Selection */}
                           <div className="inline-transport-selector" style={{ background: "transparent", border: "none", padding: 0, gap: "2px" }}>
                             {[
-                              { id: "plane", icon: "✈️" },
-                              { id: "train", icon: "🚆" },
-                              { id: "car", icon: "🚗" },
-                              { id: "bus", icon: "🚌" },
+                              { id: "plane", icon: <PlaneIcon style={{ marginRight: 0 }} /> },
+                              { id: "train", icon: <TrainIcon style={{ marginRight: 0 }} /> },
+                              { id: "car", icon: <CarIcon style={{ marginRight: 0 }} /> },
+                              { id: "bus", icon: <BusIcon style={{ marginRight: 0 }} /> },
                             ].map(type => (
                               <button
                                 key={type.id}
                                 className={`transport-btn ${dest.transport === type.id ? "active" : ""}`}
                                 onClick={() => updateDestination(dest.id, "transport", type.id)}
                                 title={t[type.id] || type.id}
-                                style={{ padding: "4px", fontSize: "1.05rem", minWidth: "24px", opacity: dest.transport === type.id ? 1 : 0.4 }}
+                                style={{ padding: "4px", fontSize: "1.05rem", minWidth: "24px" }}
                               >
                                 {type.icon}
                               </button>
@@ -1592,10 +1658,10 @@ const App = ({ page }) => {
                       <label className="section-label" style={{ marginBottom: 0 }}>{t.returnTransport || "Обратно:"}</label>
                       <div className="inline-transport-selector">
                         {[
-                          { id: "plane", icon: "✈️" },
-                          { id: "train", icon: "🚆" },
-                          { id: "car", icon: "🚗" },
-                          { id: "bus", icon: "🚌" },
+                          { id: "plane", icon: <PlaneIcon style={{ marginRight: 0 }} /> },
+                          { id: "train", icon: <TrainIcon style={{ marginRight: 0 }} /> },
+                          { id: "car", icon: <CarIcon style={{ marginRight: 0 }} /> },
+                          { id: "bus", icon: <BusIcon style={{ marginRight: 0 }} /> },
                         ].map(type => (
                           <button
                             key={type.id}
@@ -1615,16 +1681,16 @@ const App = ({ page }) => {
                     <label className="section-label">Пол:</label>
                     <div className="trip-types">
                       {[
-                        { id: "unisex", label: t.unisex },
-                        { id: "male", label: t.male },
-                        { id: "female", label: t.female },
+                        { id: "unisex", label: t.unisex, icon: <UnisexIcon /> },
+                        { id: "male", label: t.male, icon: <MaleIcon /> },
+                        { id: "female", label: t.female, icon: <FemaleIcon /> },
                       ].map(type => (
                         <div
                           key={type.id}
                           className={`trip-type-chip ${options.gender === type.id ? "active" : ""}`}
                           onClick={() => setOptions({ ...options, gender: type.id })}
                         >
-                          {type.label}
+                          {type.icon} {type.label}
                         </div>
                       ))}
                     </div>
@@ -1634,18 +1700,18 @@ const App = ({ page }) => {
                     <label className="section-label">Тип поездки:</label>
                     <div className="trip-types">
                       {[
-                        { id: "vacation", label: t.vacation },
-                        { id: "business", label: t.business },
-                        { id: "active", label: t.active },
-                        { id: "beach", label: t.beach },
-                        { id: "winter", label: t.winter },
+                        { id: "vacation", label: t.vacation, icon: <VacationIcon /> },
+                        { id: "business", label: t.business, icon: <BusinessIcon /> },
+                        { id: "active", label: t.active, icon: <ActiveIcon /> },
+                        { id: "beach", label: t.beach, icon: <BeachIcon /> },
+                        { id: "winter", label: t.winter, icon: <WinterIcon /> },
                       ].map(type => (
                         <div
                           key={type.id}
                           className={`trip-type-chip ${options.trip_type === type.id ? "active" : ""}`}
                           onClick={() => setOptions({ ...options, trip_type: type.id })}
                         >
-                          {type.label}
+                          {type.icon} {type.label}
                         </div>
                       ))}
                     </div>
@@ -1658,7 +1724,7 @@ const App = ({ page }) => {
                         checked={options.traveling_with_pet}
                         onChange={e => setOptions({ ...options, traveling_with_pet: e.target.checked })}
                       />
-                      {t.pet}
+                      <PetIcon /> {t.pet}
                     </label>
                     <label className={`option-chip ${options.has_allergies ? "active" : ""}`}>
                       <input
@@ -1666,7 +1732,7 @@ const App = ({ page }) => {
                         checked={options.has_allergies}
                         onChange={e => setOptions({ ...options, has_allergies: e.target.checked })}
                       />
-                      {t.allergies}
+                      <AllergyIcon /> {t.allergies}
                     </label>
                     <label className={`option-chip ${options.has_chronic_diseases ? "active" : ""}`}>
                       <input
@@ -1674,7 +1740,7 @@ const App = ({ page }) => {
                         checked={options.has_chronic_diseases}
                         onChange={e => setOptions({ ...options, has_chronic_diseases: e.target.checked })}
                       />
-                      {t.meds}
+                      <MedsIcon /> {t.meds}
                     </label>
                   </div>
 
@@ -1684,7 +1750,7 @@ const App = ({ page }) => {
                       onClick={handleSubmit}
                       disabled={false}
                     >
-                      ✨ {t.generate}
+                      {t.generate}
                     </button>
                   </div>
                 </div>
@@ -1721,8 +1787,8 @@ const App = ({ page }) => {
                     </span>
                   </div>
                   {result.user_id === user?.id && (
-                    <button 
-                      className="invite-action-btn" 
+                    <button
+                      className="invite-action-btn"
                       onClick={async () => {
                         setShowInviteModal(true);
                         if (user?.username) {
@@ -1754,18 +1820,18 @@ const App = ({ page }) => {
                 {(savedSlug || id) && (result.user_id === user?.id || (result.backpacks && result.backpacks.length > 0)) && (
                   <div className="backpack-tabs-container">
                     <div className="backpack-tabs">
-                      <div 
+                      <div
                         className={`backpack-tab ${activeTab === "shared" ? "active" : ""}`}
                         onClick={() => setActiveTab("shared")}
                       >
-                        ⛺ <span className="tab-label">Общие вещи</span>
+                        <TentIcon style={{ marginRight: '6px' }} /> <span className="tab-label">Общие вещи</span>
                         {result.user_id === user?.id && (
-                          <span 
+                          <span
                             className={`tab-visibility-toggle ${result.hidden_sections?.includes('shared') ? 'hidden' : 'visible'}`}
                             onClick={(e) => { e.stopPropagation(); handleToggleSectionVisibility('shared'); }}
                             title={result.hidden_sections?.includes('shared') ? 'Скрыто от других' : 'Видно всем'}
                           >
-                            {result.hidden_sections?.includes('shared') ? '🔒' : '🔓'}
+                            {result.hidden_sections?.includes('shared') ? <LockIcon style={{ marginRight: 0 }} /> : <UnlockIcon style={{ marginRight: 0 }} />}
                           </span>
                         )}
                       </div>
@@ -1775,14 +1841,14 @@ const App = ({ page }) => {
                           className={`backpack-tab ${activeTab === bp.id.toString() ? "active" : ""}`}
                           onClick={() => setActiveTab(bp.id.toString())}
                         >
-                          🎒 <span className="tab-label">{bp.user?.username || `id:${bp.user_id}`}</span>
+                          <BackpackIcon style={{ marginRight: '6px' }} /> <span className="tab-label">{bp.user?.username || `id:${bp.user_id}`}</span>
                           {result.user_id === user?.id && (
-                            <span 
+                            <span
                               className={`tab-visibility-toggle ${result.hidden_sections?.includes(`backpack:${bp.id}`) ? 'hidden' : 'visible'}`}
                               onClick={(e) => { e.stopPropagation(); handleToggleSectionVisibility(`backpack:${bp.id}`); }}
                               title={result.hidden_sections?.includes(`backpack:${bp.id}`) ? 'Скрыто от других' : 'Видно всем'}
                             >
-                              {result.hidden_sections?.includes(`backpack:${bp.id}`) ? '🔒' : '🔓'}
+                              {result.hidden_sections?.includes(`backpack:${bp.id}`) ? <LockIcon style={{ marginRight: 0 }} /> : <UnlockIcon style={{ marginRight: 0 }} />}
                             </span>
                           )}
                         </div>
@@ -1795,39 +1861,34 @@ const App = ({ page }) => {
 
                 <div className="checklist-card">
                   {(() => {
-                    const isOwnerOrCollaborator = user && result && (result.user_id === user.id || (result.backpacks && result.backpacks.some(b => b.user_id === user.id)));
-                    const isOwner = user && result && result.user_id === user.id;
                     const isSharedHidden = !isOwnerOrCollaborator && result.hidden_sections?.includes('shared');
                     const isBackpacksHidden = !isOwnerOrCollaborator && result.hidden_sections?.includes('backpacks');
-                    
+
                     if (activeTab === 'shared' && isSharedHidden) {
-                      return <div className="section-restricted-msg">🔒 {result.user?.username || 'Владелец'} ограничил просмотр общего списка</div>;
+                      return <div className="section-restricted-msg"><LockIcon /> {result.user?.username || 'Владелец'} ограничил просмотр общего списка</div>;
                     }
                     if (activeTab !== 'shared') {
                       const isThisBpIsHidden = !isOwnerOrCollaborator && result.hidden_sections?.includes(`backpack:${activeTab}`);
                       if (isBackpacksHidden || isThisBpIsHidden) {
-                        return <div className="section-restricted-msg">🔒 {result.user?.username || 'Владелец'} ограничил просмотр этого рюкзака</div>;
+                        return <div className="section-restricted-msg"><LockIcon /> {result.user?.username || 'Владелец'} ограничил просмотр этого рюкзака</div>;
                       }
                     }
-                    
-                    const isMobile = window.innerWidth <= 600;
-                    const isTablet = window.innerWidth > 600 && window.innerWidth <= 900;
 
                     let targetItems = result.items || [];
                     let targetRemoved = removedItems;
                     let targetChecked = checkedItems;
 
                     if (activeTab !== "shared" && result.backpacks) {
-                       const bp = result.backpacks.find(b => b.id.toString() === activeTab);
-                       if (bp) {
-                         targetItems = bp.items || [];
-                         targetRemoved = bp.removed_items || [];
-                         targetChecked = (bp.checked_items || []).reduce((acc, cur) => { acc[cur] = true; return acc; }, {});
-                       }
+                      const bp = result.backpacks.find(b => b.id.toString() === activeTab);
+                      if (bp) {
+                        targetItems = bp.items || [];
+                        targetRemoved = bp.removed_items || [];
+                        targetChecked = (bp.checked_items || []).reduce((acc, cur) => { acc[cur] = true; return acc; }, {});
+                      }
                     }
 
                     let items = targetItems.filter(item => !targetRemoved.includes(item));
-                    
+
                     if (activeTab === "shared" && result.backpacks) {
                       // Filter out items that are currently in any backpack
                       const allBackpackItems = new Set();
@@ -1837,14 +1898,13 @@ const App = ({ page }) => {
                       items = items.filter(item => !allBackpackItems.has(item));
                     }
 
-                    let columns = 3;
-                    if (isTablet) columns = 2;
-                    if (isMobile) columns = 1;
-                    const perCol = Math.ceil(items.length / columns);
-                    const cols = Array.from({ length: columns }, (_, i) => items.slice(i * perCol, (i + 1) * perCol));
+                    const perCol = items.length ? Math.ceil(items.length / checklistColumns) : 0;
+                    const cols = items.length
+                      ? Array.from({ length: checklistColumns }, (_, i) => items.slice(i * perCol, (i + 1) * perCol))
+                      : [];
                     return (
                       <div className="checklist-multicolumn">
-                        {items.length === 0 && <div className="empty-state" style={{padding:"20px", color:"#888"}}>Список пуст.</div>}
+                        {items.length === 0 && <div className="empty-state" style={{ padding: "20px", color: "#888" }}>Список пуст.</div>}
                         {cols.map((col, idx) => (
                           <div className="checklist-category" key={idx}>
                             <div className="checklist">
@@ -1869,7 +1929,7 @@ const App = ({ page }) => {
                                           title="Взять себе (Перенести в рюкзак)"
                                           onClick={e => { e.preventDefault(); handleMoveToBackpack(item); }}
                                           tabIndex={-1}
-                                        >🎒</button>
+                                        ><BackpackIcon style={{ width: '16px', height: '16px', marginRight: 0 }} /></button>
                                       )}
                                       {activeTab !== "shared" && (
                                         <button
@@ -1877,7 +1937,7 @@ const App = ({ page }) => {
                                           title="Вернуть в общий список"
                                           onClick={e => { e.preventDefault(); handleMoveToShared(item, activeTab); }}
                                           tabIndex={-1}
-                                        >⛺</button>
+                                        ><TentIcon style={{ width: '16px', height: '16px', marginRight: 0 }} /></button>
                                       )}
                                       <button
                                         className="checklist-remove-btn"
@@ -1942,7 +2002,7 @@ const App = ({ page }) => {
                 {result.daily_forecast && result.daily_forecast.length > 0 && (
                   <div className={`forecast-section ${!showForecast ? 'collapsed' : ''}`}>
                     <div className="forecast-header" onClick={() => setShowForecast(!showForecast)}>
-                      <h3><span>{t.forecast}</span></h3>
+                      <h3><span style={{ display: 'flex', alignItems: 'center' }}><WeatherIcon /> {t.forecast}</span></h3>
                       <button className="collapse-toggle">
                         <span className={`chevron ${showForecast ? 'up' : ''}`}>▾</span>
                       </button>
@@ -1981,9 +2041,9 @@ const App = ({ page }) => {
                                     {day.temp_min.toFixed(1)}° / {day.temp_max.toFixed(1)}°C
                                   </div>
                                   <div className="forecast-details">
-                                    {day.humidity !== null && <span title="Влажность">💧 {day.humidity}%</span>}
-                                    {day.uv_index !== null && <span title="УФ-индекс">☀️ {day.uv_index.toFixed(0)}</span>}
-                                    {day.wind_speed !== null && <span title="Ветер">💨 {day.wind_speed.toFixed(0)} {t.kmh}</span>}
+                                    {day.humidity != null && <span title="Влажность" style={{ display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap' }}><DropletIcon style={{ width: '14px', height: '14px', marginRight: '3px' }} /> {day.humidity}%</span>}
+                                    {day.uv_index != null && <span title="УФ-индекс" style={{ display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap' }}><UVIcon style={{ width: '14px', height: '14px', marginRight: '3px' }} /> {day.uv_index.toFixed(0)}</span>}
+                                    {day.wind_speed != null && <span title="Ветер" style={{ display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap' }}><WindIcon style={{ width: '14px', height: '14px', marginRight: '3px' }} /> {day.wind_speed.toFixed(0)} {t.kmh}</span>}
                                   </div>
                                 </div>
                               ))}
@@ -2025,13 +2085,13 @@ const App = ({ page }) => {
                   <div className="itinerary-wrapper">
                     {!isOwnerOrCollaborator && result.hidden_sections?.includes('itinerary') ? (
                       <div className="section-restricted-msg" style={{ background: 'var(--bg-secondary)' }}>
-                        🔒 {result.user?.username || 'Владелец'} ограничил просмотр плана поездки
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}><LockIcon /> {result.user?.username || 'Владелец'} ограничил просмотр плана поездки</div>
                       </div>
                     ) : (
-                      <ItinerarySection 
+                      <ItinerarySection
                         checklist={result}
-                        lang={lang} 
-                        slug={savedSlug} 
+                        lang={lang}
+                        slug={savedSlug}
                         isOwner={!!isOwnerOrCollaborator}
                         realOwnerId={result.user_id}
                         currentUserId={user?.id}
@@ -2100,7 +2160,7 @@ const App = ({ page }) => {
         <div className="modal-overlay" onClick={() => setShowInviteModal(false)}>
           <div className="modal-content" onClick={e => e.stopPropagation()}>
             <button className="modal-close" onClick={() => setShowInviteModal(false)}>&times;</button>
-            <h3 style={{marginTop: 0}}>🔗 Пригласить в путешествие</h3>
+            <h3 style={{ marginTop: 0 }}>🔗 Пригласить в путешествие</h3>
 
             <p className="invite-modal-desc">Ваши подписчики:</p>
             <div className="invite-followers-list">
@@ -2114,7 +2174,7 @@ const App = ({ page }) => {
                     )}
                   </div>
                   <span className="follower-name">{f.username}</span>
-                  <button 
+                  <button
                     className="follower-invite-btn"
                     onClick={async (e) => {
                       const btn = e.currentTarget;
@@ -2140,20 +2200,20 @@ const App = ({ page }) => {
                   </button>
                 </div>
               )) : (
-                <div className="empty-subscribers" style={{textAlign:"center", color:"#666", padding:"20px"}}>У вас пока нет подписчиков</div>
+                <div className="empty-subscribers" style={{ textAlign: "center", color: "#666", padding: "20px" }}>У вас пока нет подписчиков</div>
               )}
             </div>
 
-            <p className="invite-modal-desc" style={{marginTop: "25px"}}>Или отправьте им ссылку для присоединения к чеклисту:</p>
+            <p className="invite-modal-desc" style={{ marginTop: "25px" }}>Или отправьте им ссылку для присоединения к чеклисту:</p>
             {inviteToken ? (
               <div className="invite-link-box">
-                <input 
-                  type="text" 
-                  readOnly 
-                  value={`${window.location.origin}/join/${inviteToken}`} 
+                <input
+                  type="text"
+                  readOnly
+                  value={`${window.location.origin}/join/${inviteToken}`}
                   className="invite-input"
                 />
-                <button 
+                <button
                   className="copy-btn action-btn primary"
                   onClick={() => {
                     navigator.clipboard.writeText(`${window.location.origin}/join/${inviteToken}`);
@@ -2162,10 +2222,21 @@ const App = ({ page }) => {
                 >Копировать</button>
               </div>
             ) : (
-              <div className="loading-spinner" style={{margin: "20px auto"}}></div>
+              <div className="loading-spinner" style={{ margin: "20px auto" }}></div>
             )}
           </div>
         </div>
+      )}
+
+      {/* AI Assistant Chat Widget */}
+      {result && (
+        <AIChatWidget
+          city={result.destinations?.[0]?.city || result.city}
+          startDate={result.destinations?.[0]?.start_date || result.start_date}
+          endDate={result.destinations?.[result.destinations.length - 1]?.end_date || result.end_date}
+          tripType={result.trip_type}
+          language={lang}
+        />
       )}
     </>
   );

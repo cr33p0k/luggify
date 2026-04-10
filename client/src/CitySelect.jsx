@@ -39,13 +39,15 @@ const CitySelect = ({ value, onSelect, lang = "ru", label, children }) => {
   const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
 
   return (
-    <div className="input-group" style={{ position: "relative" }}>
-      <label style={{ display: "block", marginBottom: "0.5rem" }}>{label || t.label}</label>
-      {children && (
-        <div style={{ position: "absolute", right: 0, top: "-4px", zIndex: 2 }}>
-          {children}
-        </div>
-      )}
+    <div className={`input-group city-select-group${children ? " has-addon" : ""}`}>
+      <div className="city-select-header">
+        <label className="city-select-label">{label || t.label}</label>
+        {children && (
+          <div className="city-select-addon">
+            {children}
+          </div>
+        )}
+      </div>
       <AsyncSelect
         classNamePrefix="react-select"
         cacheOptions

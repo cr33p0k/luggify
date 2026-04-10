@@ -14,6 +14,17 @@ class UserCreate(BaseModel):
 class UserLogin(BaseModel):
     email: str
     password: str
+    device_id: Optional[str] = None
+    user_agent: Optional[str] = None
+
+
+class VerifyDeviceLogin(BaseModel):
+    email: str
+    password: str
+    code: str
+    device_id: str
+    remember_device: bool = True
+    user_agent: Optional[str] = None
 
 
 class TelegramAuth(BaseModel):
@@ -29,8 +40,11 @@ class UserOut(BaseModel):
     username: str
     tg_id: Optional[str] = None
     is_stats_public: bool = True
+    is_email_verified: bool = False
     created_at: Optional[datetime] = None
     avatar: Optional[str] = None
+    bio: Optional[str] = None
+    social_links: Optional[Dict[str, str]] = None
     followers_count: Optional[int] = 0
     following_count: Optional[int] = 0
     is_following: Optional[bool] = False
@@ -38,10 +52,16 @@ class UserOut(BaseModel):
     class Config:
         from_attributes = True
 
-
-class UserAvatarUpdate(BaseModel):
+class UserUpdate(BaseModel):
+    bio: Optional[str] = None
+    social_links: Optional[Dict[str, str]] = None
     avatar: Optional[str] = None
 
+class UserInfo(BaseModel):
+    avatar: Optional[str] = None
+
+class UserAvatarUpdate(BaseModel):
+    avatar: str
 
 class Token(BaseModel):
     access_token: str
@@ -141,6 +161,15 @@ class NotificationOut(BaseModel):
     link: Optional[str] = None
     is_read: bool
     extra_data: Optional[Dict[str, Any]] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class FollowRequestOut(BaseModel):
+    id: int
+    from_user: UserOut
+    status: str
     created_at: datetime
 
     class Config:

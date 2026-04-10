@@ -38,13 +38,30 @@ html {
   scroll-behavior: smooth;
 }
 
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+}
+
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  background: var(--bg-primary);
+  background:
+    radial-gradient(circle at top, rgba(255, 153, 0, 0.12), transparent 26rem),
+    radial-gradient(circle at bottom right, rgba(255, 174, 66, 0.08), transparent 24rem),
+    linear-gradient(180deg, #111111 0%, #0d0d0d 45%, #0a0a0a 100%);
   color: var(--text-primary);
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+  line-height: 1.5;
+}
+
+img,
+svg {
+  max-width: 100%;
 }
 
 /* --- Navbar --- */
@@ -60,6 +77,8 @@ body {
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border-bottom: 1px solid var(--border-subtle);
+  gap: 1rem;
+  flex-wrap: wrap;
 }
 
 .navbar-logo {
@@ -82,7 +101,10 @@ body {
 .navbar-user {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  min-width: 0;
 }
 
 /* Navbar Profile (Clickable wrapper) */
@@ -94,6 +116,8 @@ body {
   padding: 0.3rem 0.6rem;
   border-radius: var(--radius-sm);
   transition: background 0.15s;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .navbar-profile:hover {
@@ -111,12 +135,18 @@ body {
   font-weight: 700;
   font-size: 0.85rem;
   color: var(--bg-primary);
+  overflow: hidden;
+  flex-shrink: 0;
 }
 
 .navbar-username {
   font-size: 0.9rem;
   font-weight: 600;
   color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 12rem;
 }
 
 .navbar-login-btn {
@@ -180,12 +210,17 @@ body {
   max-width: 1200px;
   margin: 0 auto;
   padding: 0 1.5rem;
+  width: 100%;
+  position: relative;
+  z-index: 1;
 }
 
 /* --- Hero Section --- */
 .hero {
   text-align: center;
   padding: 2rem 0 1.5rem;
+  max-width: 46rem;
+  margin: 0 auto;
 }
 
 .hero h2 {
@@ -204,6 +239,7 @@ body {
   color: var(--text-secondary);
   max-width: 500px;
   margin: 0 auto;
+  line-height: 1.7;
 }
 
 /* --- Form --- */
@@ -214,11 +250,13 @@ body {
   gap: 0.8rem;
   flex-wrap: wrap;
   justify-content: center;
+  align-items: stretch;
 }
 
 .option-chip {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
   padding: 8px 14px;
   border: 1px solid var(--border-subtle);
@@ -230,6 +268,7 @@ body {
   cursor: pointer;
   transition: all 0.2s;
   user-select: none;
+  text-align: center;
 }
 
 .option-chip:hover {
@@ -335,7 +374,7 @@ body {
 .form-card {
   margin: 2rem auto 0;
   max-width: 800px;
-  background: var(--bg-card);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.03));
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xl);
   padding: 2rem;
@@ -345,6 +384,7 @@ body {
   align-items: start;
   backdrop-filter: blur(10px);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  width: 100%;
 }
 
 .trip-type-selector {
@@ -407,7 +447,7 @@ body {
 
 /* --- Forecast Section --- */
 .forecast-section {
-  background: var(--bg-card);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.03));
   border: 1px solid var(--border-subtle);
   border-radius: 20px;
   padding: 1.5rem;
@@ -553,9 +593,12 @@ body {
   margin-top: 8px;
   display: flex;
   justify-content: center;
-  gap: 8px;
-  font-size: 0.75rem;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  font-size: 0.7rem;
   color: var(--text-muted);
+  overflow: hidden;
+  padding: 0 2px;
 }
 
 .forecast-section.collapsed {
@@ -599,7 +642,7 @@ body {
 
 /* --- Checklist Grid --- */
 .checklist-card {
-  background: var(--bg-card);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.03));
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xl);
   padding: 1.5rem;
@@ -719,6 +762,7 @@ body {
   color: var(--danger);
   background: rgba(255, 77, 77, 0.1);
 }
+
 /* --- Checklist Actions --- */
 .checklist-actions {
   display: flex;
@@ -1072,6 +1116,7 @@ input[type="date"]:focus,
   border: 1px solid rgba(255, 255, 255, 0.05);
   border-radius: var(--radius-lg);
   transition: background 0.2s, border-color 0.2s;
+  flex-wrap: wrap;
 }
 
 .origin-row:hover {
@@ -1177,6 +1222,7 @@ input[type="date"]:focus,
   display: flex;
   justify-content: center;
   margin: 1rem 0;
+  width: 100%;
 }
 
 .add-city-btn {
@@ -1270,7 +1316,7 @@ input[type="date"]:focus,
 
 /* === Route Timeline === */
 .route-timeline {
-  background: var(--bg-card);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.03));
   border: 1px solid var(--border-subtle);
   border-radius: 20px;
   padding: 1.5rem;
@@ -1333,7 +1379,7 @@ input[type="date"]:focus,
 
 /* === Travel Sections (shared) === */
 .travel-section {
-  background: var(--bg-card);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.03));
   border: 1px solid var(--border-subtle);
   border-radius: 20px;
   padding: 1.5rem;
@@ -1613,6 +1659,7 @@ input[type="date"]:focus,
   .itinerary-form-row {
     flex-direction: column;
   }
+
   .itinerary-form input[type="time"] {
     width: 100%;
   }
@@ -1661,9 +1708,11 @@ input[type="date"]:focus,
   overflow-x: auto;
   scrollbar-width: none;
 }
+
 .city-tabs::-webkit-scrollbar {
   display: none;
 }
+
 .city-tab {
   flex: 1;
   min-width: max-content;
@@ -1678,10 +1727,12 @@ input[type="date"]:focus,
   cursor: pointer;
   transition: all 0.2s;
 }
+
 .city-tab:hover {
   color: white;
   background: rgba(255, 255, 255, 0.05);
 }
+
 .city-tab.active {
   background: var(--orange);
   color: white;
@@ -1860,7 +1911,8 @@ input[type="date"]:focus,
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-.attraction-map-btn:hover, .attraction-map-btn.active {
+.attraction-map-btn:hover,
+.attraction-map-btn.active {
   background: var(--orange);
   border-color: var(--orange);
   transform: scale(1.1);
@@ -2055,7 +2107,7 @@ input[type="date"]:focus,
   border-radius: var(--radius-md);
   padding: 16px;
   z-index: 50;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.8);
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -2450,17 +2502,21 @@ input[type="date"]:focus,
   align-items: center;
   margin-bottom: 2rem;
   gap: 1rem;
+  flex-wrap: wrap;
 }
 
 .checklist-title-group {
   display: flex;
   align-items: baseline;
   gap: 1rem;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .checklist-city-name {
   font-size: 2rem;
   font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .invite-action-btn {
@@ -2492,6 +2548,13 @@ input[type="date"]:focus,
   display: flex;
   gap: 8px;
   padding: 0 10px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  scrollbar-width: none;
+}
+
+.backpack-tabs::-webkit-scrollbar {
+  display: none;
 }
 
 .backpack-tab {
@@ -2530,6 +2593,8 @@ input[type="date"]:focus,
   margin-top: 1.5rem;
   padding-top: 1.5rem;
   border-top: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+  justify-content: space-between;
 }
 
 
@@ -2543,7 +2608,7 @@ input[type="date"]:focus,
   color: var(--text-muted);
   cursor: pointer;
   transition: all 0.2s;
-  opacity: 0.5;
+  opacity: 0.7;
 }
 
 .transport-btn:hover {
@@ -2607,6 +2672,7 @@ input[type="date"]:focus,
   display: flex;
   gap: 10px;
   margin-top: 15px;
+  flex-wrap: wrap;
 }
 
 .invite-input {
@@ -2618,6 +2684,7 @@ input[type="date"]:focus,
   border-radius: var(--radius-sm);
   font-family: monospace;
   font-size: 0.85rem;
+  min-width: 0;
 }
 
 /* ===== INVITE MODAL OVERLAY ===== */
@@ -2638,13 +2705,25 @@ input[type="date"]:focus,
 }
 
 @keyframes modalFadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
 }
 
 @keyframes modalSlideUp {
-  from { opacity: 0; transform: translateY(20px) scale(0.97); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .modal-content {
@@ -2869,7 +2948,8 @@ input[type="date"]:focus,
   right: -80px;
   width: 320px;
   max-height: 450px;
-  background: #1a1a1a; /* Solid background for better readability */
+  background: #1a1a1a;
+  /* Solid background for better readability */
   border-radius: var(--radius-lg);
   box-shadow: 0 12px 48px rgba(0, 0, 0, 0.6);
   border: 1px solid var(--border-subtle);
@@ -2882,8 +2962,15 @@ input[type="date"]:focus,
 }
 
 @keyframes slideDown {
-  from { opacity: 0; transform: translateY(-10px); }
-  to { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .notif-header {
@@ -2967,6 +3054,7 @@ input[type="date"]:focus,
   gap: 8px;
   margin-top: 10px;
   margin-bottom: 6px;
+  flex-wrap: wrap;
 }
 
 .notif-action-btn {
@@ -3028,4 +3116,310 @@ input[type="date"]:focus,
 .follower-invite-btn:disabled {
   background: #ccc;
   cursor: not-allowed;
+}
+
+/* === Mobile Polish === */
+@media (max-width: 900px) {
+  .navbar {
+    padding: 0.85rem 1.25rem;
+  }
+
+  .form-card {
+    grid-template-columns: 1fr;
+    gap: 1.25rem;
+    padding: 1.5rem;
+  }
+
+  .origin-row,
+  .destination-row {
+    padding: 1.1rem;
+  }
+
+  .checklist-header {
+    align-items: flex-start;
+  }
+
+  .checklist-title-group {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.35rem;
+  }
+
+  .notifications-dropdown {
+    right: 0;
+  }
+}
+
+@media (max-width: 600px) {
+  .navbar {
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: nowrap;
+    padding: 0.75rem 1rem;
+  }
+
+  .navbar-user {
+    width: auto;
+    margin-left: auto;
+    flex-wrap: nowrap;
+    justify-content: flex-end;
+    gap: 0.45rem;
+  }
+
+  .language-switcher {
+    margin-right: 0;
+    padding: 3px;
+    flex-shrink: 0;
+  }
+
+  .navbar-profile {
+    flex: 0 1 auto;
+    padding: 0.2rem 0.35rem;
+  }
+
+  .navbar-login-btn {
+    width: auto;
+    padding: 0.55rem 0.95rem;
+    font-size: 0.82rem;
+    flex-shrink: 0;
+  }
+
+  .navbar-username {
+    display: none;
+  }
+
+  .page-wrapper {
+    padding: 0 1rem 2rem;
+  }
+
+  .hero {
+    padding: 2rem 0 1.25rem;
+  }
+
+  .hero h2 {
+    font-size: 1.65rem;
+    line-height: 1.1;
+  }
+
+  .hero p {
+    font-size: 0.95rem;
+    max-width: 32rem;
+  }
+
+  .form-card {
+    padding: 1.2rem;
+    border-radius: var(--radius-lg);
+  }
+
+  .origin-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.9rem;
+  }
+
+  .route-arrow {
+    margin: -0.15rem 0 0.25rem;
+  }
+
+  .destination-row {
+    gap: 0.9rem;
+  }
+
+  .destination-header {
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-bottom: 0;
+  }
+
+  .form-actions {
+    flex-direction: column;
+    align-items: stretch !important;
+    gap: 0.75rem !important;
+  }
+
+  .add-city-btn,
+  .form-card .generate-btn {
+    width: 100% !important;
+  }
+
+  .return-transport-row {
+    width: 100%;
+    gap: 0.75rem;
+    justify-content: space-between;
+  }
+
+  .trip-types {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .options-grid {
+    gap: 0.6rem;
+  }
+
+  .option-chip {
+    flex: 1 1 calc(50% - 0.3rem);
+    min-height: 44px;
+  }
+
+  .checklist-city-name {
+    font-size: 1.45rem;
+  }
+
+  .invite-action-btn {
+    width: 100%;
+  }
+
+  .checklist-card,
+  .forecast-section,
+  .travel-section,
+  .route-timeline,
+  .modal-content {
+    padding: 1rem;
+  }
+
+  .forecast-header {
+    padding: 1rem;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .forecast-header h3 {
+    width: 100%;
+  }
+
+  .forecast-grid,
+  .flights-grid,
+  .hotels-grid,
+  .attractions-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .hotels-price-filter {
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .guest-selector-container {
+    max-width: none;
+  }
+
+  .timeline-track {
+    padding: 0.5rem 0;
+    gap: 0.75rem;
+  }
+
+  .timeline-stop {
+    min-width: 100px;
+  }
+
+  .city-tabs {
+    margin-bottom: 1rem;
+  }
+
+  .itinerary-event-card {
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+
+  .itinerary-event-time {
+    min-width: 0;
+  }
+
+  .evt-actions {
+    margin-left: 0;
+    align-self: flex-end;
+  }
+
+  .address-map-links {
+    flex-wrap: wrap;
+  }
+
+  .checklist-label {
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.65rem 0.5rem;
+  }
+
+  .item-action-group {
+    opacity: 1;
+    gap: 0.4rem;
+  }
+
+  .notifications-dropdown {
+    position: fixed;
+    top: 72px;
+    left: 1rem;
+    right: 1rem;
+    width: auto;
+    max-width: none;
+    max-height: calc(100dvh - 96px);
+  }
+
+  .notif-actions {
+    flex-direction: column;
+  }
+
+  .invite-link-box {
+    flex-direction: column;
+  }
+
+  .copy-btn {
+    width: 100%;
+  }
+
+  .modal-overlay {
+    align-items: flex-end;
+    padding: 1rem;
+  }
+
+  .modal-content {
+    width: 100%;
+    max-width: none;
+    max-height: calc(100dvh - 1rem);
+    border-radius: 18px 18px 0 0;
+  }
+}
+
+@media (max-width: 420px) {
+  .navbar {
+    padding: 0.7rem 0.85rem;
+  }
+
+  .language-switcher {
+    width: auto;
+    justify-content: flex-start;
+  }
+
+  .navbar-user {
+    gap: 0.5rem;
+  }
+
+  .lang-btn {
+    padding: 4px 8px;
+    font-size: 0.76rem;
+  }
+
+  .navbar-login-btn {
+    padding: 0.52rem 0.8rem;
+    font-size: 0.8rem;
+  }
+
+  .trip-types {
+    grid-template-columns: 1fr;
+  }
+
+  .option-chip {
+    flex-basis: 100%;
+  }
+
+  .forecast-grid,
+  .flights-grid,
+  .hotels-grid,
+  .attractions-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .notifications-dropdown {
+    top: 116px;
+  }
 }

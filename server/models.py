@@ -24,6 +24,11 @@ class User(Base):
     is_stats_public = Column(Boolean, default=True)
     created_at = Column(DateTime, server_default=func.now())
     avatar = Column(String, nullable=True)  # URL, emoji or base64
+    bio = Column(String, nullable=True)     # User biography/description
+    social_links = Column(JSON, nullable=True) # JSON store for {"instagram": "...", "telegram": "..."}
+    is_email_verified = Column(Boolean, default=False, server_default="false")
+    email_verification_code = Column(String, nullable=True)
+    code_expires_at = Column(DateTime, nullable=True)
     # Связь с чеклистами
     checklists = relationship("Checklist", back_populates="user")
 
@@ -38,6 +43,22 @@ class User(Base):
         secondaryjoin=id == followers_association.c.following_id,
         backref="followers"
     )
+
+    trusted_devices = relationship("UserDevice", back_populates="user", cascade="all, delete-orphan")
+
+
+class UserDevice(Base):
+    """Trusted devices for a user to skip email verification on login."""
+    __tablename__ = "user_devices"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    device_id = Column(String, nullable=False, index=True)
+    user_agent = Column(String, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    last_used_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    user = relationship("User", back_populates="trusted_devices")
 
 
 class Checklist(Base):
@@ -129,3 +150,15 @@ class Notification(Base):
     created_at = Column(DateTime, server_default=func.now())
 
     user = relationship("User", back_populates="notifications")
+
+class FollowRequest(Base):
+    __tablename__ = "follow_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    from_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    to_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String, default="pending", nullable=False)  # pending, accepted, declined
+    created_at = Column(DateTime, server_default=func.now())
+
+    from_user = relationship("User", foreign_keys=[from_user_id], lazy="joined")
+    to_user = relationship("User", foreign_keys=[to_user_id], lazy="joined")
