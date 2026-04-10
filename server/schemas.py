@@ -67,6 +67,8 @@ class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserOut
+    message: Optional[str] = None
+    email_delivery_failed: bool = False
 
 
 # === Checklist схемы ===

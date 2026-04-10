@@ -74,7 +74,14 @@ export default function AuthModal({ onClose, onAuth }) {
                 setPendingUser(data.user);
                 setPendingToken(data.access_token);
                 setShowVerification(true);
-                setSuccess("Код подтверждения отправлен на " + email);
+                if (data.email_delivery_failed) {
+                    setError(
+                        data.message ||
+                        "Аккаунт создан, но письмо пока не отправлено. Проверьте настройки почты сервера и нажмите 'Отправить ещё раз'."
+                    );
+                } else {
+                    setSuccess(data.message || "Код подтверждения отправлен на " + email);
+                }
             } else {
                 // Login — directly authenticate
                 localStorage.setItem("token", data.access_token);

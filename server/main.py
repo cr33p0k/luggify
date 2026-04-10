@@ -156,8 +156,7 @@ async def register(data: schemas.UserCreate, db: AsyncSession = Depends(get_db))
     await db.commit()
     await db.refresh(user)
     
-    # Send email (fire and forget — don't block registration)
-    await send_verification_email(data.email, code, data.username)
+    email_sent = await send_verification_email(data.email, code, data.username)
     
     # Генерируем токен
     access_token = create_access_token(data={"sub": str(user.id)})
@@ -165,6 +164,13 @@ async def register(data: schemas.UserCreate, db: AsyncSession = Depends(get_db))
         "access_token": access_token,
         "token_type": "bearer",
         "user": schemas.UserOut.model_validate(user),
+        "message": (
+            f"Аккаунт создан, но письмо на {data.email} пока не отправлено. "
+            "Проверьте SMTP-настройки сервера и нажмите 'Отправить ещё раз'."
+            if not email_sent
+            else f"Код подтверждения отправлен на {data.email}"
+        ),
+        "email_delivery_failed": not email_sent,
     }
 
 
@@ -233,8 +239,10 @@ async def resend_code(data: ResendCodeRequest, db: AsyncSession = Depends(get_db
 async def login(data: schemas.UserLogin, response: Response, db: AsyncSession = Depends(get_db)):
     """Авторизация пользователя"""
     user = await crud.get_user_by_email(db, data.email)
-    if not user or not verify_password(data.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Неверный email или пароль")
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь с таким email ещё не зарегистрирован")
+    if not verify_password(data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Неверный пароль")
     
     # Check device ID
     if data.device_id:
@@ -275,8 +283,10 @@ async def login(data: schemas.UserLogin, response: Response, db: AsyncSession = 
 async def verify_device_login(data: schemas.VerifyDeviceLogin, db: AsyncSession = Depends(get_db)):
     """Подтверждение входа с нового устройства"""
     user = await crud.get_user_by_email(db, data.email)
-    if not user or not verify_password(data.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Неверный email или пароль")
+    if not user:
+        raise HTTPException(status_code=404, detail="Пользователь с таким email ещё не зарегистрирован")
+    if not verify_password(data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="Неверный пароль")
         
     if not user.email_verification_code:
         raise HTTPException(status_code=400, detail="Код подтверждения не был запрошен")
