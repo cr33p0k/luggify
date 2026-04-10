@@ -9,6 +9,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 
 # revision identifiers, used by Alembic.
@@ -29,9 +30,31 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['following_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('follower_id', 'following_id')
     )
-    op.drop_constraint(op.f('city_attractions_city_name_key'), 'city_attractions', type_='unique')
-    op.drop_index(op.f('ix_city_attractions_city_name'), table_name='city_attractions')
-    op.create_index(op.f('ix_city_attractions_city_name'), 'city_attractions', ['city_name'], unique=True)
+    bind = op.get_bind()
+    inspector = inspect(bind)
+    existing_tables = set(inspector.get_table_names())
+
+    if 'city_attractions' in existing_tables:
+        unique_constraints = {
+            constraint["name"]
+            for constraint in inspector.get_unique_constraints('city_attractions')
+            if constraint.get("name")
+        }
+        indexes = {
+            index["name"]
+            for index in inspector.get_indexes('city_attractions')
+            if index.get("name")
+        }
+
+        constraint_name = op.f('city_attractions_city_name_key')
+        index_name = op.f('ix_city_attractions_city_name')
+
+        if constraint_name in unique_constraints:
+            op.drop_constraint(constraint_name, 'city_attractions', type_='unique')
+        if index_name in indexes:
+            op.drop_index(index_name, table_name='city_attractions')
+
+        op.create_index(index_name, 'city_attractions', ['city_name'], unique=True)
     op.alter_column('users', 'avatar',
                existing_type=sa.TEXT(),
                type_=sa.String(),
@@ -46,8 +69,22 @@ def downgrade() -> None:
                existing_type=sa.String(),
                type_=sa.TEXT(),
                existing_nullable=True)
-    op.drop_index(op.f('ix_city_attractions_city_name'), table_name='city_attractions')
-    op.create_index(op.f('ix_city_attractions_city_name'), 'city_attractions', ['city_name'], unique=False)
-    op.create_unique_constraint(op.f('city_attractions_city_name_key'), 'city_attractions', ['city_name'], postgresql_nulls_not_distinct=False)
+    bind = op.get_bind()
+    inspector = inspect(bind)
+    existing_tables = set(inspector.get_table_names())
+
+    if 'city_attractions' in existing_tables:
+        indexes = {
+            index["name"]
+            for index in inspector.get_indexes('city_attractions')
+            if index.get("name")
+        }
+        index_name = op.f('ix_city_attractions_city_name')
+        constraint_name = op.f('city_attractions_city_name_key')
+
+        if index_name in indexes:
+            op.drop_index(index_name, table_name='city_attractions')
+        op.create_index(index_name, 'city_attractions', ['city_name'], unique=False)
+        op.create_unique_constraint(constraint_name, 'city_attractions', ['city_name'], postgresql_nulls_not_distinct=False)
     op.drop_table('followers')
     # ### end Alembic commands ###
