@@ -1,6 +1,6 @@
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from urllib.parse import quote as url_quote
 import httpx
 from fastapi import FastAPI, Query, Depends, HTTPException, Body, status
@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
+from sqlalchemy.orm import selectinload
 import crud, models, schemas
 from database import SessionLocal, async_engine, get_db
 from typing import List, Optional
@@ -19,6 +20,8 @@ from auth import (
     verify_password, create_access_token,
     get_current_user, require_current_user
 )
+from telegram_auth import TelegramAuthError, parse_telegram_auth_payload
+from telegram_link import create_telegram_link_token
 
 load_dotenv()
 
@@ -58,6 +61,46 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+
+def build_trip_review_payload(review: models.TripReview) -> dict:
+    checklist = getattr(review, "checklist", None)
+    author = review.user
+    return {
+        "id": review.id,
+        "rating": review.rating,
+        "text": review.text,
+        "photo": review.photo,
+        "created_at": review.created_at,
+        "updated_at": review.updated_at,
+        "user": {
+            "id": author.id,
+            "email": None,
+            "username": author.username,
+            "tg_id": author.tg_id,
+            "is_stats_public": author.is_stats_public,
+            "is_email_verified": author.is_email_verified,
+            "created_at": author.created_at,
+            "avatar": author.avatar,
+            "bio": author.bio,
+            "social_links": author.social_links,
+            "followers_count": 0,
+            "following_count": 0,
+            "is_following": False,
+        },
+        "checklist_slug": checklist.slug if checklist else None,
+        "checklist_city": checklist.city if checklist else None,
+        "checklist_start_date": checklist.start_date if checklist else None,
+        "checklist_end_date": checklist.end_date if checklist else None,
+    }
+
+
+def is_checklist_participant(checklist: models.Checklist, user_id: int) -> bool:
+    if not checklist or not user_id:
+        return False
+    if checklist.user_id == user_id:
+        return True
+    return any(bp.user_id == user_id for bp in (checklist.backpacks or []))
 
 # Словарь переводов погодных условий
 
@@ -107,6 +150,7 @@ class ChecklistStateUpdate(BaseModel):
     checked_items: Optional[List[str]] = None
     removed_items: Optional[List[str]] = None
     added_items: Optional[List[str]] = None
+    item_quantities: Optional[dict[str, int]] = None
     is_public: Optional[bool] = None
     items: Optional[List[str]] = None
 
@@ -114,6 +158,7 @@ class BackpackStateUpdate(BaseModel):
     checked_items: Optional[List[str]] = None
     removed_items: Optional[List[str]] = None
     added_items: Optional[List[str]] = None
+    item_quantities: Optional[dict[str, int]] = None
     items: Optional[List[str]] = None
 
 class UserPrivacyUpdate(BaseModel):
@@ -349,17 +394,36 @@ async def update_me(update_data: schemas.UserUpdate, user=Depends(require_curren
     return user_out
 
 
+@app.get("/auth/telegram/link", response_model=schemas.TelegramLinkResponse)
+async def create_telegram_link(user=Depends(require_current_user)):
+    bot_username = os.getenv("TELEGRAM_BOT_USERNAME", "luggify_bot").strip() or "luggify_bot"
+    link_token, expires_at = create_telegram_link_token(user.id)
+    return {
+        "linked": bool(user.tg_id),
+        "tg_id": user.tg_id,
+        "bot_username": bot_username,
+        "deep_link": f"https://t.me/{bot_username}?start=link_{link_token}",
+        "link_command": f"/link {link_token}",
+        "expires_at": expires_at,
+    }
+
+
 @app.post("/auth/telegram", response_model=schemas.Token)
 async def telegram_auth(data: schemas.TelegramAuth, db: AsyncSession = Depends(get_db)):
     """Авторизация через Telegram — автосоздание пользователя при первом входе"""
-    user = await crud.get_user_by_tg_id(db, data.tg_id)
+    try:
+        telegram_user = parse_telegram_auth_payload(data)
+    except TelegramAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+
+    user = await crud.get_user_by_tg_id(db, telegram_user.tg_id)
     if not user:
         # Создаём нового пользователя из Telegram-данных
         user = await crud.create_user_from_telegram(
             db,
-            tg_id=data.tg_id,
-            username=data.username,
-            first_name=data.first_name,
+            tg_id=telegram_user.tg_id,
+            username=telegram_user.username,
+            first_name=telegram_user.first_name,
         )
     access_token = create_access_token(data={"sub": str(user.id)})
     return {
@@ -393,6 +457,23 @@ async def update_avatar(
     await db.commit()
     await db.refresh(user)
     return user
+
+
+@app.get("/users/search", response_model=List[schemas.UserSearchResult])
+async def search_users(
+    q: str = Query(..., min_length=1, max_length=50),
+    db: AsyncSession = Depends(get_db),
+):
+    users = await crud.search_users_by_username(db, q)
+    return [
+        {
+            "id": item.id,
+            "username": item.username,
+            "avatar": item.avatar,
+            "bio": item.bio,
+        }
+        for item in users
+    ]
 
 
 @app.get("/users/{username}", response_model=dict)
@@ -444,6 +525,8 @@ async def get_public_profile(
             if pending_req:
                 follow_status = "requested"
 
+    public_reviews = await crud.get_trip_reviews_by_user_id(db, user.id, public_only=True)
+
     return {
         "username": user.username,
         "created_at": user.created_at,
@@ -456,7 +539,8 @@ async def get_public_profile(
         "is_following": is_following,
         "follow_status": follow_status,
         "stats": stats,
-        "checklists": public_checklists
+        "checklists": public_checklists,
+        "reviews": [build_trip_review_payload(review) for review in public_reviews],
     }
 
 # === Features: Subscriptions (Followers / Following) ===
@@ -636,6 +720,15 @@ async def get_my_checklists(
             all_checklists.append(c)
     
     return all_checklists
+
+
+@app.get("/my-trip-reviews", response_model=List[schemas.TripReviewOut])
+async def get_my_trip_reviews(
+    user=Depends(require_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    reviews = await crud.get_trip_reviews_by_user_id(db, user.id)
+    return [build_trip_review_payload(review) for review in reviews]
 
 
 # === Feature: Gamification (Achievements + Levels) ===
@@ -2494,6 +2587,7 @@ async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):
         daily_forecast=forecast,
         events=checklist.events or [],
         backpacks=checklist.backpacks or [],
+        reviews=[build_trip_review_payload(review) for review in sorted(checklist.reviews or [], key=lambda item: item.created_at or datetime.min, reverse=True)],
         invite_token=checklist.invite_token,
         hidden_sections=checklist.hidden_sections or [],
     )
@@ -2538,6 +2632,80 @@ async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):
         "conditions": checklist.conditions,
     }
 
+@app.post("/checklists/{slug}/review", response_model=schemas.TripReviewOut)
+async def create_or_update_trip_review(
+    slug: str,
+    payload: schemas.TripReviewCreate,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    if not is_checklist_participant(checklist, user.id):
+        raise HTTPException(status_code=403, detail="Только участник поездки может оставить отзыв")
+    if checklist.end_date and checklist.end_date > date.today():
+        raise HTTPException(status_code=400, detail="Оставить отзыв можно после завершения поездки")
+    if payload.photo and not (payload.photo.startswith("data:image") or payload.photo.startswith("http")):
+        raise HTTPException(status_code=400, detail="Поддерживаются только изображения или ссылки на них")
+
+    review = await crud.get_trip_review_by_user_and_checklist(db, user.id, checklist.id)
+    if review:
+        review.rating = payload.rating
+        review.text = payload.text.strip()
+        review.photo = payload.photo
+    else:
+        review = models.TripReview(
+            checklist_id=checklist.id,
+            user_id=user.id,
+            rating=payload.rating,
+            text=payload.text.strip(),
+            photo=payload.photo,
+        )
+        db.add(review)
+
+    await db.commit()
+
+    result = await db.execute(
+        select(models.TripReview)
+        .options(selectinload(models.TripReview.checklist))
+        .where(models.TripReview.id == review.id)
+    )
+    saved_review = result.scalar_one()
+    return build_trip_review_payload(saved_review)
+
+
+@app.post("/checklists/{slug}/ai-command", response_model=schemas.ChecklistAICommandResponse)
+async def run_ai_checklist_command(
+    slug: str,
+    payload: schemas.ChecklistAICommandRequest,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    from checklist_ai import execute_checklist_ai_command
+
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    if not is_checklist_participant(checklist, user.id):
+        raise HTTPException(status_code=403, detail="Нет доступа к этому чеклисту")
+
+    result = await execute_checklist_ai_command(
+        db=db,
+        checklist=checklist,
+        command=payload.command,
+        language=payload.language,
+        actor_user_id=user.id,
+    )
+    return {
+        "applied": result["applied"],
+        "recognized_action_request": result["recognized_action_request"],
+        "message": result["message"],
+        "actions": result["actions"],
+        "checklist": result["checklist"],
+    }
+
+
 @app.patch("/checklist/{slug}/state", response_model=schemas.ChecklistOut)
 async def update_checklist_state(slug: str, state: ChecklistStateUpdate = Body(...), db: AsyncSession = Depends(get_db)):
     checklist = await crud.update_checklist_state(
@@ -2546,6 +2714,7 @@ async def update_checklist_state(slug: str, state: ChecklistStateUpdate = Body(.
         checked_items=state.checked_items,
         removed_items=state.removed_items,
         added_items=state.added_items,
+        item_quantities=state.item_quantities,
         items=state.items,
     )
     if not checklist:
@@ -2678,6 +2847,89 @@ async def join_shared_checklist(
     return checklist
 
 
+@app.post("/checklists/{slug}/baggage", response_model=schemas.UserBackpackOut)
+async def create_baggage(
+    slug: str,
+    payload: schemas.UserBaggageCreate,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+
+    target_user_id = payload.user_id or user.id
+    is_owner = checklist.user_id == user.id
+    if target_user_id != user.id and not is_owner:
+        raise HTTPException(status_code=403, detail="Можно создавать багаж только себе")
+
+    if not is_checklist_participant(checklist, target_user_id):
+        raise HTTPException(status_code=400, detail="Сначала пользователь должен быть участником чеклиста")
+
+    baggage = await crud.create_user_baggage(
+        db,
+        checklist_id=checklist.id,
+        user_id=target_user_id,
+        name=payload.name,
+        kind=payload.kind,
+    )
+    return baggage
+
+
+@app.patch("/baggage/{backpack_id}", response_model=schemas.UserBackpackOut)
+async def update_baggage(
+    backpack_id: int,
+    payload: schemas.UserBaggageUpdate,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    backpack = await crud.get_backpack_by_id(db, backpack_id)
+    if not backpack:
+        raise HTTPException(status_code=404, detail="Багаж не найден")
+
+    checklist = await crud.get_checklist_by_id(db, backpack.checklist_id)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+
+    if backpack.user_id != user.id and checklist.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Нет прав редактировать этот багаж")
+
+    updated = await crud.update_baggage_meta(db, backpack_id, payload)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Багаж не найден")
+    return updated
+
+
+@app.delete("/baggage/{backpack_id}", response_model=dict)
+async def delete_baggage(
+    backpack_id: int,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    backpack = await crud.get_backpack_by_id(db, backpack_id)
+    if not backpack:
+        raise HTTPException(status_code=404, detail="Багаж не найден")
+
+    checklist = await crud.get_checklist_by_id(db, backpack.checklist_id)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+
+    if backpack.user_id != user.id and checklist.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Нет прав удалять этот багаж")
+
+    deleted_id, error_code = await crud.delete_baggage(db, backpack_id)
+    if error_code == "last_baggage":
+        raise HTTPException(status_code=400, detail="Нельзя удалить единственный багаж пользователя")
+    if error_code == "default_baggage":
+        raise HTTPException(status_code=400, detail="Сначала назначьте другой багаж основным")
+    if error_code == "not_empty":
+        raise HTTPException(status_code=400, detail="Сначала освободите багаж от вещей")
+    if error_code == "not_found" or deleted_id is None:
+        raise HTTPException(status_code=404, detail="Багаж не найден")
+
+    return {"deleted_id": deleted_id}
+
+
 @app.patch("/backpacks/{backpack_id}/state", response_model=schemas.UserBackpackOut)
 async def update_backpack_state(
     backpack_id: int,
@@ -2703,6 +2955,7 @@ async def update_backpack_state(
             checked_items=state.checked_items,
             removed_items=state.removed_items,
             added_items=state.added_items,
+            item_quantities=state.item_quantities,
             items=state.items
         )
     )

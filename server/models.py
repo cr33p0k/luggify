@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Date, Float, DateTime, ForeignKey, func, Boolean, JSON, Table
+from sqlalchemy import Column, Integer, String, Date, Float, DateTime, ForeignKey, func, Boolean, JSON, Table, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -45,6 +45,7 @@ class User(Base):
     )
 
     trusted_devices = relationship("UserDevice", back_populates="user", cascade="all, delete-orphan")
+    trip_reviews = relationship("TripReview", back_populates="user", cascade="all, delete-orphan")
 
 
 class UserDevice(Base):
@@ -78,6 +79,7 @@ class Checklist(Base):
     removed_items = Column(ARRAY(String), nullable=True)
     removed_items = Column(ARRAY(String), nullable=True)
     added_items = Column(ARRAY(String), nullable=True)
+    item_quantities = Column(JSON, nullable=False, default=dict, server_default="{}")
     daily_forecast = Column(JSON, nullable=True) 
     is_public = Column(Boolean, default=True)
     hidden_sections = Column(ARRAY(String), default=[], server_default="{}")
@@ -91,10 +93,35 @@ class Checklist(Base):
     invite_token = Column(String, unique=True, index=True, nullable=True)
 
     # Рюкзаки пользователей (личные вещи внутри общего чеклиста)
-    backpacks = relationship("UserBackpack", back_populates="checklist", cascade="all, delete-orphan", lazy="selectin")
+    backpacks = relationship(
+        "UserBackpack",
+        back_populates="checklist",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by=lambda: (UserBackpack.user_id, UserBackpack.sort_order, UserBackpack.id),
+    )
 
     # События маршрута
     events = relationship("ItineraryEvent", back_populates="checklist", cascade="all, delete-orphan", lazy="selectin")
+    reviews = relationship("TripReview", back_populates="checklist", cascade="all, delete-orphan", lazy="selectin")
+
+class TripReview(Base):
+    __tablename__ = "trip_reviews"
+    __table_args__ = (
+        UniqueConstraint("checklist_id", "user_id", name="uq_trip_reviews_checklist_user"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    checklist_id = Column(Integer, ForeignKey("checklists.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    rating = Column(Integer, nullable=False)
+    text = Column(Text, nullable=False)
+    photo = Column(Text, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    checklist = relationship("Checklist", back_populates="reviews")
+    user = relationship("User", back_populates="trip_reviews", lazy="joined")
 
 class UserBackpack(Base):
     __tablename__ = "user_backpacks"
@@ -102,12 +129,17 @@ class UserBackpack(Base):
     id = Column(Integer, primary_key=True, index=True)
     checklist_id = Column(Integer, ForeignKey("checklists.id", ondelete="CASCADE"), nullable=False, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String, nullable=False, default="Рюкзак", server_default="Рюкзак")
+    kind = Column(String, nullable=False, default="backpack", server_default="backpack")
+    sort_order = Column(Integer, nullable=False, default=0, server_default="0")
+    is_default = Column(Boolean, nullable=False, default=False, server_default="false")
     
     # Списки вещей конкретного пользователя
     items = Column(ARRAY(String), default=[])
     checked_items = Column(ARRAY(String), default=[])
     added_items = Column(ARRAY(String), default=[])
     removed_items = Column(ARRAY(String), default=[])
+    item_quantities = Column(JSON, nullable=False, default=dict, server_default="{}")
     
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

@@ -1,13 +1,14 @@
-import React, { useState, useEffect, useEffectEvent } from "react";
+import React, { useState, useEffect } from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
 import CitySelect from "./CitySelect";
 import DateRangePicker from "./DateRangePicker";
 import AuthModal from "./AuthModal";
 import ProfilePage from "./ProfilePage";
+import NavbarUserSearch from "./NavbarUserSearch";
 import {
   PlaneIcon, TrainIcon, CarIcon, BusIcon, MaleIcon, FemaleIcon, UnisexIcon,
   VacationIcon, BusinessIcon, ActiveIcon, BeachIcon, WinterIcon, PetIcon,
-  AllergyIcon, MedsIcon, CalendarIcon, PrintIcon, SparkleIcon, WeatherIcon, UVIcon, LockIcon, UnlockIcon, EyeIcon,
+  AllergyIcon, MedsIcon, CalendarIcon, SparkleIcon, WeatherIcon, UVIcon, LockIcon, UnlockIcon,
   ClockIcon, DropletIcon, WindIcon, TentIcon, BackpackIcon, HotelIcon, MuseumIcon, SmartphoneIcon, GlobeIcon
 } from './Icons';
 import "./App.css";
@@ -18,23 +19,206 @@ import "./AIChatWidget.css";
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 import { TRANSLATIONS, formatDuration, pluralize } from "./i18n";
 
+const safeParseJson = (value, fallback = null) => {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+};
+
+const buildCheckedItemsMap = (items = [], checkedItems = []) => {
+  const checkedSet = new Set(checkedItems || []);
+  return items.reduce((acc, item) => {
+    acc[item] = checkedSet.has(item);
+    return acc;
+  }, {});
+};
+
+const normalizeItemKey = (value) => (value || "").trim().toLowerCase().replaceAll("ё", "е");
+
+const normalizeQuantityMap = (value = {}) =>
+  Object.entries(value || {}).reduce((acc, [key, rawValue]) => {
+    const normalizedKey = normalizeItemKey(key);
+    const numericValue = Number(rawValue);
+    if (!normalizedKey || !Number.isFinite(numericValue) || numericValue < 1) {
+      return acc;
+    }
+    acc[normalizedKey] = Math.max(1, Math.round(numericValue));
+    return acc;
+  }, {});
+
+const getItemQuantity = (quantityMap = {}, item) => {
+  const normalizedKey = normalizeItemKey(item);
+  if (!normalizedKey) return 1;
+  return normalizeQuantityMap(quantityMap)[normalizedKey] || 1;
+};
+
+const setItemQuantityInMap = (quantityMap = {}, item, nextQuantity) => {
+  const normalizedKey = normalizeItemKey(item);
+  if (!normalizedKey) return normalizeQuantityMap(quantityMap);
+  const nextMap = normalizeQuantityMap(quantityMap);
+  const parsedQuantity = Number(nextQuantity);
+  if (!Number.isFinite(parsedQuantity) || parsedQuantity < 1) {
+    delete nextMap[normalizedKey];
+    return nextMap;
+  }
+  nextMap[normalizedKey] = Math.max(1, Math.round(parsedQuantity));
+  return nextMap;
+};
+
+const getDefaultBaggage = (backpacks = [], userId) => {
+  const own = (backpacks || []).filter((bp) => bp.user_id === userId);
+  return own.find((bp) => bp.is_default) || own.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))[0] || null;
+};
+
+const sortBaggageList = (items = []) =>
+  [...items].sort((a, b) => {
+    if (Boolean(b.is_default) !== Boolean(a.is_default)) {
+      return Number(Boolean(b.is_default)) - Number(Boolean(a.is_default));
+    }
+    if ((a.sort_order || 0) !== (b.sort_order || 0)) {
+      return (a.sort_order || 0) - (b.sort_order || 0);
+    }
+    return (a.id || 0) - (b.id || 0);
+  });
+
+const sortAllBackpacks = (items = []) =>
+  [...items].sort((a, b) => {
+    if ((a.user_id || 0) !== (b.user_id || 0)) return (a.user_id || 0) - (b.user_id || 0);
+    if (Boolean(b.is_default) !== Boolean(a.is_default)) {
+      return Number(Boolean(b.is_default)) - Number(Boolean(a.is_default));
+    }
+    if ((a.sort_order || 0) !== (b.sort_order || 0)) {
+      return (a.sort_order || 0) - (b.sort_order || 0);
+    }
+    return (a.id || 0) - (b.id || 0);
+  });
+
+const buildBaggageParticipants = (checklist, currentUser) => {
+  const groups = new Map();
+
+  const ensureGroup = (userId, username) => {
+    if (!userId) return null;
+    if (!groups.has(userId)) {
+      groups.set(userId, {
+        userId,
+        username: username || `id:${userId}`,
+        isCurrentUser: currentUser?.id === userId,
+        isOwner: checklist?.user_id === userId,
+        baggage: [],
+      });
+    }
+    const group = groups.get(userId);
+    if (username) {
+      group.username = username;
+    }
+    group.isCurrentUser = currentUser?.id === userId;
+    group.isOwner = checklist?.user_id === userId;
+    return group;
+  };
+
+  (checklist?.backpacks || []).forEach((bp) => {
+    const group = ensureGroup(bp.user_id, bp.user?.username || (currentUser?.id === bp.user_id ? currentUser.username : ""));
+    if (group) {
+      group.baggage.push(bp);
+    }
+  });
+
+  if (checklist?.user_id === currentUser?.id) {
+    ensureGroup(currentUser.id, currentUser.username);
+  }
+
+  return Array.from(groups.values())
+    .map((group) => ({
+      ...group,
+      baggage: sortBaggageList(group.baggage),
+    }))
+    .sort((a, b) => {
+      if (a.isCurrentUser !== b.isCurrentUser) return a.isCurrentUser ? -1 : 1;
+      if (a.isOwner !== b.isOwner) return a.isOwner ? -1 : 1;
+      return a.username.localeCompare(b.username, "ru");
+    });
+};
+
+const guessBaggageKind = (name) => {
+  const normalized = (name || "").trim().toLowerCase();
+  if (!normalized) return "custom";
+  if (normalized.includes("чемод")) return "suitcase";
+  if (normalized.includes("ручн") && normalized.includes("клад")) return "carry_on";
+  if (normalized.includes("рюкзак")) return "backpack";
+  if (normalized.includes("сумк")) return "bag";
+  return "custom";
+};
+
+const getBaggageKindLabel = (baggage) => {
+  const kind = baggage?.kind || guessBaggageKind(baggage?.name || "");
+  if (kind === "suitcase") return "Чемодан";
+  if (kind === "carry_on") return "Ручная кладь";
+  if (kind === "bag") return "Сумка";
+  if (kind === "custom") return "Багаж";
+  return "Рюкзак";
+};
+
+const getBaggageVisibleItemCount = (baggage) => {
+  const items = baggage?.items || [];
+  const removed = new Set(baggage?.removed_items || []);
+  return items.filter((item) => !removed.has(item)).length;
+};
+
+const getParticipantVisibleItemCount = (participant) =>
+  (participant?.baggage || []).reduce((sum, baggage) => sum + getBaggageVisibleItemCount(baggage), 0);
+
+const getInitial = (value = "") => (value.trim().charAt(0) || "?").toUpperCase();
+
+const getBaggageMetaLine = (baggage) => {
+  const name = (baggage?.name || "").trim().toLowerCase();
+  const kindLabel = getBaggageKindLabel(baggage);
+  const count = getBaggageVisibleItemCount(baggage);
+  const parts = [];
+
+  if (kindLabel.trim().toLowerCase() !== name) {
+    parts.push(kindLabel);
+  }
+  parts.push(`${count} вещей`);
+  return parts.join(" • ");
+};
+
+const escapeHtml = (value = "") =>
+  String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+
+const formatChecklistDateRange = (start, end) => {
+  if (!start || !end) return "";
+  const startDate = new Date(start);
+  const endDate = new Date(end);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) return "";
+  const startLabel = startDate.toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
+  const endLabel = endDate.toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
+  return `${startLabel} — ${endLabel}`;
+};
+
 const NotificationBell = ({ authHeaders, lang, navigate }) => {
   const [notifications, setNotifications] = useState([]);
   const [isOpen, setIsOpen] = useState(false);
   const unreadCount = notifications.filter(n => !n.is_read).length;
-
-  const fetchNotifications = useEffectEvent(() => {
+  const refreshNotifications = React.useCallback(() => {
     fetch(`${API_URL}/notifications`, { headers: authHeaders })
       .then(r => r.ok ? r.json() : [])
       .then(setNotifications)
       .catch(e => console.error("Error fetching notifications:", e));
-  });
+  }, [authHeaders]);
 
   useEffect(() => {
-    fetchNotifications();
-    const timer = setInterval(() => fetchNotifications(), 30000);
+    refreshNotifications();
+    const timer = setInterval(refreshNotifications, 30000);
     return () => clearInterval(timer);
-  }, [authHeaders.Authorization, fetchNotifications]);
+  }, [refreshNotifications]);
 
   const markRead = async (id, link) => {
     try {
@@ -83,7 +267,7 @@ const NotificationBell = ({ authHeaders, lang, navigate }) => {
 
       if (action === 'decline') {
         // Just refresh if we declined to update unread count locally
-        fetchNotifications();
+        refreshNotifications();
       }
     } catch (err) {
       console.error(err);
@@ -224,6 +408,214 @@ const NotificationBell = ({ authHeaders, lang, navigate }) => {
         </div>
       )}
     </div>
+  );
+};
+
+const TelegramLinkButton = ({ user, token, onUserUpdate, lang }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [linkInfo, setLinkInfo] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [hint, setHint] = useState("");
+
+  const loadLinkInfo = async () => {
+    setLoading(true);
+    setError("");
+    setCopied(false);
+    setHint("");
+    try {
+      const res = await fetch(`${API_URL}/auth/telegram/link`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || (lang === "en" ? "Failed to prepare Telegram link" : "Не удалось подготовить ссылку Telegram"));
+      }
+      setLinkInfo(data);
+      return data;
+    } catch (e) {
+      console.error(e);
+      const message = e.message || (lang === "en" ? "Failed to prepare Telegram link" : "Не удалось подготовить ссылку Telegram");
+      setError(message);
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const openModal = async () => {
+    setIsOpen(true);
+    await loadLinkInfo();
+  };
+
+  const refreshStatus = React.useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(`${API_URL}/auth/me`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || (lang === "en" ? "Failed to refresh status" : "Не удалось обновить статус"));
+      }
+      onUserUpdate(data);
+    } catch (e) {
+      console.error(e);
+      setError(e.message || (lang === "en" ? "Failed to refresh status" : "Не удалось обновить статус"));
+    } finally {
+      setLoading(false);
+    }
+  }, [lang, onUserUpdate, token]);
+
+  useEffect(() => {
+    if (!isOpen) return undefined;
+
+    const handleFocus = () => {
+      if (!user?.tg_id) {
+        refreshStatus();
+      }
+    };
+
+    window.addEventListener("focus", handleFocus);
+    return () => window.removeEventListener("focus", handleFocus);
+  }, [isOpen, refreshStatus, user?.tg_id]);
+
+  const openTelegramBot = async () => {
+    const data = linkInfo || await loadLinkInfo();
+    if (!data?.deep_link) {
+      setError(lang === "en" ? "Telegram link is not ready yet" : "Ссылка на Telegram пока не готова");
+      return;
+    }
+
+    let commandCopied = false;
+    if (data.link_command && navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(data.link_command);
+        commandCopied = true;
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    const popup = window.open(data.deep_link, "_blank", "noopener,noreferrer");
+    if (!popup) {
+      window.location.href = data.deep_link;
+    }
+
+    setCopied(commandCopied);
+    setHint(
+      commandCopied
+        ? (lang === "en"
+            ? "Bot opened. If Telegram only opens the chat, paste the copied /link command and send it."
+            : "Бот открыт. Если Telegram просто открыл чат, вставь скопированную команду /link и отправь её.")
+        : (lang === "en"
+            ? "Bot opened. If nothing happened, return here and refresh the status."
+            : "Бот открыт. Если ничего не произошло, вернись сюда и обнови статус.")
+    );
+  };
+
+  const botHandle = `@${linkInfo?.bot_username || "luggify_bot"}`;
+  const telegramUsername = user?.social_links?.telegram
+    ? user.social_links.telegram.replace(/^@/, "")
+    : "";
+
+  if (!user || !token) {
+    return null;
+  }
+
+  return (
+    <>
+      <button
+        className={`navbar-telegram-btn ${user?.tg_id ? "linked" : ""}`}
+        onClick={openModal}
+        title={user?.tg_id
+          ? (lang === "en" ? "Telegram connected" : "Telegram подключен")
+          : (lang === "en" ? "Link Telegram" : "Привязать Telegram")}
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <line x1="22" y1="2" x2="11" y2="13"></line>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+        </svg>
+        <span className="navbar-telegram-label">Telegram</span>
+      </button>
+
+      {isOpen && (
+        <div className="modal-overlay" onClick={() => setIsOpen(false)}>
+          <div className="modal-content telegram-modal" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setIsOpen(false)}>×</button>
+
+            <div className="telegram-modal-head">
+              <div className={`telegram-modal-badge ${user?.tg_id ? "linked" : ""}`}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <line x1="22" y1="2" x2="11" y2="13"></line>
+                  <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                </svg>
+              </div>
+              <div>
+                <h3 className="telegram-modal-title">Telegram</h3>
+                <p className="telegram-modal-subtitle">
+                  {user?.tg_id
+                    ? (lang === "en"
+                        ? "Account is already linked. You can reopen the bot or relink it."
+                        : "Аккаунт уже связан. Можно открыть бота или перепривязать его.")
+                    : (lang === "en"
+                        ? "Link your site account with the bot so trips, AI and reminders work together."
+                        : "Свяжи сайт и бота, чтобы поездки, AI и напоминания работали вместе.")}
+                </p>
+              </div>
+            </div>
+
+            <div className={`telegram-modal-status ${user?.tg_id ? "linked" : ""}`}>
+              <span className="telegram-modal-status-label">
+                {user?.tg_id
+                  ? (lang === "en" ? "Status" : "Статус")
+                  : (lang === "en" ? "Ready to link" : "Готово к привязке")}
+              </span>
+              <strong className="telegram-modal-status-value">
+                {user?.tg_id
+                  ? (telegramUsername
+                      ? `@${telegramUsername}`
+                      : (lang === "en" ? "Telegram is connected" : "Telegram подключен"))
+                  : (lang === "en" ? "Not linked yet" : "Пока не привязан")}
+              </strong>
+            </div>
+
+            <div className="telegram-modal-actions">
+              <button className="telegram-modal-btn primary" onClick={openTelegramBot} disabled={loading}>
+                {loading
+                  ? "..."
+                  : user?.tg_id
+                    ? (lang === "en" ? "Open bot again" : "Открыть бота снова")
+                    : (lang === "en" ? "Open bot" : "Открыть бота")}
+              </button>
+              <button className="telegram-modal-btn secondary" onClick={refreshStatus} disabled={loading}>
+                {lang === "en" ? "Refresh status" : "Проверить статус"}
+              </button>
+            </div>
+
+            {!user?.tg_id && (
+              <div className="telegram-modal-note">
+                {hint
+                  ? hint
+                  : (lang === "en"
+                      ? `Open ${botHandle}. If Telegram does not trigger linking automatically, paste the /link command that we copy for you.`
+                      : `Открой ${botHandle}. Если Telegram не запустит привязку сам, просто вставь команду /link, которую мы скопируем за тебя.`)}
+              </div>
+            )}
+
+            {copied && !user?.tg_id && (
+              <div className="telegram-modal-expiry">
+                {lang === "en" ? "The /link command has been copied." : "Команда /link уже скопирована."}
+              </div>
+            )}
+
+            {error && <div className="telegram-modal-error">{error}</div>}
+          </div>
+        </div>
+      )}
+    </>
   );
 };
 
@@ -1057,6 +1449,247 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
   );
 });
 
+const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview, onReviewSaved }) => {
+  const [rating, setRating] = useState(0);
+  const [text, setText] = useState("");
+  const [photo, setPhoto] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const photoInputRef = React.useRef(null);
+
+  const tripEnded = Boolean(checklist?.end_date && checklist.end_date <= new Date().toISOString().slice(0, 10));
+  const reviews = [...(checklist?.reviews || [])].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+  const myReview = reviews.find((review) => review.user?.id === user?.id) || null;
+  const averageRating = reviews.length
+    ? (reviews.reduce((sum, review) => sum + review.rating, 0) / reviews.length).toFixed(1)
+    : null;
+
+  useEffect(() => {
+    setRating(myReview?.rating || 0);
+    setText(myReview?.text || "");
+    setPhoto(myReview?.photo || "");
+    setError("");
+    setSuccess("");
+  }, [checklist?.slug, myReview?.id, myReview?.photo, myReview?.rating, myReview?.text, user?.id]);
+
+  if (!tripEnded && reviews.length === 0 && !canReview) {
+    return null;
+  }
+
+  const handlePhotoChange = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (loadEvent) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        const MAX_SIZE = 1280;
+        let { width, height } = img;
+
+        if (width > height && width > MAX_SIZE) {
+          height *= MAX_SIZE / width;
+          width = MAX_SIZE;
+        } else if (height > MAX_SIZE) {
+          width *= MAX_SIZE / height;
+          height = MAX_SIZE;
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, 0, 0, width, height);
+        setPhoto(canvas.toDataURL("image/jpeg", 0.82));
+      };
+      img.src = loadEvent.target.result;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleSubmit = async () => {
+    setError("");
+    setSuccess("");
+
+    if (!token) {
+      setError(lang === "en" ? "Please log in to leave a review" : "Войдите в аккаунт, чтобы оставить отзыв");
+      return;
+    }
+    if (rating < 1 || rating > 5) {
+      setError(lang === "en" ? "Choose a rating from 1 to 5" : "Выберите оценку от 1 до 5");
+      return;
+    }
+    if (text.trim().length < 10) {
+      setError(lang === "en" ? "Review should be at least 10 characters long" : "Отзыв должен быть длиннее 10 символов");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const response = await fetch(`${API_URL}/checklists/${checklist.slug}/review`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          rating,
+          text: text.trim(),
+          photo: photo || null,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        setError(data.detail || (lang === "en" ? "Failed to save review" : "Не удалось сохранить отзыв"));
+        return;
+      }
+
+      onReviewSaved(data);
+      setSuccess(lang === "en" ? "Review saved" : "Отзыв сохранён");
+    } catch (submitError) {
+      console.error(submitError);
+      setError(lang === "en" ? "Network error while saving review" : "Ошибка сети при сохранении отзыва");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="trip-reviews-section">
+      <div className="trip-reviews-header">
+        <div>
+          <h3>{lang === "en" ? "Trip reviews" : "Отзывы о поездке"}</h3>
+          <p>
+            {reviews.length > 0
+              ? (lang === "en"
+                  ? `${reviews.length} review${reviews.length > 1 ? "s" : ""} • average ${averageRating}/5`
+                  : `${reviews.length} ${reviews.length === 1 ? "отзыв" : reviews.length < 5 ? "отзыва" : "отзывов"} • средняя оценка ${averageRating}/5`)
+              : (lang === "en" ? "No reviews yet" : "Пока нет отзывов")}
+          </p>
+        </div>
+        {!tripEnded && (
+          <span className="trip-reviews-chip">
+            {lang === "en" ? "Available after the trip" : "Откроется после поездки"}
+          </span>
+        )}
+      </div>
+
+      {tripEnded && canReview && (
+        <div className="trip-review-form-card">
+          <div className="trip-review-form-head">
+            <div>
+              <h4>{myReview ? (lang === "en" ? "Edit your review" : "Обновить отзыв") : (lang === "en" ? "Share your impression" : "Поделитесь впечатлением")}</h4>
+              <p>{lang === "en" ? "Tell others how the trip went and add a photo." : "Расскажите, как прошла поездка, и при желании добавьте фото."}</p>
+            </div>
+            <div className="trip-review-stars" aria-label="rating">
+              {[1, 2, 3, 4, 5].map((star) => (
+                <button
+                  key={star}
+                  type="button"
+                  className={`trip-review-star ${rating >= star ? "active" : ""}`}
+                  onClick={() => setRating(star)}
+                >
+                  ★
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <textarea
+            className="trip-review-textarea"
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            placeholder={lang === "en" ? "What was great, what surprised you, what would you advise to others?" : "Что понравилось, что удивило, что посоветуете другим?"}
+            rows={5}
+          />
+
+          <div className="trip-review-actions">
+            <input
+              ref={photoInputRef}
+              type="file"
+              accept="image/*"
+              className="visually-hidden-input"
+              onChange={handlePhotoChange}
+            />
+            <button type="button" className="action-btn" onClick={() => photoInputRef.current?.click()}>
+              {photo ? (lang === "en" ? "Change photo" : "Сменить фото") : (lang === "en" ? "Attach photo" : "Прикрепить фото")}
+            </button>
+            {photo && (
+              <button type="button" className="action-btn" onClick={() => setPhoto("")}>
+                {lang === "en" ? "Remove photo" : "Убрать фото"}
+              </button>
+            )}
+            <button type="button" className="action-btn primary" onClick={handleSubmit} disabled={saving}>
+              {saving ? (lang === "en" ? "Saving..." : "Сохраняем...") : (myReview ? (lang === "en" ? "Update review" : "Обновить отзыв") : (lang === "en" ? "Publish review" : "Опубликовать отзыв"))}
+            </button>
+          </div>
+
+          {photo && (
+            <div className="trip-review-photo-preview">
+              <img src={photo} alt={lang === "en" ? "Review preview" : "Предпросмотр отзыва"} />
+            </div>
+          )}
+
+          {error && <div className="trip-review-feedback error">{error}</div>}
+          {success && <div className="trip-review-feedback success">{success}</div>}
+        </div>
+      )}
+
+      {tripEnded && !token && (
+        <div className="trip-review-guest-hint">
+          {lang === "en" ? "Log in after the trip to leave your own review." : "После поездки войдите в аккаунт, чтобы оставить свой отзыв."}
+        </div>
+      )}
+
+      <div className="trip-reviews-list">
+        {reviews.length === 0 ? (
+          <div className="trip-reviews-empty">
+            {lang === "en" ? "There are no public impressions for this trip yet." : "У этой поездки пока нет публичных впечатлений."}
+          </div>
+        ) : (
+          reviews.map((review) => (
+            <article key={review.id} className="trip-review-card">
+              <div className="trip-review-card-head">
+                <div className="trip-review-author">
+                  <div className="trip-review-avatar">
+                    {review.user?.avatar && (review.user.avatar.startsWith("data:image") || review.user.avatar.startsWith("http")) ? (
+                      <img src={review.user.avatar} alt={review.user.username} />
+                    ) : (
+                      review.user?.avatar || review.user?.username?.charAt(0)?.toUpperCase() || "?"
+                    )}
+                  </div>
+                  <div>
+                    <div className="trip-review-username">{review.user?.username || "Traveler"}</div>
+                    <div className="trip-review-date">
+                      {review.created_at
+                        ? new Date(review.created_at).toLocaleDateString(lang === "en" ? "en-US" : "ru-RU", { day: "numeric", month: "long", year: "numeric" })
+                        : ""}
+                    </div>
+                  </div>
+                </div>
+                <div className="trip-review-rating">
+                  <span>{review.rating.toFixed(1)}</span>
+                  <span className="trip-review-rating-stars">{"★".repeat(review.rating)}{"☆".repeat(5 - review.rating)}</span>
+                </div>
+              </div>
+
+              <p className="trip-review-text">{review.text}</p>
+
+              {review.photo && (
+                <div className="trip-review-photo">
+                  <img src={review.photo} alt={lang === "en" ? "Trip review" : "Фото из поездки"} />
+                </div>
+              )}
+            </article>
+          ))
+        )}
+      </div>
+    </section>
+  );
+});
+
 const App = ({ page }) => {
   const { id } = useParams(); // slug из URL
   const navigate = useNavigate();
@@ -1084,7 +1717,7 @@ const App = ({ page }) => {
   const [showForecast, setShowForecast] = useState(true); // Collapsible forecast state
   const [user, setUser] = useState(() => {
     const saved = localStorage.getItem("user");
-    return saved ? JSON.parse(saved) : null;
+    return safeParseJson(saved, null);
   });
   const [token, setToken] = useState(() => localStorage.getItem("token"));
   const [savedSlug, setSavedSlug] = useState(null);
@@ -1096,6 +1729,10 @@ const App = ({ page }) => {
   const [addItemMode, setAddItemMode] = useState(false);
   const [newItem, setNewItem] = useState("");
   const [activeTab, setActiveTab] = useState("shared");
+  const [activeParticipantId, setActiveParticipantId] = useState(null);
+  const [showBaggageCreator, setShowBaggageCreator] = useState(false);
+  const [newBaggageName, setNewBaggageName] = useState("");
+  const [baggageBusy, setBaggageBusy] = useState(false);
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [inviteToken, setInviteToken] = useState("");
   const [followers, setFollowers] = useState([]);
@@ -1105,6 +1742,21 @@ const App = ({ page }) => {
 
   // Computed: can current user edit this checklist?
   const isOwnerOrCollaborator = user && result && (result.user_id === user.id || (result.backpacks && result.backpacks.some(b => b.user_id === user.id)));
+  const baggageParticipants = buildBaggageParticipants(result, user);
+  const activeParticipant = baggageParticipants.find((participant) => participant.userId === activeParticipantId) || null;
+  const canManageSelectedParticipant = Boolean(
+    user &&
+    result &&
+    activeParticipant &&
+    (activeParticipant.userId === user.id || result.user_id === user.id)
+  );
+  const canReviewTrip = Boolean(
+    user &&
+    result &&
+    isOwnerOrCollaborator &&
+    result.end_date &&
+    result.end_date <= new Date().toISOString().slice(0, 10)
+  );
   const checklistColumns = viewportWidth <= 600 ? 1 : viewportWidth <= 900 ? 2 : 3;
 
   const handleAuth = (userData, accessToken) => {
@@ -1161,48 +1813,48 @@ const App = ({ page }) => {
     }
   }, [id]);
 
-  // Загружаем отмеченные из localStorage при загрузке чеклиста
   useEffect(() => {
     if (result && result.items && savedSlug) {
-      const saved = JSON.parse(localStorage.getItem(`checkedItems_${savedSlug}`) || "{}");
-      const initial = {};
-      result.items.forEach(item => {
-        initial[item] = saved[item] || false;
-      });
-      setCheckedItems(initial);
+      setCheckedItems(buildCheckedItemsMap(result.items, result.checked_items));
     }
   }, [result, savedSlug]);
 
   useEffect(() => {
-    if (result && user && result.backpacks) {
-      const myBp = result.backpacks.find(b => b.user_id === user.id);
-      if (myBp && activeTab === "shared") {
-        setActiveTab(myBp.id.toString());
+    if (savedSlug) {
+      setRemovedItems(result?.removed_items || []);
+    }
+  }, [result?.removed_items, savedSlug]);
+
+  useEffect(() => {
+    if (!result) return;
+
+    const participants = buildBaggageParticipants(result, user);
+    if (participants.length === 0) {
+      setActiveParticipantId(null);
+      if (activeTab !== "shared") {
+        setActiveTab("shared");
       }
+      return;
     }
-  }, [activeTab, result, user]);
 
-  // Сохраняем отмеченные в localStorage при изменении
-  useEffect(() => {
-    if (savedSlug) {
-      localStorage.setItem(`checkedItems_${savedSlug}`, JSON.stringify(checkedItems));
+    const stillExists = participants.some((participant) => participant.userId === activeParticipantId);
+    if (!stillExists) {
+      const preferredParticipant =
+        participants.find((participant) => participant.userId === user?.id) || participants[0];
+      setActiveParticipantId(preferredParticipant.userId);
+      return;
     }
-  }, [checkedItems, savedSlug]);
 
-  // Загружаем удалённые вещи из localStorage при загрузке чеклиста
-  useEffect(() => {
-    if (savedSlug) {
-      const removed = JSON.parse(localStorage.getItem(`removedItems_${savedSlug}`) || "[]");
-      setRemovedItems(removed);
-    }
-  }, [savedSlug]);
+    if (activeTab === "shared") return;
 
-  // Сохраняем удалённые вещи в localStorage при изменении
-  useEffect(() => {
-    if (savedSlug) {
-      localStorage.setItem(`removedItems_${savedSlug}`, JSON.stringify(removedItems));
+    const activeParticipantGroup = participants.find((participant) => participant.userId === activeParticipantId);
+    const baggageStillExists = activeParticipantGroup?.baggage.some((bp) => bp.id.toString() === activeTab);
+    if (!baggageStillExists) {
+      const fallbackBaggage =
+        activeParticipantGroup?.baggage.find((bp) => bp.is_default) || activeParticipantGroup?.baggage[0];
+      setActiveTab(fallbackBaggage ? fallbackBaggage.id.toString() : "shared");
     }
-  }, [removedItems, savedSlug]);
+  }, [result, user, activeParticipantId, activeTab]);
 
   useEffect(() => {
     if (location.pathname === "/") {
@@ -1313,6 +1965,28 @@ const App = ({ page }) => {
     } catch (e) { console.error("Backpack sync error:", e); }
   };
 
+  const handleQuantityChange = (item, nextQuantity) => {
+    if (!isOwnerOrCollaborator) return;
+    const quantity = Math.max(1, Number(nextQuantity) || 1);
+
+    if (activeTab === "shared") {
+      const nextQuantities = setItemQuantityInMap(result?.item_quantities || {}, item, quantity);
+      setResult((prev) => ({ ...prev, item_quantities: nextQuantities }));
+      syncChecklist({ item_quantities: nextQuantities });
+      return;
+    }
+
+    setResult((prev) => {
+      const next = { ...prev };
+      const bp = next.backpacks?.find((bag) => bag.id.toString() === activeTab);
+      if (bp) {
+        bp.item_quantities = setItemQuantityInMap(bp.item_quantities || {}, item, quantity);
+        syncBackpackItems(activeTab, { item_quantities: bp.item_quantities });
+      }
+      return next;
+    });
+  };
+
   const handleCheck = (item) => {
     if (!isOwnerOrCollaborator) return;
     if (activeTab === "shared") {
@@ -1352,24 +2026,6 @@ const App = ({ page }) => {
     }
   };
 
-  const handleRestoreAll = () => {
-    if (!isOwnerOrCollaborator) return;
-    if (activeTab === "shared") {
-      setRemovedItems([]);
-      syncChecklist({ removed_items: [] });
-    } else {
-      setResult(prev => {
-        const next = { ...prev };
-        const bp = next.backpacks?.find(b => b.id.toString() === activeTab);
-        if (bp) {
-          bp.removed_items = [];
-          syncBackpackItems(activeTab, { removed_items: [] });
-        }
-        return next;
-      });
-    }
-  };
-
   const resetChecklist = () => {
     if (!isOwnerOrCollaborator) return;
     if (activeTab === "shared") {
@@ -1392,19 +2048,52 @@ const App = ({ page }) => {
 
   const handleAddItem = () => {
     if (!isOwnerOrCollaborator) return;
-    if (!newItem.trim()) return;
+    const normalizedItem = newItem.trim();
+    if (!normalizedItem) return;
     if (activeTab === "shared") {
-      if (result.items.includes(newItem.trim())) return;
-      const newItems = [...result.items, newItem.trim()];
-      setResult(prev => ({ ...prev, items: newItems }));
-      syncChecklist({ items: newItems });
+      if (result.items.includes(normalizedItem)) {
+        if (removedItems.includes(normalizedItem)) {
+          const nextRemoved = removedItems.filter((existing) => existing !== normalizedItem);
+          const nextQuantities = setItemQuantityInMap(
+            result?.item_quantities || {},
+            normalizedItem,
+            getItemQuantity(result?.item_quantities || {}, normalizedItem)
+          );
+          setRemovedItems(nextRemoved);
+          setResult((prev) => ({ ...prev, item_quantities: nextQuantities }));
+          syncChecklist({ removed_items: nextRemoved, item_quantities: nextQuantities });
+        }
+        setNewItem("");
+        setAddItemMode(false);
+        return;
+      }
+      const newItems = [...result.items, normalizedItem];
+      const nextQuantities = setItemQuantityInMap(result?.item_quantities || {}, normalizedItem, 1);
+      setResult(prev => ({ ...prev, items: newItems, item_quantities: nextQuantities }));
+      syncChecklist({ items: newItems, item_quantities: nextQuantities });
     } else {
       setResult(prev => {
         const next = { ...prev };
         const bp = next.backpacks?.find(b => b.id.toString() === activeTab);
-        if (bp && !bp.items.includes(newItem.trim())) {
-          bp.items = [...bp.items, newItem.trim()];
-          syncBackpackItems(activeTab, { items: bp.items });
+        if (bp && bp.items.includes(normalizedItem)) {
+          if (bp.removed_items.includes(normalizedItem)) {
+            bp.removed_items = bp.removed_items.filter((existing) => existing !== normalizedItem);
+            bp.item_quantities = setItemQuantityInMap(
+              bp.item_quantities || {},
+              normalizedItem,
+              getItemQuantity(bp.item_quantities || {}, normalizedItem)
+            );
+            syncBackpackItems(activeTab, {
+              removed_items: bp.removed_items,
+              item_quantities: bp.item_quantities
+            });
+          }
+          return next;
+        }
+        if (bp) {
+          bp.items = [...bp.items, normalizedItem];
+          bp.item_quantities = setItemQuantityInMap(bp.item_quantities || {}, normalizedItem, 1);
+          syncBackpackItems(activeTab, { items: bp.items, item_quantities: bp.item_quantities });
         }
         return next;
       });
@@ -1413,24 +2102,317 @@ const App = ({ page }) => {
     setAddItemMode(false);
   };
 
+  const handlePrintChecklist = () => {
+    if (!result) return;
+
+    const printWindow = window.open("", "_blank", "width=1180,height=860");
+    if (!printWindow) return;
+
+    const allBackpackItems = new Set();
+    (result.backpacks || []).forEach((bp) => {
+      (bp.items || [])
+        .filter((item) => !(bp.removed_items || []).includes(item))
+        .forEach((item) => allBackpackItems.add(item));
+    });
+
+    const buildItemsForSection = (items = [], removed = [], checkedMap = {}, quantityMap = {}, extraFilter = null) =>
+      items
+        .filter((item) => !removed.includes(item))
+        .filter((item) => (typeof extraFilter === "function" ? extraFilter(item) : true))
+        .map((item) => ({
+          name: item,
+          checked: Boolean(checkedMap[item]),
+          quantity: getItemQuantity(quantityMap, item),
+        }));
+
+    const sharedItems = buildItemsForSection(
+      result.items || [],
+      removedItems,
+      checkedItems,
+      result.item_quantities || {},
+      (item) => !allBackpackItems.has(item)
+    );
+
+    const participantLookup = new Map(
+      baggageParticipants.map((participant) => [participant.userId, participant])
+    );
+
+    const sections = [];
+
+    if (sharedItems.length > 0) {
+      sections.push({
+        title: "Общие вещи",
+        subtitle: `${sharedItems.length} позиций`,
+        items: sharedItems,
+      });
+    }
+
+    sortAllBackpacks(result.backpacks || []).forEach((baggage) => {
+      const visibleItems = buildItemsForSection(
+        baggage.items || [],
+        baggage.removed_items || [],
+        buildCheckedItemsMap(baggage.items || [], baggage.checked_items || []),
+        baggage.item_quantities || {}
+      );
+
+      if (!visibleItems.length) return;
+
+      const participant = participantLookup.get(baggage.user_id);
+      const ownerLabel = participant?.isCurrentUser
+        ? "Твой багаж"
+        : participant?.username || baggage.user?.username || "Багаж участника";
+
+      const subtitleParts = [ownerLabel];
+      if (baggage.is_default) subtitleParts.push("основной");
+      subtitleParts.push(`${visibleItems.length} позиций`);
+
+      sections.push({
+        title: baggage.name || getBaggageKindLabel(baggage),
+        subtitle: subtitleParts.join(" • "),
+        items: visibleItems,
+      });
+    });
+
+    const dateRange = formatChecklistDateRange(result.start_date, result.end_date);
+    const cityLabel = escapeHtml(result.city || "Чеклист");
+    const sectionsHtml = sections
+      .map((section) => `
+        <section class="print-section">
+          <div class="print-section-head">
+            <div>
+              <h2>${escapeHtml(section.title)}</h2>
+              <p>${escapeHtml(section.subtitle)}</p>
+            </div>
+          </div>
+          <div class="print-items">
+            ${section.items
+              .map(
+                (item) => `
+                  <div class="print-item${item.checked ? " checked" : ""}">
+                    <span class="print-check">${item.checked ? "✓" : ""}</span>
+                    <span class="print-name">${escapeHtml(item.name)}</span>
+                    ${item.quantity > 1 ? `<span class="print-qty">×${item.quantity}</span>` : ""}
+                  </div>
+                `
+              )
+              .join("")}
+          </div>
+        </section>
+      `)
+      .join("");
+
+    printWindow.document.write(`
+      <!doctype html>
+      <html lang="ru">
+        <head>
+          <meta charset="utf-8" />
+          <title>${cityLabel} — печать</title>
+          <style>
+            @page { margin: 16mm; }
+            * { box-sizing: border-box; }
+            body {
+              margin: 0;
+              font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+              color: #161616;
+              background: #ffffff;
+            }
+            .print-shell {
+              max-width: 1100px;
+              margin: 0 auto;
+            }
+            .print-header {
+              display: flex;
+              justify-content: space-between;
+              align-items: flex-end;
+              gap: 24px;
+              padding-bottom: 20px;
+              border-bottom: 2px solid #f0d3a3;
+              margin-bottom: 22px;
+            }
+            .print-brand {
+              font-size: 13px;
+              letter-spacing: 0.16em;
+              text-transform: uppercase;
+              color: #c27a10;
+              margin-bottom: 8px;
+            }
+            .print-title {
+              font-size: 34px;
+              line-height: 1.05;
+              font-weight: 800;
+              margin: 0;
+            }
+            .print-meta {
+              margin: 10px 0 0;
+              color: #6f6f6f;
+              font-size: 15px;
+            }
+            .print-summary {
+              min-width: 220px;
+              padding: 16px 18px;
+              border: 1px solid #ead8bb;
+              border-radius: 18px;
+              background: #fffaf2;
+            }
+            .print-summary-label {
+              font-size: 12px;
+              letter-spacing: 0.14em;
+              text-transform: uppercase;
+              color: #8e6a33;
+              margin-bottom: 8px;
+            }
+            .print-summary-value {
+              font-size: 28px;
+              font-weight: 800;
+              color: #bb7410;
+            }
+            .print-grid {
+              display: grid;
+              grid-template-columns: repeat(2, minmax(0, 1fr));
+              gap: 16px;
+            }
+            .print-section {
+              border: 1px solid #ece5d8;
+              border-radius: 20px;
+              padding: 18px 18px 14px;
+              break-inside: avoid;
+              page-break-inside: avoid;
+            }
+            .print-section h2 {
+              margin: 0;
+              font-size: 20px;
+              line-height: 1.15;
+            }
+            .print-section p {
+              margin: 6px 0 0;
+              color: #7d7d7d;
+              font-size: 13px;
+            }
+            .print-items {
+              margin-top: 14px;
+              display: grid;
+              gap: 9px;
+            }
+            .print-item {
+              display: grid;
+              grid-template-columns: 22px minmax(0, 1fr) auto;
+              align-items: start;
+              gap: 10px;
+              padding: 7px 0;
+              border-bottom: 1px solid #f3eee5;
+            }
+            .print-item:last-child {
+              border-bottom: none;
+              padding-bottom: 0;
+            }
+            .print-check {
+              width: 22px;
+              height: 22px;
+              border: 1.5px solid #d1b48a;
+              border-radius: 6px;
+              display: inline-flex;
+              align-items: center;
+              justify-content: center;
+              font-size: 13px;
+              font-weight: 800;
+              color: #c07910;
+            }
+            .print-item.checked .print-check {
+              background: #ffefcf;
+            }
+            .print-name {
+              font-size: 15px;
+              line-height: 1.35;
+              word-break: break-word;
+            }
+            .print-item.checked .print-name {
+              color: #8a8a8a;
+              text-decoration: line-through;
+            }
+            .print-qty {
+              padding: 2px 8px;
+              border-radius: 999px;
+              border: 1px solid #e6d2b2;
+              font-size: 12px;
+              font-weight: 700;
+              color: #8d641c;
+              white-space: nowrap;
+            }
+            @media print {
+              .print-shell { max-width: none; }
+            }
+          </style>
+        </head>
+        <body>
+          <div class="print-shell">
+            <header class="print-header">
+              <div>
+                <div class="print-brand">Luggify</div>
+                <h1 class="print-title">${cityLabel}</h1>
+                <p class="print-meta">${escapeHtml(dateRange)}</p>
+              </div>
+              <div class="print-summary">
+                <div class="print-summary-label">Разделов</div>
+                <div class="print-summary-value">${sections.length}</div>
+              </div>
+            </header>
+            <main class="print-grid">
+              ${sectionsHtml}
+            </main>
+          </div>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.onload = () => {
+      printWindow.print();
+    };
+  };
+
   const handleMoveToBackpack = (item) => {
     if (!user || !result || !result.backpacks) return;
-    const myBp = result.backpacks.find(b => b.user_id === user.id);
+    const myBp = getDefaultBaggage(result.backpacks, user.id);
     if (!myBp) {
-      alert("У вас еще нет рюкзака. Он создастся при принятии приглашения.");
+      alert("У вас ещё нет личного багажа. Он создастся при принятии приглашения.");
       return;
     }
 
     setResult(prev => {
       const next = { ...prev };
       const bp = next.backpacks.find(b => b.id === myBp.id);
+      const sharedQuantity = getItemQuantity(next.item_quantities || {}, item);
+      const sharedWasChecked = (next.checked_items || []).includes(item);
       if (bp) {
         if (!bp.items) bp.items = [];
         if (!bp.items.includes(item)) {
           bp.items = [...bp.items, item];
-          syncBackpackItems(bp.id, { items: bp.items });
         }
+        const nextBackpackQuantities = setItemQuantityInMap(
+          bp.item_quantities || {},
+          item,
+          getItemQuantity(bp.item_quantities || {}, item) + sharedQuantity
+        );
+        bp.item_quantities = nextBackpackQuantities;
+        bp.checked_items = sharedWasChecked && !(bp.checked_items || []).includes(item)
+          ? [...(bp.checked_items || []), item]
+          : (bp.checked_items || []);
+        syncBackpackItems(bp.id, {
+          items: bp.items,
+          checked_items: bp.checked_items,
+          item_quantities: bp.item_quantities,
+        });
       }
+      next.items = (next.items || []).filter((existing) => existing !== item);
+      next.checked_items = (next.checked_items || []).filter((existing) => existing !== item);
+      next.removed_items = (next.removed_items || []).filter((existing) => existing !== item);
+      next.item_quantities = setItemQuantityInMap(next.item_quantities || {}, item, 0);
+      syncChecklist({
+        items: next.items,
+        checked_items: next.checked_items,
+        removed_items: next.removed_items,
+        item_quantities: next.item_quantities,
+      });
       return next;
     });
   };
@@ -1439,27 +2421,158 @@ const App = ({ page }) => {
     setResult(prev => {
       const next = { ...prev };
       const bp = next.backpacks.find(b => b.id.toString() === fromBpId.toString());
+      const sourceQuantity = getItemQuantity(bp?.item_quantities || {}, item);
+      const sourceWasChecked = (bp?.checked_items || []).includes(item);
       if (bp) {
         if (!bp.items) bp.items = [];
         if (bp.items.includes(item)) {
           bp.items = bp.items.filter(i => i !== item);
-          syncBackpackItems(bp.id, { items: bp.items });
+          bp.checked_items = (bp.checked_items || []).filter((existing) => existing !== item);
+          bp.removed_items = (bp.removed_items || []).filter((existing) => existing !== item);
+          bp.item_quantities = setItemQuantityInMap(bp.item_quantities || {}, item, 0);
+          syncBackpackItems(bp.id, {
+            items: bp.items,
+            checked_items: bp.checked_items,
+            removed_items: bp.removed_items,
+            item_quantities: bp.item_quantities,
+          });
         }
       }
+      if (!(next.items || []).includes(item)) {
+        next.items = [...(next.items || []), item];
+      }
+      if (sourceWasChecked && !(next.checked_items || []).includes(item)) {
+        next.checked_items = [...(next.checked_items || []), item];
+      }
+      next.removed_items = (next.removed_items || []).filter((existing) => existing !== item);
+      next.item_quantities = setItemQuantityInMap(
+        next.item_quantities || {},
+        item,
+        getItemQuantity(next.item_quantities || {}, item) + sourceQuantity
+      );
+      syncChecklist({
+        items: next.items,
+        removed_items: next.removed_items,
+        item_quantities: next.item_quantities,
+      });
       return next;
     });
+  };
 
-    let newSharedItems = result.items || [];
-    let newRemoved = [...removedItems];
-    if (!newSharedItems.includes(item)) {
-      newSharedItems = [...newSharedItems, item];
-      syncChecklist({ items: newSharedItems });
-    } else {
-      newRemoved = newRemoved.filter(i => i !== item);
-      setRemovedItems(newRemoved);
-      syncChecklist({ removed_items: newRemoved });
+  const selectParticipant = (participantUserId) => {
+    setActiveParticipantId(participantUserId);
+    setShowBaggageCreator(false);
+    setNewBaggageName("");
+    const participant = baggageParticipants.find((entry) => entry.userId === participantUserId);
+    const fallbackBaggage = participant?.baggage.find((bp) => bp.is_default) || participant?.baggage[0];
+    setActiveTab(fallbackBaggage ? fallbackBaggage.id.toString() : "shared");
+  };
+
+  const handleCreateBaggage = async () => {
+    const name = newBaggageName.trim();
+    if (!name || !savedSlug || !activeParticipant || !authHeaders.Authorization) return;
+
+    setBaggageBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/checklists/${savedSlug || id}/baggage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: JSON.stringify({
+          user_id: activeParticipant.userId,
+          name,
+          kind: guessBaggageKind(name),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Не удалось создать багаж");
+      }
+
+      setResult((prev) => ({
+        ...prev,
+        backpacks: sortAllBackpacks([...(prev.backpacks || []), data]),
+      }));
+      setActiveParticipantId(data.user_id);
+      setActiveTab(data.id.toString());
+      setNewBaggageName("");
+      setShowBaggageCreator(false);
+    } catch (e) {
+      alert(e.message || "Не удалось создать багаж");
+    } finally {
+      setBaggageBusy(false);
     }
-    setResult(prev => ({ ...prev, items: newSharedItems }));
+  };
+
+  const handleDeleteBaggage = async (baggage) => {
+    if (!savedSlug || !authHeaders.Authorization) return;
+    if (!window.confirm(`Удалить багаж «${baggage.name || "Багаж"}»?`)) return;
+
+    setBaggageBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/baggage/${baggage.id}`, {
+        method: "DELETE",
+        headers: authHeaders,
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Не удалось удалить багаж");
+      }
+
+      setResult((prev) => {
+        const nextBackpacks = (prev.backpacks || []).filter((bp) => bp.id !== baggage.id);
+        return {
+          ...prev,
+          hidden_sections: (prev.hidden_sections || []).filter((section) => section !== `backpack:${baggage.id}`),
+          backpacks: nextBackpacks,
+        };
+      });
+
+      const participant = baggageParticipants.find((entry) => entry.userId === baggage.user_id);
+      const nextBaggage = participant?.baggage.filter((bp) => bp.id !== baggage.id);
+      const fallback = nextBaggage?.find((bp) => bp.is_default) || nextBaggage?.[0];
+      setActiveTab(fallback ? fallback.id.toString() : "shared");
+    } catch (e) {
+      alert(e.message || "Не удалось удалить багаж");
+    } finally {
+      setBaggageBusy(false);
+    }
+  };
+
+  const handleSetDefaultBaggage = async (baggage) => {
+    if (!savedSlug || !authHeaders.Authorization || baggage.is_default) return;
+
+    setBaggageBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/baggage/${baggage.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: JSON.stringify({ is_default: true }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Не удалось сделать багаж основным");
+      }
+
+      setResult((prev) => ({
+        ...prev,
+        backpacks: sortAllBackpacks(
+          (prev.backpacks || []).map((bp) => (
+            bp.user_id === data.user_id
+              ? {
+                  ...bp,
+                  ...(bp.id === data.id ? data : {}),
+                  is_default: bp.id === data.id,
+                }
+              : bp
+          ))
+        ),
+      }));
+      setActiveTab(data.id.toString());
+    } catch (e) {
+      alert(e.message || "Не удалось сделать багаж основным");
+    } finally {
+      setBaggageBusy(false);
+    }
   };
 
   const handleToggleSectionVisibility = async (section) => {
@@ -1488,6 +2601,35 @@ const App = ({ page }) => {
     }
   };
 
+  const handleReviewSaved = (savedReview) => {
+    setResult((prev) => {
+      if (!prev) return prev;
+      const remainingReviews = (prev.reviews || []).filter(
+        (review) => review.user?.id !== savedReview.user?.id
+      );
+      return {
+        ...prev,
+        reviews: [savedReview, ...remainingReviews].sort(
+          (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0)
+        ),
+      };
+    });
+  };
+
+  const handleChecklistUpdated = (updatedChecklist) => {
+    if (!updatedChecklist) return;
+
+    const nextSlug = updatedChecklist.slug || savedSlug;
+    const nextCheckedItems = buildCheckedItemsMap(updatedChecklist.items || [], updatedChecklist.checked_items || []);
+    const nextRemovedItems = updatedChecklist.removed_items || [];
+
+    setSavedSlug(nextSlug || null);
+    setCheckedItems(nextCheckedItems);
+    setRemovedItems(nextRemovedItems);
+    setActiveTab("shared");
+    setResult(updatedChecklist);
+  };
+
   const formatDate = (isoDate) => {
     const d = new Date(isoDate);
     const day = String(d.getDate()).padStart(2, "0");
@@ -1503,6 +2645,13 @@ const App = ({ page }) => {
         <div className="navbar-logo" onClick={() => navigate("/")}>
           <span>🧳</span> Luggify
         </div>
+        <div className="navbar-center">
+          <NavbarUserSearch
+            lang={lang}
+            navigate={navigate}
+            currentUsername={user?.username || ""}
+          />
+        </div>
         <div className="navbar-user">
           <div className="language-switcher">
             <button
@@ -1516,6 +2665,12 @@ const App = ({ page }) => {
           </div>
           {user ? (
             <>
+              <TelegramLinkButton
+                user={user}
+                token={token}
+                onUserUpdate={setUser}
+                lang={lang}
+              />
               <div className="navbar-profile" onClick={() => navigate("/profile")}>
                 <div className="navbar-avatar">
                   {user.avatar && (user.avatar.startsWith("data:image") || user.avatar.startsWith("http")) ? (
@@ -1816,44 +2971,202 @@ const App = ({ page }) => {
                   )}
                 </h2>
 
-                {/* Вкладки рюкзаков */}
                 {(savedSlug || id) && (result.user_id === user?.id || (result.backpacks && result.backpacks.length > 0)) && (
-                  <div className="backpack-tabs-container">
-                    <div className="backpack-tabs">
-                      <div
-                        className={`backpack-tab ${activeTab === "shared" ? "active" : ""}`}
-                        onClick={() => setActiveTab("shared")}
+                  <div className="baggage-panel">
+                    <div className="baggage-panel-primary">
+                      <button
+                        className={`scope-chip ${activeTab === "shared" ? "active" : ""}`}
+                        onClick={() => {
+                          setActiveTab("shared");
+                          setShowBaggageCreator(false);
+                          setNewBaggageName("");
+                        }}
                       >
-                        <TentIcon style={{ marginRight: '6px' }} /> <span className="tab-label">Общие вещи</span>
+                        <span className="scope-chip-avatar">
+                          <TentIcon style={{ marginRight: 0 }} />
+                        </span>
+                        <span className="scope-chip-body">
+                          <span className="scope-chip-name">Общие вещи</span>
+                          <span className="scope-chip-meta">Общий список поездки</span>
+                        </span>
                         {result.user_id === user?.id && (
                           <span
-                            className={`tab-visibility-toggle ${result.hidden_sections?.includes('shared') ? 'hidden' : 'visible'}`}
-                            onClick={(e) => { e.stopPropagation(); handleToggleSectionVisibility('shared'); }}
-                            title={result.hidden_sections?.includes('shared') ? 'Скрыто от других' : 'Видно всем'}
+                            className={`scope-chip-action ${result.hidden_sections?.includes("shared") ? "hidden" : "visible"}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleToggleSectionVisibility("shared");
+                            }}
+                            title={result.hidden_sections?.includes("shared") ? "Скрыто от других" : "Видно всем"}
                           >
-                            {result.hidden_sections?.includes('shared') ? <LockIcon style={{ marginRight: 0 }} /> : <UnlockIcon style={{ marginRight: 0 }} />}
+                            {result.hidden_sections?.includes("shared") ? <LockIcon style={{ marginRight: 0 }} /> : <UnlockIcon style={{ marginRight: 0 }} />}
                           </span>
                         )}
-                      </div>
-                      {result.backpacks && result.backpacks.map(bp => (
-                        <div
-                          key={bp.id}
-                          className={`backpack-tab ${activeTab === bp.id.toString() ? "active" : ""}`}
-                          onClick={() => setActiveTab(bp.id.toString())}
-                        >
-                          <BackpackIcon style={{ marginRight: '6px' }} /> <span className="tab-label">{bp.user?.username || `id:${bp.user_id}`}</span>
-                          {result.user_id === user?.id && (
-                            <span
-                              className={`tab-visibility-toggle ${result.hidden_sections?.includes(`backpack:${bp.id}`) ? 'hidden' : 'visible'}`}
-                              onClick={(e) => { e.stopPropagation(); handleToggleSectionVisibility(`backpack:${bp.id}`); }}
-                              title={result.hidden_sections?.includes(`backpack:${bp.id}`) ? 'Скрыто от других' : 'Видно всем'}
+                      </button>
+
+                      {baggageParticipants.length > 0 && (
+                        <div className="participant-switcher">
+                          {baggageParticipants.map((participant) => (
+                            <button
+                              key={participant.userId}
+                              className={`participant-chip ${activeParticipantId === participant.userId ? "selected" : ""} ${activeTab !== "shared" && activeParticipantId === participant.userId ? "active" : ""}`}
+                              onClick={() => selectParticipant(participant.userId)}
                             >
-                              {result.hidden_sections?.includes(`backpack:${bp.id}`) ? <LockIcon style={{ marginRight: 0 }} /> : <UnlockIcon style={{ marginRight: 0 }} />}
-                            </span>
+                              <span className="participant-chip-avatar">
+                                {getInitial(participant.isCurrentUser ? "Я" : participant.username)}
+                              </span>
+                              <span className="participant-chip-body">
+                                <span className="participant-chip-name">
+                                  {participant.isCurrentUser ? "Я" : participant.username}
+                                </span>
+                                <span className="participant-chip-meta">
+                                  {participant.baggage.length} багажа • {getParticipantVisibleItemCount(participant)} вещей
+                                </span>
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {activeParticipant && (
+                      <div className="baggage-panel-secondary">
+                        <div className="baggage-panel-header">
+                          <div>
+                            <div className="baggage-panel-title">
+                              {activeParticipant.isCurrentUser ? "Мой багаж" : `Багаж ${activeParticipant.username}`}
+                            </div>
+                            <div className="baggage-panel-subtitle">
+                              {activeParticipant.baggage.length} багажа • {getParticipantVisibleItemCount(activeParticipant)} вещей
+                            </div>
+                          </div>
+                          {canManageSelectedParticipant && !showBaggageCreator && (
+                            <button
+                              className="baggage-create-btn"
+                              onClick={() => setShowBaggageCreator(true)}
+                              disabled={baggageBusy}
+                            >
+                              + Багаж
+                            </button>
                           )}
                         </div>
-                      ))}
-                    </div>
+
+                        <div className="baggage-chip-row">
+                          {activeParticipant.baggage.length > 0 ? activeParticipant.baggage.map((bp) => (
+                            <div
+                              key={bp.id}
+                              className={`baggage-chip ${activeTab === bp.id.toString() ? "active" : ""}`}
+                              onClick={() => setActiveTab(bp.id.toString())}
+                            >
+                              <div className="baggage-chip-main">
+                                <BackpackIcon style={{ marginRight: "6px" }} />
+                                <div className="baggage-chip-copy">
+                                  <div className="baggage-chip-heading">
+                                    <span className="baggage-chip-name">{bp.name || "Багаж"}</span>
+                                    {bp.is_default && <span className="baggage-chip-badge">основной</span>}
+                                  </div>
+                                  <span className="baggage-chip-meta">
+                                    {getBaggageMetaLine(bp)}
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="baggage-chip-actions">
+                                {canManageSelectedParticipant && (
+                                  <button
+                                    className={`baggage-default-toggle ${bp.is_default ? "active" : ""}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleSetDefaultBaggage(bp);
+                                    }}
+                                    title={bp.is_default ? "Основной багаж" : "Сделать основным"}
+                                    disabled={baggageBusy || bp.is_default}
+                                  >
+                                    <span className="baggage-default-toggle-dot" />
+                                  </button>
+                                )}
+                                {result.user_id === user?.id && (
+                                  <button
+                                    className={`baggage-chip-action ${result.hidden_sections?.includes(`backpack:${bp.id}`) ? "hidden" : "visible"}`}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleToggleSectionVisibility(`backpack:${bp.id}`);
+                                    }}
+                                    title={result.hidden_sections?.includes(`backpack:${bp.id}`) ? "Скрыто от других" : "Видно всем"}
+                                  >
+                                    {result.hidden_sections?.includes(`backpack:${bp.id}`) ? <LockIcon style={{ marginRight: 0 }} /> : <UnlockIcon style={{ marginRight: 0 }} />}
+                                  </button>
+                                )}
+                                {canManageSelectedParticipant && !bp.is_default && (
+                                  <button
+                                    className="baggage-chip-delete"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleDeleteBaggage(bp);
+                                    }}
+                                    title="Удалить багаж"
+                                    disabled={baggageBusy}
+                                  >
+                                    ×
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )) : (
+                            <div className="baggage-empty-hint">
+                              У этого участника пока нет отдельного багажа.
+                            </div>
+                          )}
+                        </div>
+
+                        {canManageSelectedParticipant && showBaggageCreator && (
+                          <div className="baggage-creator">
+                            <div className="baggage-creator-presets">
+                              {["Чемодан", "Ручная кладь", "Рюкзак"].map((preset) => (
+                                <button
+                                  key={preset}
+                                  className={`baggage-preset-chip ${newBaggageName === preset ? "active" : ""}`}
+                                  onClick={() => setNewBaggageName(preset)}
+                                  type="button"
+                                >
+                                  {preset}
+                                </button>
+                              ))}
+                            </div>
+                            <div className="baggage-creator-row">
+                              <input
+                                className="baggage-name-input"
+                                type="text"
+                                value={newBaggageName}
+                                onChange={(e) => setNewBaggageName(e.target.value)}
+                                placeholder="Например: Чемодан"
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") {
+                                    handleCreateBaggage();
+                                  }
+                                }}
+                                autoFocus
+                              />
+                              <button
+                                className="baggage-confirm-btn"
+                                onClick={handleCreateBaggage}
+                                disabled={baggageBusy || !newBaggageName.trim()}
+                              >
+                                Создать
+                              </button>
+                              <button
+                                className="baggage-cancel-btn"
+                                onClick={() => {
+                                  setShowBaggageCreator(false);
+                                  setNewBaggageName("");
+                                }}
+                                disabled={baggageBusy}
+                              >
+                                Отмена
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -1877,6 +3190,7 @@ const App = ({ page }) => {
                     let targetItems = result.items || [];
                     let targetRemoved = removedItems;
                     let targetChecked = checkedItems;
+                    let targetQuantities = normalizeQuantityMap(result.item_quantities || {});
 
                     if (activeTab !== "shared" && result.backpacks) {
                       const bp = result.backpacks.find(b => b.id.toString() === activeTab);
@@ -1884,6 +3198,7 @@ const App = ({ page }) => {
                         targetItems = bp.items || [];
                         targetRemoved = bp.removed_items || [];
                         targetChecked = (bp.checked_items || []).reduce((acc, cur) => { acc[cur] = true; return acc; }, {});
+                        targetQuantities = normalizeQuantityMap(bp.item_quantities || {});
                       }
                     }
 
@@ -1909,6 +3224,9 @@ const App = ({ page }) => {
                           <div className="checklist-category" key={idx}>
                             <div className="checklist">
                               {col.map((item) => (
+                                (() => {
+                                  const quantity = getItemQuantity(targetQuantities, item);
+                                  return (
                                 <label
                                   key={item}
                                   className={`checklist-label${targetChecked[item] ? " checked" : ""}`}
@@ -1920,34 +3238,82 @@ const App = ({ page }) => {
                                     onChange={() => handleCheck(item)}
                                     disabled={!isOwnerOrCollaborator}
                                   />
-                                  {item}
-                                  {isOwnerOrCollaborator && (
-                                    <span className="item-action-group">
-                                      {activeTab === "shared" && result?.backpacks?.some(b => b.user_id === user?.id) && (
+                                  <span className="checklist-item-text">{item}</span>
+                                  <span className="item-right-controls">
+                                    {(isOwnerOrCollaborator || quantity > 1) && (
+                                      <div
+                                        className="item-quantity-control"
+                                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                                        onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                                      >
+                                        {isOwnerOrCollaborator && (
+                                          <button
+                                            type="button"
+                                            className="item-quantity-btn"
+                                            onClick={(e) => {
+                                              e.preventDefault();
+                                              e.stopPropagation();
+                                              handleQuantityChange(item, Math.max(1, quantity - 1));
+                                            }}
+                                            disabled={quantity <= 1}
+                                          >
+                                            −
+                                          </button>
+                                        )}
+                                        <input
+                                          type="number"
+                                          min="1"
+                                          className="item-quantity-input"
+                                          value={quantity}
+                                          readOnly={!isOwnerOrCollaborator}
+                                          onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                                          onChange={(e) => handleQuantityChange(item, e.target.value)}
+                                        />
+                                        {isOwnerOrCollaborator && (
+                                          <button
+                                            type="button"
+                                            className="item-quantity-btn"
+                                            onClick={(e) => {
+                                              e.preventDefault();
+                                              e.stopPropagation();
+                                              handleQuantityChange(item, quantity + 1);
+                                            }}
+                                          >
+                                            +
+                                          </button>
+                                        )}
+                                      </div>
+                                    )}
+                                    {isOwnerOrCollaborator && (
+                                      <span className="item-action-group">
+                                        {activeTab === "shared" && result?.backpacks?.some(b => b.user_id === user?.id) && (
+                                          <button
+                                            className="checklist-action-btn"
+                                            title="Взять себе (Перенести в рюкзак)"
+                                            onClick={e => { e.preventDefault(); handleMoveToBackpack(item); }}
+                                            tabIndex={-1}
+                                          ><BackpackIcon style={{ width: '16px', height: '16px', marginRight: 0 }} /></button>
+                                        )}
+                                        {activeTab !== "shared" && (
+                                          <button
+                                            className="checklist-action-btn"
+                                            title="Вернуть в общий список"
+                                            onClick={e => { e.preventDefault(); handleMoveToShared(item, activeTab); }}
+                                            tabIndex={-1}
+                                          ><TentIcon style={{ width: '16px', height: '16px', marginRight: 0 }} /></button>
+                                        )}
                                         <button
-                                          className="checklist-action-btn"
-                                          title="Взять себе (Перенести в рюкзак)"
-                                          onClick={e => { e.preventDefault(); handleMoveToBackpack(item); }}
+                                          className="checklist-remove-btn"
+                                          title="Удалить"
+                                          onClick={e => { e.preventDefault(); handleRemoveItem(item); }}
                                           tabIndex={-1}
-                                        ><BackpackIcon style={{ width: '16px', height: '16px', marginRight: 0 }} /></button>
-                                      )}
-                                      {activeTab !== "shared" && (
-                                        <button
-                                          className="checklist-action-btn"
-                                          title="Вернуть в общий список"
-                                          onClick={e => { e.preventDefault(); handleMoveToShared(item, activeTab); }}
-                                          tabIndex={-1}
-                                        ><TentIcon style={{ width: '16px', height: '16px', marginRight: 0 }} /></button>
-                                      )}
-                                      <button
-                                        className="checklist-remove-btn"
-                                        title="Удалить"
-                                        onClick={e => { e.preventDefault(); handleRemoveItem(item); }}
-                                        tabIndex={-1}
-                                      >×</button>
-                                    </span>
-                                  )}
+                                        >×</button>
+                                      </span>
+                                    )}
+                                  </span>
                                 </label>
+                                  );
+                                })()
                               ))}
                             </div>
                           </div>
@@ -1977,21 +3343,10 @@ const App = ({ page }) => {
                             <button className="action-btn primary" onClick={handleAddItem}>OK</button>
                           </>
                         )}
-                        {removedItems.length > 0 && (
-                          <button className="action-btn" onClick={handleRestoreAll}>
-                            Восстановить удалённые
-                          </button>
-                        )}
                       </>
                     )}
-                    {isOwnerOrCollaborator && (savedSlug || id) && (
-                      <button className="action-btn" onClick={() => {
-                        const slug = savedSlug || id;
-                        window.open(`${API_URL}/checklist/${slug}/calendar`, '_blank');
-                      }}>  {t.exportCalendar || "В календарь"}</button>
-                    )}
                     {isOwnerOrCollaborator && (
-                      <button className="action-btn" onClick={() => window.print()}>
+                      <button className="action-btn" onClick={handlePrintChecklist}>
                         {t.print || "Печать"}
                       </button>
                     )}
@@ -2100,6 +3455,17 @@ const App = ({ page }) => {
                       />
                     )}
                   </div>
+                )}
+
+                {result && (
+                  <TripReviewsSection
+                    checklist={result}
+                    user={user}
+                    token={token}
+                    lang={lang}
+                    canReview={canReviewTrip}
+                    onReviewSaved={handleReviewSaved}
+                  />
                 )}
 
                 {/* Attractions */}
@@ -2233,8 +3599,12 @@ const App = ({ page }) => {
         <AIChatWidget
           city={result.destinations?.[0]?.city || result.city}
           startDate={result.destinations?.[0]?.start_date || result.start_date}
-          endDate={result.destinations?.[result.destinations.length - 1]?.end_date || result.end_date}
+          endDate={result.destinations?.[result.destinations?.length - 1]?.end_date || result.end_date}
+          avgTemp={result.avg_temp}
           tripType={result.trip_type}
+          checklistSlug={savedSlug || result.slug}
+          token={token}
+          onChecklistUpdated={handleChecklistUpdated}
           language={lang}
         />
       )}

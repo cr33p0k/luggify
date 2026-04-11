@@ -29,6 +29,9 @@ services:
       - ./server:/app
     environment:
       DATABASE_URL: postgresql+asyncpg://luggify:luggify@db:5432/luggify_db
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_AUTH_MAX_AGE: ${TELEGRAM_AUTH_MAX_AGE:-86400}
+      ALLOW_INSECURE_TELEGRAM_AUTH: ${ALLOW_INSECURE_TELEGRAM_AUTH:-false}
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
       db:
@@ -47,8 +50,32 @@ services:
       - /app/node_modules
     environment:
       VITE_API_URL: http://localhost:8000
+      VITE_TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-luggify_bot}
     depends_on:
       - server
+
+  telegram-bot:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: luggify-telegram-bot
+    restart: unless-stopped
+    profiles:
+      - telegram
+    volumes:
+      - ./server:/app
+    environment:
+      DATABASE_URL: postgresql+asyncpg://luggify:luggify@db:5432/luggify_db
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_MINI_APP_URL: ${TELEGRAM_MINI_APP_URL:-}
+      TELEGRAM_AUTH_MAX_AGE: ${TELEGRAM_AUTH_MAX_AGE:-86400}
+      ALLOW_INSECURE_TELEGRAM_AUTH: ${ALLOW_INSECURE_TELEGRAM_AUTH:-false}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_BASE_URL: ${GEMINI_BASE_URL:-}
+    command: python -m telegram_bot.main
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   luggify_pgdata:

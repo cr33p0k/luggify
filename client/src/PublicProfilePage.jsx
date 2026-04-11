@@ -1,10 +1,20 @@
 import React, { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import AuthModal from "./AuthModal";
+import NavbarUserSearch from "./NavbarUserSearch";
 import "./ProfilePage.css";
 import "./App.css";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+const safeParseJson = (value, fallback = null) => {
+    if (!value) return fallback;
+    try {
+        return JSON.parse(value);
+    } catch {
+        return fallback;
+    }
+};
 
 const renderSocialIcon = (network) => {
     switch(network) {
@@ -28,7 +38,7 @@ const PublicProfilePage = () => {
     // Auth context
     const token = localStorage.getItem("token");
     const storedUser = localStorage.getItem("user");
-    const currentUser = storedUser ? JSON.parse(storedUser) : null;
+    const currentUser = safeParseJson(storedUser, null);
     const isSelf = currentUser && currentUser.username === username;
 
     useEffect(() => {
@@ -56,12 +66,6 @@ const PublicProfilePage = () => {
     const formatDate = (iso) => {
         const d = new Date(iso);
         return `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}.${d.getFullYear()}`;
-    };
-
-    const handleShare = () => {
-        const url = `${window.location.origin}/u/${username}`;
-        navigator.clipboard.writeText(url);
-        alert("Ссылка скопирована!");
     };
 
     const handleFollowToggle = async () => {
@@ -128,6 +132,18 @@ const PublicProfilePage = () => {
 
     // Followers can see a private profile, just like Instagram
     const canSeeContent = isSelf || profile.is_stats_public || profile.follow_status === "following";
+    const publicStatsCards = [
+        { key: "checklists", count: profile.checklists?.length || 0, label: "Чеклисты" },
+        { key: "followers", count: profile.followers_count || 0, label: "Подписчики" },
+        { key: "following", count: profile.following_count || 0, label: "Подписки" },
+    ];
+
+    const travelStatsCards = canSeeContent && profile.stats ? [
+        { key: "trips", value: profile.stats.total_trips, label: "Поездок" },
+        { key: "countries", value: profile.stats.unique_countries, label: "Стран" },
+        { key: "cities", value: profile.stats.unique_cities, label: "Городов" },
+        { key: "days", value: profile.stats.total_days, label: "Дней" },
+    ] : [];
 
     return (
         <div className="profile-page">
@@ -135,6 +151,13 @@ const PublicProfilePage = () => {
             <nav className="navbar">
                 <div className="navbar-logo" onClick={() => navigate("/")}>
                     <span>🧳</span> Luggify
+                </div>
+                <div className="navbar-center">
+                    <NavbarUserSearch
+                        lang="ru"
+                        navigate={navigate}
+                        currentUsername={currentUser?.username || ""}
+                    />
                 </div>
                 <div className="navbar-user">
                     {currentUser ? (
@@ -185,17 +208,7 @@ const PublicProfilePage = () => {
             )}
 
             <div className="profile-header">
-                <div className="profile-top-actions">
-                    <button className="top-action-icon" onClick={() => handleShare()} title="Поделиться">
-                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"></path>
-                            <polyline points="16 6 12 2 8 6"></polyline>
-                            <line x1="12" y1="2" x2="12" y2="15"></line>
-                        </svg>
-                    </button>
-                </div>
-
-                <div className="profile-main-row">
+                <div className={`profile-main-row ${!canSeeContent ? "no-sidebar" : ""}`}>
                     <div className="profile-avatar">
                         {profile.avatar && (profile.avatar.startsWith("data:image") || profile.avatar.startsWith("http")) ? (
                             <img src={profile.avatar} alt="Avatar" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }} />
@@ -203,88 +216,80 @@ const PublicProfilePage = () => {
                             profile.avatar ? profile.avatar : profile.username.charAt(0).toUpperCase()
                         )}
                     </div>
-                
-                    <div className="profile-stats-block">
-                        <div className="profile-stat-col">
-                            <span className="profile-stat-count">{profile.checklists?.length || 0}</span>
-                            <span className="profile-stat-string">Чеклисты</span>
-                        </div>
-                        <div className="profile-stat-col">
-                            <span className="profile-stat-count">{profile.followers_count || 0}</span>
-                            <span className="profile-stat-string">Подписчиков</span>
-                        </div>
-                        <div className="profile-stat-col">
-                            <span className="profile-stat-count">{profile.following_count || 0}</span>
-                            <span className="profile-stat-string">Подписок</span>
-                        </div>
-                    </div>
-                </div>
 
-                <div className="profile-info-block">
-                    <h2>{profile.username}</h2>
-                    
-                    {canSeeContent ? (
-                        <>
-                            {profile.bio && <p className="profile-bio">{profile.bio}</p>}
-                            {profile.social_links && Object.keys(profile.social_links).some(k => profile.social_links[k]) && (
-                                <div className="profile-social-icons">
-                                    {Object.entries(profile.social_links).map(([net, link]) => {
-                                        if (!link) return null;
-                                        const href = link.startsWith('http') ? link : (net === 'telegram' ? `https://t.me/${link.replace('@','')}` : (net === 'instagram' ? `https://instagram.com/${link.replace('@','')}` : `https://${link}`));
-                                        return (
-                                            <a key={net} href={href} target="_blank" rel="noopener noreferrer" className={`social-badge ${net}`} title={net}>
-                                                {renderSocialIcon(net)}
-                                            </a>
-                                        );
-                                    })}
+                    <div className="profile-info-block">
+                        <div className="profile-name-row">
+                            <h2>{profile.username}</h2>
+                        </div>
+
+                        <div className="profile-meta-line">
+                            <span>{profile.is_stats_public ? "Открытый профиль" : "Закрытый профиль"}</span>
+                            {profile.created_at && <span>С {formatDate(profile.created_at)}</span>}
+                        </div>
+
+                        {canSeeContent ? (
+                            <>
+                                {profile.bio && <p className="profile-bio">{profile.bio}</p>}
+                                {profile.social_links && Object.keys(profile.social_links).some(k => profile.social_links[k]) && (
+                                    <div className="profile-social-icons">
+                                        {Object.entries(profile.social_links).map(([net, link]) => {
+                                            if (!link) return null;
+                                            const href = link.startsWith('http') ? link : (net === 'telegram' ? `https://t.me/${link.replace('@','')}` : (net === 'instagram' ? `https://instagram.com/${link.replace('@','')}` : `https://${link}`));
+                                            return (
+                                                <a key={net} href={href} target="_blank" rel="noopener noreferrer" className={`social-badge ${net}`} title={net}>
+                                                    {renderSocialIcon(net)}
+                                                </a>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </>
+                        ) : (
+                            <div className="private-profile-notice">
+                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                                <span>Это закрытый профиль</span>
+                            </div>
+                        )}
+
+                        {!isSelf && (
+                            <div className="profile-action-mt">
+                                <button 
+                                    className={`action-btn profile-follow-btn ${profile.follow_status === "following" ? "secondary" : profile.follow_status === "requested" ? "secondary" : "primary"}`}
+                                    onClick={handleFollowToggle}
+                                >
+                                    {profile.follow_status === "following" 
+                                        ? "Отписаться" 
+                                        : profile.follow_status === "requested" 
+                                            ? "Отменить запрос" 
+                                            : (!profile.is_stats_public ? "Отправить запрос" : "Подписаться")}
+                                </button>
+                            </div>
+                        )}
+                    </div>
+
+                    {canSeeContent && (
+                        <div className="profile-stats-sidebar">
+                            {publicStatsCards.map((item) => (
+                                <div key={item.key} className="profile-stat-col">
+                                    <span className="profile-stat-count">{item.count}</span>
+                                    <span className="profile-stat-string">{item.label}</span>
                                 </div>
-                            )}
-                        </>
-                    ) : (
-                        <div className="private-profile-notice">
-                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
-                            <span>Это закрытый профиль</span>
-                        </div>
-                    )}
-                    
-                    {/* Follow / Unfollow / Request Button */}
-                    {!isSelf && (
-                        <div className="profile-action-mt">
-                            <button 
-                                className={`action-btn wide-btn ${profile.follow_status === "following" ? "secondary" : profile.follow_status === "requested" ? "secondary" : "primary"}`}
-                                onClick={handleFollowToggle}
-                            >
-                                {profile.follow_status === "following" 
-                                    ? "Отписаться" 
-                                    : profile.follow_status === "requested" 
-                                        ? "Отменить запрос" 
-                                        : (!profile.is_stats_public ? "Отправить запрос" : "Подписаться")}
-                            </button>
+                            ))}
                         </div>
                     )}
                 </div>
-            </div>
 
-            {canSeeContent && profile.stats && (
-                <div className="profile-stats">
-                    <div className="stat-item">
-                        <span className="stat-val">{profile.stats.total_trips}</span>
-                        <span className="stat-lbl">Поездок</span>
+                {travelStatsCards.length > 0 && (
+                    <div className="profile-hero-metrics">
+                        {travelStatsCards.map((item) => (
+                            <div key={item.key} className="profile-hero-metric">
+                                <span className="profile-hero-metric-value">{item.value}</span>
+                                <span className="profile-hero-metric-label">{item.label}</span>
+                            </div>
+                        ))}
                     </div>
-                    <div className="stat-item">
-                        <span className="stat-val">{profile.stats.unique_countries}</span>
-                        <span className="stat-lbl">Стран</span>
-                    </div>
-                    <div className="stat-item">
-                        <span className="stat-val">{profile.stats.unique_cities}</span>
-                        <span className="stat-lbl">Городов</span>
-                    </div>
-                    <div className="stat-item">
-                        <span className="stat-val">{profile.stats.total_days}</span>
-                        <span className="stat-lbl">Дней</span>
-                    </div>
-                </div>
-            )}
+                )}
+            </div>
 
             {canSeeContent && (
                 <>
@@ -314,6 +319,44 @@ const PublicProfilePage = () => {
                                     </div>
                                 </div>
                             ))}
+                        </div>
+                    )}
+
+                    <h3 className="profile-section-title" style={{ marginTop: "1.8rem" }}>Отзывы о поездках</h3>
+                    {profile.reviews?.length ? (
+                        <div className="profile-reviews-grid">
+                            {profile.reviews.map((review) => (
+                                <article
+                                    key={review.id}
+                                    className="profile-review-card"
+                                    onClick={() => review.checklist_slug && navigate(`/checklist/${review.checklist_slug}`)}
+                                >
+                                    <div className="profile-review-meta">
+                                        <div>
+                                            <div className="profile-review-city">{review.checklist_city || "Поездка"}</div>
+                                            <div className="profile-review-dates">
+                                                {review.checklist_start_date && review.checklist_end_date
+                                                    ? `${formatDate(review.checklist_start_date)} — ${formatDate(review.checklist_end_date)}`
+                                                    : ""}
+                                            </div>
+                                        </div>
+                                        <div className="profile-review-rating">
+                                            <strong>{review.rating}.0</strong>
+                                            <span>{"★".repeat(review.rating)}{"☆".repeat(5 - review.rating)}</span>
+                                        </div>
+                                    </div>
+                                    <p className="profile-review-text">{review.text}</p>
+                                    {review.photo && (
+                                        <div className="profile-review-photo">
+                                            <img src={review.photo} alt="Trip review" />
+                                        </div>
+                                    )}
+                                </article>
+                            ))}
+                        </div>
+                    ) : (
+                        <div className="profile-empty-list">
+                            <p>Пока нет опубликованных отзывов.</p>
                         </div>
                     )}
                 </>

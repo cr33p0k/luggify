@@ -5,6 +5,25 @@ import { TRANSLATIONS, pluralize } from "./i18n";
 import { EyeIcon, LockIcon, ListIcon, TrophyIcon, BarChartIcon, CheckCircleIcon, XCricleIcon, SparkleIcon } from "./Icons";
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
+const RANK_TIERS = [
+    { id: "novice", icon: "🌱", name_ru: "Новичок", name_en: "Novice", min: 0 },
+    { id: "scout", icon: "🧭", name_ru: "Разведчик", name_en: "Scout", min: 140 },
+    { id: "traveler", icon: "✈️", name_ru: "Путешественник", name_en: "Traveler", min: 320 },
+    { id: "navigator", icon: "🗺️", name_ru: "Навигатор", name_en: "Navigator", min: 580 },
+    { id: "pilgrim", icon: "🌍", name_ru: "Пилигрим", name_en: "Pilgrim", min: 900 },
+    { id: "trailblazer", icon: "🏔️", name_ru: "Первопроходец", name_en: "Trailblazer", min: 1300 },
+    { id: "legend", icon: "👑", name_ru: "Легенда", name_en: "Legend", min: 1700 },
+];
+
+const safeParseJson = (value, fallback = null) => {
+    if (!value) return fallback;
+    try {
+        return JSON.parse(value);
+    } catch {
+        return fallback;
+    }
+};
+
 const renderSocialIcon = (network) => {
     switch(network) {
         case 'instagram': return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="2" width="20" height="20" rx="5" ry="5"></rect><path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"></path><line x1="17.5" y1="6.5" x2="17.51" y2="6.5"></line></svg>;
@@ -20,6 +39,7 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
     const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
     const navigate = useNavigate();
     const [checklists, setChecklists] = useState([]);
+    const [reviews, setReviews] = useState([]);
     const [stats, setStats] = useState(null);
     const [achievements, setAchievements] = useState(null);
     const [feedback, setFeedback] = useState(null);
@@ -29,17 +49,18 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
     const [isStatsPublic, setIsStatsPublic] = useState(user?.is_stats_public ?? true);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
-    const [activeTab, setActiveTab] = useState("checklists"); // "checklists" | "achievements" | "followers" | "following"
+    const [activeTab, setActiveTab] = useState("checklists"); // "checklists" | "reviews" | "achievements" | "followers" | "following"
     const [avatar, setAvatar] = useState(user?.avatar || "");
     const [editMode, setEditMode] = useState(false);
     const [bio, setBio] = useState(user?.bio || "");
     const [socialLinks, setSocialLinks] = useState(user?.social_links || {});
     const [saving, setSaving] = useState(false);
     const [isAvatarModalOpen, setIsAvatarModalOpen] = useState(false);
+    const [showRankModal, setShowRankModal] = useState(false);
     
     // Check if the current viewer is the owner of this profile
     const currentUserStr = window.localStorage.getItem('user');
-    const currentUser = currentUserStr ? JSON.parse(currentUserStr) : null;
+    const currentUser = safeParseJson(currentUserStr, null);
     const isOwner = user && currentUser && user.username === currentUser.username;
 
     useEffect(() => {
@@ -85,6 +106,14 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                     setFeedback(dataFb);
                 }
 
+                const resReviews = await fetch(`${API_URL}/my-trip-reviews`, {
+                    headers: { Authorization: `Bearer ${token}` },
+                });
+                if (resReviews.ok) {
+                    const dataReviews = await resReviews.json();
+                    setReviews(dataReviews);
+                }
+
                 // Followers
                 if (user?.username) {
                     const resFollowers = await fetch(`${API_URL}/users/${user.username}/followers`, {
@@ -122,6 +151,13 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
         if (user) setIsStatsPublic(user.is_stats_public);
     }, [token, user, onLogout, t.failedToLoadChecklists]);
 
+    useEffect(() => {
+        setAvatar(user?.avatar || "");
+        setBio(user?.bio || "");
+        setSocialLinks(user?.social_links || {});
+        setIsStatsPublic(user?.is_stats_public ?? true);
+    }, [user]);
+
     const formatDate = (iso) => {
         const d = new Date(iso);
         return `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}.${d.getFullYear()}`;
@@ -137,27 +173,6 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
             });
             if (res.ok) {
                 setChecklists((prev) => prev.filter((c) => c.slug !== slug));
-            }
-        } catch (e) {
-            console.error(e);
-        }
-    };
-
-    const toggleStatsPrivacy = async () => {
-        try {
-            const res = await fetch(`${API_URL}/auth/privacy`, {
-                method: "PATCH",
-                headers: {
-                    Authorization: `Bearer ${token}`,
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ is_stats_public: !isStatsPublic }),
-            });
-            if (res.ok) {
-                setIsStatsPublic(!isStatsPublic);
-                if (onUpdateUser) {
-                    onUpdateUser({ ...user, is_stats_public: !isStatsPublic });
-                }
             }
         } catch (e) {
             console.error(e);
@@ -197,7 +212,7 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                     Authorization: `Bearer ${token}`,
                     "Content-Type": "application/json",
                 },
-                body: JSON.stringify({ bio, social_links: socialLinks }),
+                body: JSON.stringify({ bio, social_links: socialLinks, is_stats_public: isStatsPublic }),
             });
             if (res.ok) {
                 const updatedUser = await res.json();
@@ -216,12 +231,6 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
     };
 
     const fileInputRef = React.useRef(null);
-
-    const handleShare = () => {
-        const url = `${window.location.origin}/u/${user.username}`;
-        navigator.clipboard.writeText(url);
-        alert(t.linkCopied);
-    };
 
     const handleAvatarClick = () => {
         if (editMode) {
@@ -310,163 +319,367 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
         }
     };
 
+    const profileStatsCards = [
+        {
+            key: "checklists",
+            count: checklists.length,
+            label: lang === "en" ? "Lists" : "Чеклисты",
+            onClick: () => setActiveTab("checklists"),
+        },
+        {
+            key: "followers",
+            count: user?.followers_count || followers.length,
+            label: t.followersStat,
+            onClick: () => setActiveTab("followers"),
+        },
+        {
+            key: "following",
+            count: user?.following_count || following.length,
+            label: t.followingStat,
+            onClick: () => setActiveTab("following"),
+        },
+    ];
+
+    const followerCount = user?.followers_count || followers.length;
+    const publicChecklistCount = checklists.filter((item) => item.is_public).length;
+    const collaborativeChecklistCount = checklists.filter((item) => (item.backpacks || []).length > 0).length;
+    const reviewWithPhotoCount = reviews.filter((item) => item.photo).length;
+
+    const pointsBreakdown = [
+        {
+            id: "checklists",
+            label: lang === "en" ? "Created checklists" : "Созданные чеклисты",
+            details: `${checklists.length} × 35`,
+            points: checklists.length * 35,
+        },
+        {
+            id: "public",
+            label: lang === "en" ? "Public checklists" : "Публичные чеклисты",
+            details: `${publicChecklistCount} × 10`,
+            points: publicChecklistCount * 10,
+        },
+        {
+            id: "reviews",
+            label: lang === "en" ? "Trip reviews" : "Отзывы о поездках",
+            details: `${reviews.length} × 45`,
+            points: reviews.length * 45,
+        },
+        {
+            id: "review-photos",
+            label: lang === "en" ? "Review photos" : "Фото в отзывах",
+            details: `${reviewWithPhotoCount} × 20`,
+            points: reviewWithPhotoCount * 20,
+        },
+        {
+            id: "days",
+            label: lang === "en" ? "Travel days" : "Дни в поездках",
+            details: `${stats?.total_days || 0} × 3`,
+            points: (stats?.total_days || 0) * 3,
+        },
+        {
+            id: "countries",
+            label: lang === "en" ? "Visited countries" : "Посещённые страны",
+            details: `${stats?.unique_countries || 0} × 18`,
+            points: (stats?.unique_countries || 0) * 18,
+        },
+        {
+            id: "cities",
+            label: lang === "en" ? "Visited cities" : "Посещённые города",
+            details: `${stats?.unique_cities || 0} × 8`,
+            points: (stats?.unique_cities || 0) * 8,
+        },
+        {
+            id: "collab",
+            label: lang === "en" ? "Shared checklists" : "Совместные чеклисты",
+            details: `${collaborativeChecklistCount} × 12`,
+            points: collaborativeChecklistCount * 12,
+        },
+        {
+            id: "followers",
+            label: lang === "en" ? "Followers" : "Подписчики",
+            details: `${followerCount} × 6`,
+            points: followerCount * 6,
+        },
+    ];
+
+    const upcomingPointSources = [
+        {
+            id: "flight",
+            label: lang === "en" ? "Flight booked via app link" : "Покупка билетов по ссылке из приложения",
+            reward: "+120",
+        },
+        {
+            id: "hotel",
+            label: lang === "en" ? "Hotel booking via app link" : "Бронирование жилья по ссылке из приложения",
+            reward: "+180",
+        },
+        {
+            id: "esim",
+            label: lang === "en" ? "eSIM purchase via app" : "Покупка eSIM через приложение",
+            reward: "+90",
+        },
+    ];
+
+    const currentRankPoints = pointsBreakdown.reduce((sum, item) => sum + item.points, 0);
+    const currentRank = RANK_TIERS.reduce((best, tier) => (
+        currentRankPoints >= tier.min ? tier : best
+    ), RANK_TIERS[0]);
+    const currentRankIndex = RANK_TIERS.findIndex((item) => item.id === currentRank.id);
+    const nextRank = currentRankIndex >= 0 ? RANK_TIERS[currentRankIndex + 1] : null;
+    const pointsToNextRank = nextRank ? Math.max(nextRank.min - currentRankPoints, 0) : 0;
+    const rankProgress = nextRank
+        ? Math.min(100, Math.max(0, ((currentRankPoints - currentRank.min) / (nextRank.min - currentRank.min)) * 100))
+        : 100;
+
+    const travelStatsCards = stats ? [
+        { key: "trips", value: stats.total_trips, label: t.tripsStat },
+        { key: "countries", value: stats.unique_countries, label: t.countriesStat },
+        { key: "cities", value: stats.unique_cities, label: t.citiesStat },
+        { key: "days", value: stats.total_days, label: t.daysStat },
+    ] : [];
+
     return (
         <div className="profile-page">
             <div className="profile-header">
-                <div className="profile-top-actions">
-                    <button className="top-action-icon" onClick={handleShare} title={t.shareString}>
-                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"></path>
-                            <polyline points="16 6 12 2 8 6"></polyline>
-                            <line x1="12" y1="2" x2="12" y2="15"></line>
-                        </svg>
-                    </button>
-                    {!editMode && (
-                        <button className="top-action-icon" onClick={() => setEditMode(true)} title={t.editProfile}>
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>
-                        </button>
-                    )}
-                    <button
-                        className={`top-action-icon ${!isStatsPublic ? "private" : ""}`}
-                        onClick={toggleStatsPrivacy}
-                        title={isStatsPublic ? t.statsPublic : t.statsHidden}
-                    >
-                        {isStatsPublic ? <EyeIcon style={{marginRight:0}}/> : <LockIcon style={{marginRight:0}}/>}
-                    </button>
-                </div>
-
-                <div className="profile-main-row">
+                <div className={`profile-main-row ${!(isOwner || isStatsPublic) ? "no-sidebar" : ""}`}>
                     <input
-                    type="file"
-                    accept="image/*"
-                    ref={fileInputRef}
-                    style={{ display: "none" }}
-                    onChange={handleFileChange}
-                />
-                <div className="profile-avatar" onClick={handleAvatarClick} title={editMode ? t.uploadAvatar : ""} style={{ cursor: 'pointer' }}>
-                    {avatar && (avatar.startsWith("data:image") || avatar.startsWith("http")) ? (
-                        <img src={avatar} alt="Avatar" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }} />
-                    ) : (
-                        avatar ? avatar : user.username.charAt(0).toUpperCase()
+                        type="file"
+                        accept="image/*"
+                        ref={fileInputRef}
+                        style={{ display: "none" }}
+                        onChange={handleFileChange}
+                    />
+                    <div className="profile-avatar" onClick={handleAvatarClick} title={editMode ? t.uploadAvatar : ""} style={{ cursor: 'pointer' }}>
+                        {avatar && (avatar.startsWith("data:image") || avatar.startsWith("http")) ? (
+                            <img src={avatar} alt="Avatar" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }} />
+                        ) : (
+                            avatar ? avatar : user.username.charAt(0).toUpperCase()
+                        )}
+                    </div>
+
+                    <div className="profile-info-block">
+                        <div className="profile-name-row">
+                            {isOwner && !editMode ? (
+                                <button className="profile-name-trigger" onClick={() => setEditMode(true)} title={t.editProfile}>
+                                    <span>{user.username}</span>
+                                </button>
+                            ) : (
+                                <h2>
+                                    {user.username}
+                                </h2>
+                            )}
+                            <button
+                                type="button"
+                                className="level-badge level-badge-button"
+                                onClick={() => setShowRankModal(true)}
+                            >
+                                {currentRank.icon} {lang === 'en' ? currentRank.name_en : currentRank.name_ru}
+                            </button>
+                        </div>
+
+                        <div className="profile-meta-line">
+                            <span>{isStatsPublic ? (lang === "en" ? "Public profile" : "Открытый профиль") : (lang === "en" ? "Private profile" : "Закрытый профиль")}</span>
+                            {user?.created_at && (
+                                <span>{lang === "en" ? "Since" : "С"} {formatDate(user.created_at)}</span>
+                            )}
+                        </div>
+
+                        {editMode ? (
+                            <div className="profile-edit-form">
+                                <label className="edit-label">{t.bio}</label>
+                                <textarea 
+                                    className="edit-input bio-input" 
+                                    value={bio} 
+                                    onChange={e => setBio(e.target.value)} 
+                                    rows={3}
+                                    placeholder="..."
+                                />
+
+                                <label className="edit-label">{t.socialLinks}</label>
+                                <div className="social-inputs">
+                                    {['instagram', 'telegram', 'twitter', 'linkedin', 'website'].map(net => (
+                                        <div key={net} className="social-input-wrapper">
+                                            <div className="social-input-icon">{renderSocialIcon(net)}</div>
+                                            <input 
+                                                className="edit-input social-input" 
+                                                type="text" 
+                                                placeholder={`${net} id`} 
+                                                value={socialLinks[net] || ""} 
+                                                onChange={e => setSocialLinks({...socialLinks, [net]: e.target.value})}
+                                            />
+                                        </div>
+                                    ))}
+                                </div>
+
+                                <label className="profile-visibility-toggle">
+                                    <input
+                                        type="checkbox"
+                                        checked={isStatsPublic}
+                                        onChange={(e) => setIsStatsPublic(e.target.checked)}
+                                    />
+                                    <span>
+                                        {lang === "en"
+                                            ? "Show my profile and travel stats publicly"
+                                            : "Показывать мой профиль и статистику публично"}
+                                    </span>
+                                </label>
+
+                                <div className="edit-actions">
+                                    <button className="btn-secondary" onClick={() => {
+                                        setEditMode(false);
+                                        setBio(user?.bio || "");
+                                        setSocialLinks(user?.social_links || {});
+                                        setIsStatsPublic(user?.is_stats_public ?? true);
+                                    }}>
+                                        {t.cancelEdit}
+                                    </button>
+                                    <button className="btn-primary" onClick={handleSaveProfile} disabled={saving}>
+                                        {saving ? '...' : t.saveProfile}
+                                    </button>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="profile-details-view">
+                                {(!isOwner && !isStatsPublic) ? (
+                                    <div className="private-profile-notice" style={{marginTop: "1rem", color: "#888", display: "flex", alignItems: "center", gap: "0.5rem"}}>
+                                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+                                        <span>{lang === 'en' ? 'This profile is private' : 'Это закрытый профиль'}</span>
+                                    </div>
+                                ) : (
+                                    <>
+                                        {user?.bio && <p className="profile-bio">{user.bio}</p>}
+                                        {user?.social_links && Object.keys(user.social_links).some(k => user.social_links[k]) && (
+                                            <div className="profile-social-icons">
+                                                {Object.entries(user.social_links).map(([net, link]) => {
+                                                    if (!link) return null;
+                                                    const href = link.startsWith('http') ? link : (net === 'telegram' ? `https://t.me/${link.replace('@','')}` : (net === 'instagram' ? `https://instagram.com/${link.replace('@','')}` : `https://${link}`));
+                                                    return (
+                                                        <a key={net} href={href} target="_blank" rel="noopener noreferrer" className={`social-badge ${net}`} title={net}>
+                                                            {renderSocialIcon(net)}
+                                                        </a>
+                                                    );
+                                                })}
+                                            </div>
+                                        )}
+                                    </>
+                                )}
+                            </div>
+                        )}
+                    </div>
+
+                    {(isOwner || isStatsPublic) && (
+                        <div className="profile-stats-sidebar">
+                            {profileStatsCards.map((item) => (
+                                <div key={item.key} className="profile-stat-col" onClick={item.onClick}>
+                                    <span className="profile-stat-count">{item.count}</span>
+                                    <span className="profile-stat-string">{item.label}</span>
+                                </div>
+                            ))}
+                        </div>
                     )}
                 </div>
-                    
-                    <div className="profile-stats-block">
-                        <div className="profile-stat-col" onClick={() => setActiveTab("checklists")}>
-                            <span className="profile-stat-count">{checklists.length}</span>
-                            <span className="profile-stat-string">{lang === 'en' ? 'Lists' : 'Чеклисты'}</span>
-                        </div>
-                        <div className="profile-stat-col" onClick={() => setActiveTab("followers")}>
-                            <span className="profile-stat-count">{user?.followers_count || followers.length}</span>
-                            <span className="profile-stat-string">{t.followersStat}</span>
-                        </div>
-                        <div className="profile-stat-col" onClick={() => setActiveTab("following")}>
-                            <span className="profile-stat-count">{user?.following_count || following.length}</span>
-                            <span className="profile-stat-string">{t.followingStat}</span>
-                        </div>
+
+                {(isOwner || isStatsPublic) && travelStatsCards.length > 0 && (
+                    <div className="profile-hero-metrics">
+                        {travelStatsCards.map((item) => (
+                            <div key={item.key} className="profile-hero-metric">
+                                <span className="profile-hero-metric-value">{item.value}</span>
+                                <span className="profile-hero-metric-label">{item.label}</span>
+                            </div>
+                        ))}
                     </div>
-                </div>
+                )}
+            </div>
 
-                <div className="profile-info-block">
-                    <div className="profile-name-row">
-                        <h2>
-                            {user.username}
-                            {achievements && (
-                                <span className="level-badge">
-                                    {achievements.level.icon} {lang === 'en' ? achievements.level.name_en : achievements.level.name_ru}
-                                </span>
-                            )}
-                        </h2>
-                    </div>
+            {showRankModal && (
+                <div className="modal-overlay rank-modal-overlay" onClick={() => setShowRankModal(false)}>
+                    <div className="modal-content rank-modal" onClick={(e) => e.stopPropagation()}>
+                        <button className="modal-close" onClick={() => setShowRankModal(false)}>×</button>
 
-                    {editMode ? (
-                        <div className="profile-edit-form">
-                            <label className="edit-label">{t.bio}</label>
-                            <textarea 
-                                className="edit-input bio-input" 
-                                value={bio} 
-                                onChange={e => setBio(e.target.value)} 
-                                rows={3}
-                                placeholder="..."
-                            />
+                        <div className="rank-modal-header">
+                            <div className="rank-modal-current">
+                                <div className="rank-modal-chip">
+                                    <span>{currentRank.icon}</span>
+                                    <strong>{lang === 'en' ? currentRank.name_en : currentRank.name_ru}</strong>
+                                </div>
+                                <div className="rank-modal-points">
+                                    <span>{lang === 'en' ? 'Current balance' : 'Текущий баланс'}</span>
+                                    <strong>{currentRankPoints}</strong>
+                                </div>
+                            </div>
 
-                            <label className="edit-label">{t.socialLinks}</label>
-                            <div className="social-inputs">
-                                {['instagram', 'telegram', 'twitter', 'linkedin', 'website'].map(net => (
-                                    <div key={net} className="social-input-wrapper">
-                                        <div className="social-input-icon">{renderSocialIcon(net)}</div>
-                                        <input 
-                                            className="edit-input social-input" 
-                                            type="text" 
-                                            placeholder={`${net} id`} 
-                                            value={socialLinks[net] || ""} 
-                                            onChange={e => setSocialLinks({...socialLinks, [net]: e.target.value})}
-                                        />
+                            <div className="rank-modal-progress">
+                                <div className="rank-modal-progress-copy">
+                                    <strong>
+                                        {nextRank
+                                            ? (lang === 'en'
+                                                ? `${pointsToNextRank} pts to ${nextRank.name_en}`
+                                                : `${pointsToNextRank} баллов до ранга «${nextRank.name_ru}»`)
+                                            : (lang === 'en' ? 'Maximum rank reached' : 'Максимальный ранг достигнут')}
+                                    </strong>
+                                    <span>
+                                        {lang === 'en'
+                                            ? 'Points come from trips, reviews and activity inside the app.'
+                                            : 'Баллы начисляются за поездки, отзывы и активность внутри приложения.'}
+                                    </span>
+                                </div>
+                                <div className="rank-modal-progressbar">
+                                    <span style={{ width: `${rankProgress}%` }} />
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="rank-modal-grid">
+                            <section className="rank-modal-card">
+                                <h4>{lang === 'en' ? 'Rank ladder' : 'Лестница рангов'}</h4>
+                                <div className="rank-tier-list">
+                                    {RANK_TIERS.map((tier, index) => {
+                                        const nextTier = RANK_TIERS[index + 1];
+                                        const isActive = tier.id === currentRank.id;
+                                        return (
+                                            <div key={tier.id} className={`rank-tier-item ${isActive ? 'active' : ''}`}>
+                                                <div className="rank-tier-icon">{tier.icon}</div>
+                                                <div className="rank-tier-copy">
+                                                    <strong>{lang === 'en' ? tier.name_en : tier.name_ru}</strong>
+                                                    <span>
+                                                        {nextTier
+                                                            ? `${tier.min}–${nextTier.min - 1}`
+                                                            : `${tier.min}+`}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </section>
+
+                            <section className="rank-modal-card">
+                                <h4>{lang === 'en' ? 'How points are earned' : 'Как начисляются баллы'}</h4>
+                                <div className="rank-points-list">
+                                    {pointsBreakdown.map((item) => (
+                                        <div key={item.id} className={`rank-points-item ${item.points === 0 ? 'muted' : ''}`}>
+                                            <div>
+                                                <strong>{item.label}</strong>
+                                                <span>{item.details}</span>
+                                            </div>
+                                            <b>+{item.points}</b>
+                                        </div>
+                                    ))}
+                                </div>
+                            </section>
+                        </div>
+
+                        <section className="rank-modal-card rank-modal-card-wide">
+                            <h4>{lang === 'en' ? 'Soon to be added' : 'Скоро добавим'}</h4>
+                            <div className="rank-future-list">
+                                {upcomingPointSources.map((item) => (
+                                    <div key={item.id} className="rank-future-item">
+                                        <span>{item.label}</span>
+                                        <strong>{item.reward}</strong>
                                     </div>
                                 ))}
                             </div>
-
-                            <div className="edit-actions">
-                                <button className="btn-secondary" onClick={() => {
-                                    setEditMode(false);
-                                    setBio(user?.bio || "");
-                                    setSocialLinks(user?.social_links || {});
-                                }}>
-                                    {t.cancelEdit}
-                                </button>
-                                <button className="btn-primary" onClick={handleSaveProfile} disabled={saving}>
-                                    {saving ? '...' : t.saveProfile}
-                                </button>
-                            </div>
-                        </div>
-                    ) : (
-                        <div className="profile-details-view">
-                            {(!isOwner && !isStatsPublic) ? (
-                                <div className="private-profile-notice" style={{marginTop: "1rem", color: "#888", display: "flex", alignItems: "center", gap: "0.5rem"}}>
-                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
-                                    <span>{lang === 'en' ? 'This profile is private' : 'Это закрытый профиль'}</span>
-                                </div>
-                            ) : (
-                                <>
-                                    {user?.bio && <p className="profile-bio">{user.bio}</p>}
-                                    {user?.social_links && Object.keys(user.social_links).some(k => user.social_links[k]) && (
-                                        <div className="profile-social-icons">
-                                            {Object.entries(user.social_links).map(([net, link]) => {
-                                                if (!link) return null;
-                                                const href = link.startsWith('http') ? link : (net === 'telegram' ? `https://t.me/${link.replace('@','')}` : (net === 'instagram' ? `https://instagram.com/${link.replace('@','')}` : `https://${link}`));
-                                                return (
-                                                    <a key={net} href={href} target="_blank" rel="noopener noreferrer" className={`social-badge ${net}`} title={net}>
-                                                        {renderSocialIcon(net)}
-                                                    </a>
-                                                );
-                                            })}
-                                        </div>
-                                    )}
-                                </>
-                            )}
-                        </div>
-                    )}
-                </div>
-            </div>
-
-            {/* Statistics Section */}
-            {(isOwner || isStatsPublic) && stats && (
-                <div className="profile-stats">
-                    <div className="stat-item">
-                        <span className="stat-val">{stats.total_trips}</span>
-                        <span className="stat-lbl">{t.tripsStat}</span>
-                    </div>
-                    <div className="stat-item">
-                        <span className="stat-val">{stats.unique_countries}</span>
-                        <span className="stat-lbl">{t.countriesStat}</span>
-                    </div>
-                    <div className="stat-item">
-                        <span className="stat-val">{stats.unique_cities}</span>
-                        <span className="stat-lbl">{t.citiesStat}</span>
-                    </div>
-                    <div className="stat-item">
-                        <span className="stat-val">{stats.total_days}</span>
-                        <span className="stat-lbl">{t.daysStat}</span>
+                        </section>
                     </div>
                 </div>
             )}
@@ -479,6 +692,12 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                         onClick={() => setActiveTab("checklists")}
                     >
                         <span style={{display:'flex',alignItems:'center',justifyContent:'center'}}><ListIcon style={{width:'18px',height:'18px',marginRight:'6px'}}/> {t.profileChecklists}</span>
+                    </button>
+                    <button
+                        className={`profile-tab ${activeTab === "reviews" ? "active" : ""}`}
+                        onClick={() => setActiveTab("reviews")}
+                    >
+                        <span style={{display:'flex',alignItems:'center',justifyContent:'center'}}>★ {lang === 'en' ? 'Reviews' : 'Отзывы'}</span>
                     </button>
                     <button
                         className={`profile-tab ${activeTab === "achievements" ? "active" : ""}`}
@@ -619,6 +838,47 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                         );
                         })}
                     </div>
+                </div>
+            )}
+
+            {(isOwner || isStatsPublic) && activeTab === "reviews" && (
+                <div className="tab-content animations-fade">
+                    {reviews.length === 0 ? (
+                        <div className="profile-empty-list">
+                            <p>{lang === 'en' ? 'No trip reviews yet.' : 'Пока нет отзывов о поездках.'}</p>
+                        </div>
+                    ) : (
+                        <div className="profile-reviews-grid">
+                            {reviews.map((review) => (
+                                <article
+                                    key={review.id}
+                                    className="profile-review-card"
+                                    onClick={() => review.checklist_slug && navigate(`/checklist/${review.checklist_slug}`)}
+                                >
+                                    <div className="profile-review-meta">
+                                        <div>
+                                            <div className="profile-review-city">{review.checklist_city || (lang === 'en' ? 'Trip' : 'Поездка')}</div>
+                                            <div className="profile-review-dates">
+                                                {review.checklist_start_date && review.checklist_end_date
+                                                    ? `${formatDate(review.checklist_start_date)} — ${formatDate(review.checklist_end_date)}`
+                                                    : ""}
+                                            </div>
+                                        </div>
+                                        <div className="profile-review-rating">
+                                            <strong>{review.rating}.0</strong>
+                                            <span>{"★".repeat(review.rating)}{"☆".repeat(5 - review.rating)}</span>
+                                        </div>
+                                    </div>
+                                    <p className="profile-review-text">{review.text}</p>
+                                    {review.photo && (
+                                        <div className="profile-review-photo">
+                                            <img src={review.photo} alt="Trip review" />
+                                        </div>
+                                    )}
+                                </article>
+                            ))}
+                        </div>
+                    )}
                 </div>
             )}
 

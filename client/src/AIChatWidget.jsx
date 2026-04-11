@@ -2,7 +2,17 @@ import React, { useState, useRef, useEffect } from "react";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
-export default function AIChatWidget({ city, startDate, endDate, avgTemp, tripType, language = "ru" }) {
+export default function AIChatWidget({
+    city,
+    startDate,
+    endDate,
+    avgTemp,
+    tripType,
+    checklistSlug = null,
+    token = null,
+    onChecklistUpdated = null,
+    language = "ru",
+}) {
     const [isOpen, setIsOpen] = useState(false);
     const [messages, setMessages] = useState([]);
     const [input, setInput] = useState("");
@@ -16,18 +26,36 @@ export default function AIChatWidget({ city, startDate, endDate, avgTemp, tripTy
             // Load suggestions
             fetch(`${API_URL}/ai/suggestions?language=${language}`)
                 .then(r => r.json())
-                .then(data => setSuggestions(data.suggestions || []))
+                .then(data => {
+                    const baseSuggestions = data.suggestions || [];
+                    const actionSuggestions = checklistSlug
+                        ? (
+                            language === "ru"
+                                ? ["закинь мне powerbank", "отметь у popich паспорт", "создай багаж чемодан", "перекинь power bank popich"]
+                                : ["add powerbank", "check passport", "create baggage suitcase", "move power bank to popich backpack"]
+                        )
+                        : [];
+                    setSuggestions([...actionSuggestions, ...baseSuggestions].slice(0, 6));
+                })
                 .catch(() => {});
             
             // Add welcome message
             setMessages([{
                 role: "ai",
                 text: language === "ru" 
-                    ? `Привет! 👋 Я ваш AI-помощник для поездки в **${city}**. Спросите меня о ресторанах, достопримечательностях, транспорте или культурных особенностях!`
-                    : `Hi! 👋 I'm your AI travel assistant for **${city}**. Ask me about restaurants, sights, transport or cultural tips!`
+                    ? (
+                        checklistSlug
+                            ? `Привет! 👋 Я ваш AI-помощник для поездки в **${city}**. Могу отвечать про город и помогать с чеклистом. Например: **закинь мне powerbank**, **отметь у popich паспорт**, **создай багаж чемодан**, **перекинь power bank popich**.`
+                            : `Привет! 👋 Я ваш AI-помощник для поездки в **${city}**. Спросите меня о ресторанах, достопримечательностях, транспорте или культурных особенностях!`
+                    )
+                    : (
+                        checklistSlug
+                            ? `Hi! 👋 I'm your AI travel assistant for **${city}**. I can answer travel questions, update your checklist and move items between backpacks with commands like **add powerbank**, **check passport**, **create baggage suitcase** or **move power bank to popich backpack**.`
+                            : `Hi! 👋 I'm your AI travel assistant for **${city}**. Ask me about restaurants, sights, transport or cultural tips!`
+                    )
             }]);
         }
-    }, [isOpen, city, language, messages.length]);
+    }, [isOpen, city, checklistSlug, language, messages.length]);
 
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -39,6 +67,24 @@ export default function AIChatWidget({ city, startDate, endDate, avgTemp, tripTy
         }
     }, [isOpen]);
 
+    const askTravelQuestion = async (question) => {
+        const res = await fetch(`${API_URL}/ai/ask`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                city,
+                question,
+                language,
+                start_date: startDate || "",
+                end_date: endDate || "",
+                avg_temp: avgTemp || null,
+                trip_type: tripType || "vacation",
+            }),
+        });
+
+        return res.json();
+    };
+
     const askQuestion = async (question) => {
         if (!question.trim() || loading) return;
 
@@ -48,22 +94,40 @@ export default function AIChatWidget({ city, startDate, endDate, avgTemp, tripTy
         setLoading(true);
 
         try {
-            const res = await fetch(`${API_URL}/ai/ask`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    city,
-                    question,
-                    language,
-                    start_date: startDate || "",
-                    end_date: endDate || "",
-                    avg_temp: avgTemp || null,
-                    trip_type: tripType || "vacation",
-                }),
-            });
+            if (token && checklistSlug) {
+                try {
+                    const commandResponse = await fetch(`${API_URL}/checklists/${checklistSlug}/ai-command`, {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({
+                            command: question,
+                            language,
+                        }),
+                    });
 
-            const data = await res.json();
-            
+                    if (commandResponse.ok) {
+                        const commandData = await commandResponse.json();
+                        if (commandData.recognized_action_request) {
+                            if (commandData.applied && commandData.checklist && onChecklistUpdated) {
+                                onChecklistUpdated(commandData.checklist);
+                            }
+                            setMessages(prev => [...prev, {
+                                role: "ai",
+                                text: commandData.message || (language === "ru" ? "Чеклист обновлён." : "Checklist updated."),
+                            }]);
+                            setLoading(false);
+                            return;
+                        }
+                    }
+                } catch (commandError) {
+                    console.error("Checklist AI command failed:", commandError);
+                }
+            }
+
+            const data = await askTravelQuestion(question);
             setMessages(prev => [...prev, {
                 role: "ai",
                 text: data.answer || "Не удалось получить ответ"
@@ -163,7 +227,11 @@ export default function AIChatWidget({ city, startDate, endDate, avgTemp, tripTy
                         ref={inputRef}
                         className="ai-chat-input"
                         type="text"
-                        placeholder={language === "ru" ? "Задайте вопрос о городе..." : "Ask about the city..."}
+                        placeholder={
+                            checklistSlug
+                                ? (language === "ru" ? "Спросите, измените или перенесите вещи..." : "Ask, update or move items...")
+                                : (language === "ru" ? "Задайте вопрос о городе..." : "Ask about the city...")
+                        }
                         value={input}
                         onChange={(e) => setInput(e.target.value)}
                         disabled={loading}

@@ -1,6 +1,19 @@
-import React, { useState, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const TELEGRAM_BOT_USERNAME = import.meta.env.VITE_TELEGRAM_BOT_USERNAME || "luggify_bot";
+const TELEGRAM_WIDGET_SRC = "https://telegram.org/js/telegram-widget.js?22";
+
+const isLocalTelegramLoginHost = () => {
+    if (typeof window === "undefined") return false;
+    const host = window.location.hostname;
+    if (!host) return true;
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1") return true;
+    if (/^10\./.test(host)) return true;
+    if (/^192\.168\./.test(host)) return true;
+    if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) return true;
+    return false;
+};
 
 export default function AuthModal({ onClose, onAuth }) {
     const [tab, setTab] = useState("login"); // "login" | "register"
@@ -10,6 +23,8 @@ export default function AuthModal({ onClose, onAuth }) {
     const [error, setError] = useState("");
     const [success, setSuccess] = useState("");
     const [loading, setLoading] = useState(false);
+    const [telegramLoading, setTelegramLoading] = useState(false);
+    const localTelegramWidgetBlocked = isLocalTelegramLoginHost();
 
     // Email verification state
     const [showVerification, setShowVerification] = useState(false);
@@ -208,6 +223,8 @@ export default function AuthModal({ onClose, onAuth }) {
     };
 
     const inputRefs = useRef([]);
+    const telegramWidgetRef = useRef(null);
+    const telegramAuthHandlerRef = useRef(null);
 
     const handlePinChange = (index, value) => {
         const digit = value.replace(/\D/g, '');
@@ -244,6 +261,80 @@ export default function AuthModal({ onClose, onAuth }) {
             }
         }
     };
+
+    const handleTelegramAuth = async (telegramUser) => {
+        if (!telegramUser) return;
+
+        setError("");
+        setSuccess("");
+        setTelegramLoading(true);
+
+        try {
+            const res = await fetch(`${API_URL}/auth/telegram`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    tg_id: String(telegramUser.id),
+                    first_name: telegramUser.first_name,
+                    last_name: telegramUser.last_name,
+                    username: telegramUser.username,
+                    photo_url: telegramUser.photo_url,
+                    auth_date: String(telegramUser.auth_date || ""),
+                    hash: telegramUser.hash,
+                }),
+            });
+
+            const data = await res.json();
+            if (!res.ok) {
+                setError(data.detail || "Не удалось войти через Telegram");
+                return;
+            }
+
+            localStorage.setItem("token", data.access_token);
+            localStorage.setItem("user", JSON.stringify(data.user));
+            onAuth(data.user, data.access_token);
+            onClose();
+        } catch {
+            setError("Ошибка Telegram-авторизации. Попробуйте ещё раз.");
+        } finally {
+            setTelegramLoading(false);
+        }
+    };
+
+    telegramAuthHandlerRef.current = handleTelegramAuth;
+
+    useEffect(() => {
+        window.onTelegramAuthLuggify = (telegramUser) => {
+            telegramAuthHandlerRef.current?.(telegramUser);
+        };
+        return () => {
+            delete window.onTelegramAuthLuggify;
+        };
+    }, []);
+
+    useEffect(() => {
+        if (showVerification || showDeviceVerification || !telegramWidgetRef.current || localTelegramWidgetBlocked) return;
+
+        const container = telegramWidgetRef.current;
+        container.innerHTML = "";
+
+        const script = document.createElement("script");
+        script.async = true;
+        script.src = TELEGRAM_WIDGET_SRC;
+        script.setAttribute("data-telegram-login", TELEGRAM_BOT_USERNAME);
+        script.setAttribute("data-size", "large");
+        script.setAttribute("data-radius", "12");
+        script.setAttribute("data-userpic", "false");
+        script.setAttribute("data-request-access", "write");
+        script.setAttribute("data-lang", "ru");
+        script.setAttribute("data-onauth", "onTelegramAuthLuggify(user)");
+
+        container.appendChild(script);
+
+        return () => {
+            container.innerHTML = "";
+        };
+    }, [showVerification, showDeviceVerification, tab, localTelegramWidgetBlocked]);
 
     // Verification screen
     if (showVerification || showDeviceVerification) {
@@ -361,6 +452,31 @@ export default function AuthModal({ onClose, onAuth }) {
                     </button>
                 </div>
 
+                <div className="auth-telegram-block">
+                    <div className="auth-telegram-label">
+                        {tab === "login" ? "Войти через Telegram" : "Продолжить через Telegram"}
+                    </div>
+                    <div className="auth-telegram-widget-shell">
+                        {localTelegramWidgetBlocked ? (
+                            <div className="auth-telegram-local-fallback">
+                                <div className="auth-telegram-soon-icon">✈️</div>
+                                <div className="auth-telegram-soon-text">Скоро</div>
+                            </div>
+                        ) : (
+                            <div ref={telegramWidgetRef} className="auth-telegram-widget" />
+                        )}
+                    </div>
+                    {!localTelegramWidgetBlocked && (
+                        <div className="auth-telegram-hint">
+                            Быстрый вход без почты и пароля.
+                        </div>
+                    )}
+                </div>
+
+                <div className="auth-divider">
+                    <span>или</span>
+                </div>
+
                 <form className="auth-form" onSubmit={handleSubmit}>
                     <input
                         className="auth-input"
@@ -391,8 +507,8 @@ export default function AuthModal({ onClose, onAuth }) {
                     />
                     {error && <div className="auth-error">{error}</div>}
                     {success && <div className="auth-success">{success}</div>}
-                    <button className="auth-submit" type="submit" disabled={loading}>
-                        {loading
+                    <button className="auth-submit" type="submit" disabled={loading || telegramLoading}>
+                        {(loading || telegramLoading)
                             ? "Загрузка..."
                             : tab === "login"
                                 ? "Войти"

@@ -1,10 +1,23 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy import case, func
 from sqlalchemy.orm import selectinload
 import models
 import schemas
 import uuid
 from auth import get_password_hash
+
+
+DEFAULT_BAGGAGE_NAME = "Рюкзак"
+DEFAULT_BAGGAGE_KIND = "backpack"
+
+BAGGAGE_KIND_DEFAULT_NAMES = {
+    "backpack": "Рюкзак",
+    "suitcase": "Чемодан",
+    "carry_on": "Ручная кладь",
+    "bag": "Сумка",
+    "custom": "Багаж",
+}
 
 
 # === User CRUD ===
@@ -70,6 +83,38 @@ async def update_user(db: AsyncSession, user_id: int, user_update: schemas.UserU
     return user
 
 
+async def bind_telegram_to_user(
+    db: AsyncSession,
+    user_id: int,
+    tg_id: str,
+    telegram_username: str = None,
+):
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        return None
+
+    existing_owner = await get_user_by_tg_id(db, tg_id)
+    if existing_owner and existing_owner.id != user_id:
+        is_placeholder = not existing_owner.email and not existing_owner.hashed_password
+        if not is_placeholder:
+            raise ValueError("Этот Telegram уже привязан к другому аккаунту.")
+        existing_owner.tg_id = None
+        # Clear the old placeholder binding first so the unique tg_id index
+        # does not trip when we attach the same Telegram account to the real user.
+        await db.flush()
+
+    user.tg_id = tg_id
+
+    if telegram_username:
+        social_links = dict(user.social_links or {})
+        social_links.setdefault("telegram", f"@{telegram_username.lstrip('@')}")
+        user.social_links = social_links
+
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
 async def create_user_from_telegram(db: AsyncSession, tg_id: str, username: str, first_name: str = None):
     """Создание пользователя из Telegram данных"""
     display_name = username or first_name or f"tg_{tg_id}"
@@ -80,6 +125,7 @@ async def create_user_from_telegram(db: AsyncSession, tg_id: str, username: str,
     user = models.User(
         username=display_name,
         tg_id=tg_id,
+        social_links={"telegram": f"@{username.lstrip('@')}"} if username else None,
     )
     db.add(user)
     await db.commit()
@@ -255,6 +301,7 @@ async def create_checklist(db: AsyncSession, data: schemas.ChecklistCreate):
         checked_items=data.checked_items,
         removed_items=data.removed_items,
         added_items=data.added_items,
+        item_quantities=data.item_quantities or {},
         daily_forecast=[f.model_dump(mode='json') if hasattr(f, 'model_dump') else f for f in data.daily_forecast] if data.daily_forecast else None,
         user_id=data.user_id,
         origin_city=data.origin_city,
@@ -267,12 +314,49 @@ async def create_checklist(db: AsyncSession, data: schemas.ChecklistCreate):
 
 
 async def get_checklist_by_slug(db: AsyncSession, slug: str):
-    result = await db.execute(select(models.Checklist).where(models.Checklist.slug == slug))
+    result = await db.execute(
+        select(models.Checklist)
+        .execution_options(populate_existing=True)
+        .options(
+            selectinload(models.Checklist.backpacks),
+            selectinload(models.Checklist.events),
+            selectinload(models.Checklist.reviews),
+        )
+        .where(models.Checklist.slug == slug)
+    )
     return result.scalar_one_or_none()
 
 
+async def search_users_by_username(db: AsyncSession, query: str, limit: int = 8):
+    cleaned_query = (query or "").strip()
+    if not cleaned_query:
+        return []
+
+    prefix = f"{cleaned_query}%"
+    contains = f"%{cleaned_query}%"
+    result = await db.execute(
+        select(models.User)
+        .where(models.User.username.ilike(contains))
+        .order_by(
+            case((models.User.username.ilike(prefix), 0), else_=1),
+            func.lower(models.User.username),
+        )
+        .limit(limit)
+    )
+    return result.scalars().all()
+
+
 async def get_checklist_by_id(db: AsyncSession, checklist_id: int):
-    result = await db.execute(select(models.Checklist).where(models.Checklist.id == checklist_id))
+    result = await db.execute(
+        select(models.Checklist)
+        .execution_options(populate_existing=True)
+        .options(
+            selectinload(models.Checklist.backpacks),
+            selectinload(models.Checklist.events),
+            selectinload(models.Checklist.reviews),
+        )
+        .where(models.Checklist.id == checklist_id)
+    )
     return result.scalar_one_or_none()
 
 
@@ -298,7 +382,10 @@ async def get_checklists_by_user_id(db: AsyncSession, user_id: int):
     """Получение всех чеклистов пользователя"""
     result = await db.execute(
         select(models.Checklist)
-        .options(selectinload(models.Checklist.backpacks))
+        .options(
+            selectinload(models.Checklist.backpacks),
+            selectinload(models.Checklist.reviews),
+        )
         .where(models.Checklist.user_id == user_id)
         .order_by(models.Checklist.id.desc())
     )
@@ -309,8 +396,13 @@ async def get_shared_checklists_by_user_id(db: AsyncSession, user_id: int):
     """Получение чеклистов, в которых пользователь является коллаборатором (имеет рюкзак)"""
     result = await db.execute(
         select(models.Checklist)
+        .options(
+            selectinload(models.Checklist.backpacks),
+            selectinload(models.Checklist.reviews),
+        )
         .join(models.UserBackpack, models.UserBackpack.checklist_id == models.Checklist.id)
         .where(models.UserBackpack.user_id == user_id)
+        .distinct(models.Checklist.id)
         .order_by(models.Checklist.id.desc())
     )
     return result.scalars().all()
@@ -321,7 +413,15 @@ async def save_or_update_tg_checklist(db: AsyncSession, data: schemas.ChecklistC
     return await create_checklist(db, data)
 
 
-async def update_checklist_state(db: AsyncSession, slug: str, checked_items=None, removed_items=None, added_items=None, items=None):
+async def update_checklist_state(
+    db: AsyncSession,
+    slug: str,
+    checked_items=None,
+    removed_items=None,
+    added_items=None,
+    items=None,
+    item_quantities=None,
+):
     result = await db.execute(select(models.Checklist).where(models.Checklist.slug == slug))
     checklist = result.scalar_one_or_none()
     if not checklist:
@@ -334,9 +434,34 @@ async def update_checklist_state(db: AsyncSession, slug: str, checked_items=None
         checklist.added_items = added_items
     if items is not None:
         checklist.items = items
+    if item_quantities is not None:
+        checklist.item_quantities = item_quantities
     await db.commit()
     await db.refresh(checklist)
     return checklist
+
+async def get_trip_review_by_user_and_checklist(db: AsyncSession, user_id: int, checklist_id: int):
+    result = await db.execute(
+        select(models.TripReview)
+        .where(
+            models.TripReview.user_id == user_id,
+            models.TripReview.checklist_id == checklist_id,
+        )
+    )
+    return result.scalar_one_or_none()
+
+async def get_trip_reviews_by_user_id(db: AsyncSession, user_id: int, public_only: bool = False):
+    stmt = (
+        select(models.TripReview)
+        .options(selectinload(models.TripReview.checklist))
+        .join(models.Checklist, models.Checklist.id == models.TripReview.checklist_id)
+        .where(models.TripReview.user_id == user_id)
+        .order_by(models.TripReview.created_at.desc())
+    )
+    if public_only:
+        stmt = stmt.where(models.Checklist.is_public.is_(True))
+    result = await db.execute(stmt)
+    return result.scalars().all()
 
 # === City Attractions CRUD ===
 
@@ -406,30 +531,118 @@ async def delete_itinerary_event(db: AsyncSession, event_id: int):
 
 # === Shared Backpacks CRUD ===
 
+def _normalize_baggage_kind(kind: str | None) -> str:
+    normalized = (kind or DEFAULT_BAGGAGE_KIND).strip().lower()
+    return normalized or DEFAULT_BAGGAGE_KIND
+
+
+def _normalize_baggage_name(name: str | None, kind: str | None = None) -> str:
+    cleaned = (name or "").strip()
+    if cleaned:
+        return cleaned
+    return BAGGAGE_KIND_DEFAULT_NAMES.get(_normalize_baggage_kind(kind), "Багаж")
+
+
+async def get_backpacks_by_user(db: AsyncSession, checklist_id: int, user_id: int):
+    result = await db.execute(
+        select(models.UserBackpack)
+        .where(
+            models.UserBackpack.checklist_id == checklist_id,
+            models.UserBackpack.user_id == user_id,
+        )
+        .order_by(
+            models.UserBackpack.is_default.desc(),
+            models.UserBackpack.sort_order.asc(),
+            models.UserBackpack.id.asc(),
+        )
+    )
+    return result.scalars().all()
+
+
 async def get_backpack_by_user(db: AsyncSession, checklist_id: int, user_id: int):
-    result = await db.execute(select(models.UserBackpack).where(
-        models.UserBackpack.checklist_id == checklist_id,
-        models.UserBackpack.user_id == user_id
-    ))
+    result = await db.execute(
+        select(models.UserBackpack)
+        .where(
+            models.UserBackpack.checklist_id == checklist_id,
+            models.UserBackpack.user_id == user_id,
+        )
+        .order_by(
+            models.UserBackpack.is_default.desc(),
+            models.UserBackpack.sort_order.asc(),
+            models.UserBackpack.id.asc(),
+        )
+    )
+    return result.scalars().first()
+
+async def get_backpack_by_id(db: AsyncSession, backpack_id: int):
+    result = await db.execute(
+        select(models.UserBackpack).where(models.UserBackpack.id == backpack_id)
+    )
     return result.scalar_one_or_none()
 
-async def create_user_backpack(db: AsyncSession, checklist_id: int, user_id: int):
-    existing = await get_backpack_by_user(db, checklist_id, user_id)
-    if existing:
-        return existing
-        
+
+async def create_user_backpack(
+    db: AsyncSession,
+    checklist_id: int,
+    user_id: int,
+    name: str | None = None,
+    kind: str | None = None,
+    is_default: bool | None = None,
+):
+    existing_backpacks = await get_backpacks_by_user(db, checklist_id, user_id)
+    normalized_kind = _normalize_baggage_kind(kind)
+    normalized_name = _normalize_baggage_name(name, normalized_kind)
+
+    if name is None and kind is None:
+        existing_default = next((bp for bp in existing_backpacks if bp.is_default), None)
+        if existing_default:
+            return existing_default
+
+    for backpack in existing_backpacks:
+        if backpack.name.strip().lower() == normalized_name.lower():
+            return backpack
+
+    max_sort_order = max((bp.sort_order or 0) for bp in existing_backpacks) if existing_backpacks else -1
+    should_be_default = True if not existing_backpacks else bool(is_default)
+
+    if should_be_default:
+        for existing in existing_backpacks:
+            existing.is_default = False
+
     new_backpack = models.UserBackpack(
         checklist_id=checklist_id,
         user_id=user_id,
+        name=normalized_name,
+        kind=normalized_kind,
+        sort_order=max_sort_order + 1,
+        is_default=should_be_default,
         items=[],
         checked_items=[],
         added_items=[],
-        removed_items=[]
+        removed_items=[],
+        item_quantities={},
     )
     db.add(new_backpack)
     await db.commit()
     await db.refresh(new_backpack)
     return new_backpack
+
+
+async def create_user_baggage(
+    db: AsyncSession,
+    checklist_id: int,
+    user_id: int,
+    name: str,
+    kind: str | None = None,
+):
+    return await create_user_backpack(
+        db,
+        checklist_id=checklist_id,
+        user_id=user_id,
+        name=name,
+        kind=kind or "custom",
+        is_default=False,
+    )
 
 async def update_backpack_items(db: AsyncSession, backpack_id: int, data: schemas.UserBackpackUpdate):
     result = await db.execute(select(models.UserBackpack).where(models.UserBackpack.id == backpack_id))
@@ -439,11 +652,69 @@ async def update_backpack_items(db: AsyncSession, backpack_id: int, data: schema
 
     update_data = data.model_dump(exclude_unset=True)
     for key, value in update_data.items():
+        if value is None:
+            continue
         setattr(backpack, key, value)
         
     await db.commit()
     await db.refresh(backpack)
     return backpack
+
+
+async def update_baggage_meta(db: AsyncSession, backpack_id: int, data: schemas.UserBaggageUpdate):
+    backpack = await get_backpack_by_id(db, backpack_id)
+    if not backpack:
+        return None
+
+    update_data = data.model_dump(exclude_unset=True)
+    if update_data.get("is_default") is True:
+        owned_backpacks = await get_backpacks_by_user(db, backpack.checklist_id, backpack.user_id)
+        for existing in owned_backpacks:
+            existing.is_default = existing.id == backpack.id
+
+    for key, value in update_data.items():
+        if value is None:
+            continue
+        setattr(backpack, key, value)
+
+    await db.commit()
+    await db.refresh(backpack)
+    return backpack
+
+
+def baggage_has_content(backpack: models.UserBackpack) -> bool:
+    return bool(
+        (backpack.items or [])
+        or (backpack.checked_items or [])
+        or (backpack.added_items or [])
+        or (backpack.removed_items or [])
+    )
+
+
+async def delete_baggage(db: AsyncSession, backpack_id: int):
+    backpack = await get_backpack_by_id(db, backpack_id)
+    if not backpack:
+        return None, "not_found"
+
+    owned_backpacks = await get_backpacks_by_user(db, backpack.checklist_id, backpack.user_id)
+    if len(owned_backpacks) <= 1:
+        return None, "last_baggage"
+    if backpack.is_default:
+        return None, "default_baggage"
+    if baggage_has_content(backpack):
+        return None, "not_empty"
+
+    checklist = await get_checklist_by_id(db, backpack.checklist_id)
+    if checklist:
+        checklist.hidden_sections = [
+            section
+            for section in (checklist.hidden_sections or [])
+            if section != f"backpack:{backpack.id}"
+        ]
+
+    await db.delete(backpack)
+    await db.commit()
+    return backpack_id, None
 
 async def generate_checklist_invite_token(db: AsyncSession, checklist_slug: str):
     checklist = await get_checklist_by_slug(db, checklist_slug)

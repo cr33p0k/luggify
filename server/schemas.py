@@ -1,5 +1,5 @@
 from typing import Optional, List, Any, Dict
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from datetime import date, datetime
 
 
@@ -28,10 +28,14 @@ class VerifyDeviceLogin(BaseModel):
 
 
 class TelegramAuth(BaseModel):
-    tg_id: str
+    init_data: Optional[str] = None
+    tg_id: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     username: Optional[str] = None
+    photo_url: Optional[str] = None
+    auth_date: Optional[str] = None
+    hash: Optional[str] = None
 
 
 class UserOut(BaseModel):
@@ -52,10 +56,20 @@ class UserOut(BaseModel):
     class Config:
         from_attributes = True
 
+class UserSearchResult(BaseModel):
+    id: int
+    username: str
+    avatar: Optional[str] = None
+    bio: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
 class UserUpdate(BaseModel):
     bio: Optional[str] = None
     social_links: Optional[Dict[str, str]] = None
     avatar: Optional[str] = None
+    is_stats_public: Optional[bool] = None
 
 class UserInfo(BaseModel):
     avatar: Optional[str] = None
@@ -63,12 +77,42 @@ class UserInfo(BaseModel):
 class UserAvatarUpdate(BaseModel):
     avatar: str
 
+
+class TelegramLinkResponse(BaseModel):
+    linked: bool
+    tg_id: Optional[str] = None
+    bot_username: str
+    deep_link: str
+    link_command: str
+    expires_at: datetime
+
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserOut
     message: Optional[str] = None
     email_delivery_failed: bool = False
+
+class TripReviewCreate(BaseModel):
+    rating: int = Field(..., ge=1, le=5)
+    text: str = Field(..., min_length=10, max_length=2000)
+    photo: Optional[str] = None
+
+class TripReviewOut(BaseModel):
+    id: int
+    rating: int
+    text: str
+    photo: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    user: UserOut
+    checklist_slug: Optional[str] = None
+    checklist_city: Optional[str] = None
+    checklist_start_date: Optional[date] = None
+    checklist_end_date: Optional[date] = None
+
+    class Config:
+        from_attributes = True
 
 
 # === Checklist схемы ===
@@ -117,6 +161,7 @@ class ChecklistCreate(BaseModel):
     checked_items: Optional[List[str]] = None
     removed_items: Optional[List[str]] = None
     added_items: Optional[List[str]] = None
+    item_quantities: Optional[Dict[str, int]] = None
     daily_forecast: Optional[List[DailyForecast]] = None
     origin_city: Optional[str] = None
     tg_user_id: Optional[str] = None
@@ -131,10 +176,26 @@ class ChecklistCreate(BaseModel):
 
 
 class UserBackpackBase(BaseModel):
+    name: Optional[str] = "Рюкзак"
+    kind: Optional[str] = "backpack"
+    sort_order: Optional[int] = 0
+    is_default: Optional[bool] = False
     items: Optional[List[str]] = []
     checked_items: Optional[List[str]] = []
     added_items: Optional[List[str]] = []
     removed_items: Optional[List[str]] = []
+    item_quantities: Optional[Dict[str, int]] = {}
+
+class UserBaggageCreate(BaseModel):
+    name: str = Field(..., min_length=2, max_length=60)
+    kind: Optional[str] = "custom"
+    user_id: Optional[int] = None
+
+class UserBaggageUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=2, max_length=60)
+    kind: Optional[str] = None
+    sort_order: Optional[int] = None
+    is_default: Optional[bool] = None
 
 class UserBackpackUpdate(UserBackpackBase):
     pass
@@ -154,6 +215,25 @@ class ChecklistOut(ChecklistCreate):
     invite_token: Optional[str] = None
     events: Optional[List[ItineraryEventOut]] = []
     backpacks: Optional[List[UserBackpackOut]] = []
+    reviews: Optional[List[TripReviewOut]] = []
+
+
+class ChecklistAIAction(BaseModel):
+    type: str
+    items: List[str]
+
+
+class ChecklistAICommandRequest(BaseModel):
+    command: str = Field(..., min_length=2, max_length=500)
+    language: str = "ru"
+
+
+class ChecklistAICommandResponse(BaseModel):
+    applied: bool
+    recognized_action_request: bool = False
+    message: str
+    actions: List[ChecklistAIAction] = []
+    checklist: ChecklistOut
 
 class NotificationOut(BaseModel):
     id: int

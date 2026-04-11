@@ -123,6 +123,89 @@
   gap: 0.8rem;
 }
 
+.auth-telegram-block {
+  margin-bottom: 1.2rem;
+  padding: 1rem;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.02));
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+}
+
+.auth-telegram-label {
+  margin-bottom: 0.7rem;
+  color: #f0f0f0;
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.auth-telegram-widget-shell {
+  display: flex;
+  justify-content: center;
+  min-height: 52px;
+}
+
+.auth-telegram-widget {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+
+.auth-telegram-local-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  width: 100%;
+  min-height: 72px;
+  padding: 0.95rem 1rem;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.auth-telegram-soon-icon {
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.auth-telegram-soon-text {
+  color: #cfcfcf;
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.auth-telegram-hint {
+  margin-top: 0.7rem;
+  color: #848484;
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+.auth-divider {
+  position: relative;
+  margin: 0 0 1rem;
+  text-align: center;
+}
+
+.auth-divider::before {
+  content: "";
+  position: absolute;
+  inset: 50% 0 auto;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.auth-divider span {
+  position: relative;
+  display: inline-block;
+  padding: 0 0.8rem;
+  background: #161616;
+  color: #666;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
 .auth-input {
   width: 100%;
   padding: 0.7rem 1rem;

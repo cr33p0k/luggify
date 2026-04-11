@@ -18,14 +18,12 @@ function App() {
   const [isTg, setIsTg] = useState(false);
   const [columns, setColumns] = useState(3);
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [showChecklists, setShowChecklists] = useState(false);
   const [myChecklists, setMyChecklists] = useState([]);
   const [checklistsLoading, setChecklistsLoading] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const [saveStateSuccess, setSaveStateSuccess] = useState(false);
-  const [authUser, setAuthUser] = useState(null);
   const [authToken, setAuthToken] = useState(null);
 
   useEffect(() => {
@@ -42,17 +40,16 @@ function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            tg_id: String(tgUserData.id),
-            first_name: tgUserData.first_name,
-            last_name: tgUserData.last_name,
-            username: tgUserData.username,
+            init_data: tg.initData,
           }),
         })
           .then(res => res.json())
           .then(data => {
             if (data.access_token) {
               setAuthToken(data.access_token);
-              setAuthUser(data.user);
+            }
+            if (data.detail) {
+              console.error('Ошибка Telegram auth:', data.detail);
             }
           })
           .catch(err => console.error('Ошибка Telegram auth:', err));
@@ -114,7 +111,6 @@ function App() {
       setResult(data);
       // Сохраняем чеклист для Telegram пользователя
       if (isTg && tgUser && tgUser.id) {
-        setSaving(true);
         fetch(`${API_URL}/save-tg-checklist`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -128,31 +124,18 @@ function App() {
             tg_user_id: String(tgUser.id),
           }),
         })
-          .then(() => setSaving(false))
-          .catch(() => setSaving(false));
+          .then(() => {
+            setSaveSuccess(true);
+            setTimeout(() => setSaveSuccess(false), 1500);
+          })
+          .catch((saveError) => console.error("Не удалось сохранить Telegram чеклист:", saveError));
       }
-    } catch (e) {
+    } catch (requestError) {
+      console.error("Ошибка генерации Telegram-чеклиста:", requestError);
       setError("Ошибка при запросе к серверу");
     } finally {
       setLoading(false);
     }
-  };
-
-  // --- ХЕЛПЕРЫ ДЛЯ СИНХРОНИЗАЦИИ СОСТОЯНИЯ ЧЕКЛИСТА ---
-  // syncChecklistState больше не вызывается из обработчиков изменений, только из handleSaveChecklistState
-  const syncChecklistState = async (slug, checked, removed, added, items) => {
-    try {
-      await fetch(`${API_URL}/checklist/${slug}/state`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          checked_items: Object.keys(checked).filter(k => checked[k]),
-          removed_items: removed,
-          added_items: added,
-          items: items,
-        }),
-      });
-    } catch { }
   };
 
   // --- ОБНОВЛЯЕМ handleCheck ---
@@ -178,12 +161,6 @@ function App() {
       delete updated[item];
       return updated;
     });
-    setIsDirty(true);
-  };
-
-  // --- ОБНОВЛЯЕМ handleRestoreAll ---
-  const handleRestoreAll = () => {
-    setRemovedItems([]);
     setIsDirty(true);
   };
 
@@ -277,40 +254,10 @@ function App() {
         const data = await res.json();
         setResult(prev => prev ? { ...prev, daily_forecast: data.daily_forecast } : prev);
       }
-    } catch { }
-    setLoading(false);
-  };
-
-  // Сохранить текущий чеклист в мои чеклисты
-  const handleSaveChecklist = async () => {
-    if (!result || !tgUser || !tgUser.id) return;
-    setSaving(true);
-    setError(null);
-    try {
-      const res = await fetch(`${API_URL}/save-tg-checklist`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          city: result.city,
-          start_date: result.start_date,
-          end_date: result.end_date,
-          items: result.items,
-          avg_temp: result.avg_temp,
-          conditions: result.conditions,
-          tg_user_id: String(tgUser.id),
-        }),
-      });
-      if (res.ok) {
-        setSaveSuccess(true);
-        setTimeout(() => setSaveSuccess(false), 1500);
-      } else {
-        setError("Ошибка при сохранении чеклиста");
-      }
-    } catch {
-      setError("Ошибка при сохранении чеклиста");
-    } finally {
-      setSaving(false);
+    } catch (forecastError) {
+      console.error("Не удалось обновить прогноз в mini app:", forecastError);
     }
+    setLoading(false);
   };
 
   // Добавляю функцию для удаления чеклиста
@@ -367,7 +314,9 @@ function App() {
         setSaveStateSuccess(true);
         setTimeout(() => setSaveStateSuccess(false), 1500);
       }
-    } catch { }
+    } catch (saveStateError) {
+      console.error("Не удалось сохранить состояние Telegram-чеклиста:", saveStateError);
+    }
   };
 
   return (
