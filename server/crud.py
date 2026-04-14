@@ -20,6 +20,48 @@ BAGGAGE_KIND_DEFAULT_NAMES = {
 }
 
 
+def _normalize_packing_profile_items(items: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    for raw_value in items or []:
+        item = str(raw_value or "").strip()
+        if not item:
+            continue
+        if item not in normalized:
+            normalized.append(item)
+    return normalized
+
+
+def _normalize_packing_profile(profile: dict | None) -> dict:
+    source = profile or {}
+    gender = (source.get("gender") or "unspecified").strip().lower()
+    if gender == "unisex":
+        gender = "unspecified"
+    if gender not in {"unspecified", "male", "female"}:
+        gender = "unspecified"
+    return {
+        "gender": gender,
+        "traveling_with_pet": bool(source.get("traveling_with_pet")),
+        "has_allergies": bool(source.get("has_allergies")),
+        "always_include_items": _normalize_packing_profile_items(source.get("always_include_items")),
+    }
+
+
+def _normalize_editor_user_ids(editor_user_ids: list[int] | None, owner_user_id: int | None = None) -> list[int]:
+    normalized: list[int] = []
+    for raw_value in editor_user_ids or []:
+        try:
+            parsed = int(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if parsed <= 0:
+            continue
+        if owner_user_id and parsed == owner_user_id:
+            continue
+        if parsed not in normalized:
+            normalized.append(parsed)
+    return normalized
+
+
 # === User CRUD ===
 
 async def create_user(db: AsyncSession, data: schemas.UserCreate):
@@ -29,6 +71,7 @@ async def create_user(db: AsyncSession, data: schemas.UserCreate):
         email=data.email,
         username=data.username,
         hashed_password=hashed_password,
+        packing_profile=_normalize_packing_profile(None),
     )
     db.add(user)
     await db.commit()
@@ -76,6 +119,8 @@ async def update_user(db: AsyncSession, user_id: int, user_update: schemas.UserU
     
     update_data = user_update.model_dump(exclude_unset=True)
     for key, value in update_data.items():
+        if key == "packing_profile":
+            value = _normalize_packing_profile(value)
         setattr(user, key, value)
         
     await db.commit()
@@ -126,6 +171,7 @@ async def create_user_from_telegram(db: AsyncSession, tg_id: str, username: str,
         username=display_name,
         tg_id=tg_id,
         social_links={"telegram": f"@{username.lstrip('@')}"} if username else None,
+        packing_profile=_normalize_packing_profile(None),
     )
     db.add(user)
     await db.commit()
@@ -156,6 +202,16 @@ async def unfollow_user(db: AsyncSession, follower_id: int, following_id: int):
     delete_stmt = models.followers_association.delete().where(
         models.followers_association.c.follower_id == follower_id,
         models.followers_association.c.following_id == following_id
+    )
+    result = await db.execute(delete_stmt)
+    await db.commit()
+    return result.rowcount > 0
+
+async def remove_follower(db: AsyncSession, user_id: int, follower_id: int):
+    """Удалить подписчика у пользователя"""
+    delete_stmt = models.followers_association.delete().where(
+        models.followers_association.c.follower_id == follower_id,
+        models.followers_association.c.following_id == user_id
     )
     result = await db.execute(delete_stmt)
     await db.commit()
@@ -302,6 +358,7 @@ async def create_checklist(db: AsyncSession, data: schemas.ChecklistCreate):
         removed_items=data.removed_items,
         added_items=data.added_items,
         item_quantities=data.item_quantities or {},
+        packed_quantities=data.packed_quantities or {},
         daily_forecast=[f.model_dump(mode='json') if hasattr(f, 'model_dump') else f for f in data.daily_forecast] if data.daily_forecast else None,
         user_id=data.user_id,
         origin_city=data.origin_city,
@@ -421,6 +478,7 @@ async def update_checklist_state(
     added_items=None,
     items=None,
     item_quantities=None,
+    packed_quantities=None,
 ):
     result = await db.execute(select(models.Checklist).where(models.Checklist.slug == slug))
     checklist = result.scalar_one_or_none()
@@ -436,6 +494,8 @@ async def update_checklist_state(
         checklist.items = items
     if item_quantities is not None:
         checklist.item_quantities = item_quantities
+    if packed_quantities is not None:
+        checklist.packed_quantities = packed_quantities
     await db.commit()
     await db.refresh(checklist)
     return checklist
@@ -588,10 +648,13 @@ async def create_user_backpack(
     name: str | None = None,
     kind: str | None = None,
     is_default: bool | None = None,
+    items: list[str] | None = None,
 ):
     existing_backpacks = await get_backpacks_by_user(db, checklist_id, user_id)
     normalized_kind = _normalize_baggage_kind(kind)
     normalized_name = _normalize_baggage_name(name, normalized_kind)
+    initial_items = _normalize_packing_profile_items(items)
+    initial_quantities = {item: 1 for item in initial_items}
 
     if name is None and kind is None:
         existing_default = next((bp for bp in existing_backpacks if bp.is_default), None)
@@ -604,6 +667,10 @@ async def create_user_backpack(
 
     max_sort_order = max((bp.sort_order or 0) for bp in existing_backpacks) if existing_backpacks else -1
     should_be_default = True if not existing_backpacks else bool(is_default)
+    shared_editor_ids = _normalize_editor_user_ids(
+        [editor_id for backpack in existing_backpacks for editor_id in (backpack.editor_user_ids or [])],
+        owner_user_id=user_id,
+    )
 
     if should_be_default:
         for existing in existing_backpacks:
@@ -616,11 +683,13 @@ async def create_user_backpack(
         kind=normalized_kind,
         sort_order=max_sort_order + 1,
         is_default=should_be_default,
-        items=[],
+        editor_user_ids=shared_editor_ids,
+        items=initial_items,
         checked_items=[],
         added_items=[],
         removed_items=[],
-        item_quantities={},
+        item_quantities=initial_quantities,
+        packed_quantities={},
     )
     db.add(new_backpack)
     await db.commit()
@@ -667,10 +736,22 @@ async def update_baggage_meta(db: AsyncSession, backpack_id: int, data: schemas.
         return None
 
     update_data = data.model_dump(exclude_unset=True)
-    if update_data.get("is_default") is True:
+    owned_backpacks = None
+    if update_data.get("is_default") is True or "editor_user_ids" in update_data:
         owned_backpacks = await get_backpacks_by_user(db, backpack.checklist_id, backpack.user_id)
+
+    if update_data.get("is_default") is True and owned_backpacks is not None:
         for existing in owned_backpacks:
             existing.is_default = existing.id == backpack.id
+
+    if "editor_user_ids" in update_data:
+        normalized_editor_ids = _normalize_editor_user_ids(
+            update_data.get("editor_user_ids"),
+            owner_user_id=backpack.user_id,
+        )
+        update_data["editor_user_ids"] = normalized_editor_ids
+        for existing in owned_backpacks or []:
+            existing.editor_user_ids = normalized_editor_ids
 
     for key, value in update_data.items():
         if value is None:

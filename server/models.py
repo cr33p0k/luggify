@@ -26,6 +26,7 @@ class User(Base):
     avatar = Column(String, nullable=True)  # URL, emoji or base64
     bio = Column(String, nullable=True)     # User biography/description
     social_links = Column(JSON, nullable=True) # JSON store for {"instagram": "...", "telegram": "..."}
+    packing_profile = Column(JSON, nullable=False, default=dict, server_default="{}")
     is_email_verified = Column(Boolean, default=False, server_default="false")
     email_verification_code = Column(String, nullable=True)
     code_expires_at = Column(DateTime, nullable=True)
@@ -77,9 +78,9 @@ class Checklist(Base):
     tg_user_id = Column(String, nullable=True, index=True)  # Telegram user id
     checked_items = Column(ARRAY(String), nullable=True)
     removed_items = Column(ARRAY(String), nullable=True)
-    removed_items = Column(ARRAY(String), nullable=True)
     added_items = Column(ARRAY(String), nullable=True)
     item_quantities = Column(JSON, nullable=False, default=dict, server_default="{}")
+    packed_quantities = Column(JSON, nullable=False, default=dict, server_default="{}")
     daily_forecast = Column(JSON, nullable=True) 
     is_public = Column(Boolean, default=True)
     hidden_sections = Column(ARRAY(String), default=[], server_default="{}")
@@ -133,6 +134,7 @@ class UserBackpack(Base):
     kind = Column(String, nullable=False, default="backpack", server_default="backpack")
     sort_order = Column(Integer, nullable=False, default=0, server_default="0")
     is_default = Column(Boolean, nullable=False, default=False, server_default="false")
+    editor_user_ids = Column(ARRAY(Integer), nullable=False, default=list, server_default="{}")
     
     # Списки вещей конкретного пользователя
     items = Column(ARRAY(String), default=[])
@@ -140,6 +142,7 @@ class UserBackpack(Base):
     added_items = Column(ARRAY(String), default=[])
     removed_items = Column(ARRAY(String), default=[])
     item_quantities = Column(JSON, nullable=False, default=dict, server_default="{}")
+    packed_quantities = Column(JSON, nullable=False, default=dict, server_default="{}")
     
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

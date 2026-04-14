@@ -4,6 +4,8 @@ import AuthModal from "./AuthModal";
 import NavbarUserSearch from "./NavbarUserSearch";
 import "./ProfilePage.css";
 import "./App.css";
+import { pluralizeWord } from "./i18n";
+import { LockIcon, UnlockIcon } from "./Icons";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
@@ -25,6 +27,22 @@ const renderSocialIcon = (network) => {
         case 'website': return <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>;
         default: return '🔗';
     }
+};
+
+const getCountNoun = (count, key, lang = "ru") => {
+    const forms = {
+        checklists: { ru: ["чеклист", "чеклиста", "чеклистов"], en: ["list", "lists"] },
+        followers: { ru: ["подписчик", "подписчика", "подписчиков"], en: ["follower", "followers"] },
+        following: { ru: ["подписка", "подписки", "подписок"], en: ["following", "following"] },
+        trips: { ru: ["поездка", "поездки", "поездок"], en: ["trip", "trips"] },
+        countries: { ru: ["страна", "страны", "стран"], en: ["country", "countries"] },
+        cities: { ru: ["город", "города", "городов"], en: ["city", "cities"] },
+        days: { ru: ["день", "дня", "дней"], en: ["day", "days"] },
+        items: { ru: ["вещь", "вещи", "вещей"], en: ["item", "items"] },
+    };
+    const value = forms[key];
+    if (!value) return "";
+    return pluralizeWord(count, value.ru, value.en, lang);
 };
 
 const PublicProfilePage = () => {
@@ -133,16 +151,17 @@ const PublicProfilePage = () => {
     // Followers can see a private profile, just like Instagram
     const canSeeContent = isSelf || profile.is_stats_public || profile.follow_status === "following";
     const publicStatsCards = [
-        { key: "checklists", count: profile.checklists?.length || 0, label: "Чеклисты" },
-        { key: "followers", count: profile.followers_count || 0, label: "Подписчики" },
-        { key: "following", count: profile.following_count || 0, label: "Подписки" },
+        { key: "checklists", count: profile.checklists?.length || 0, label: getCountNoun(profile.checklists?.length || 0, "checklists") },
+        { key: "followers", count: profile.followers_count || 0, label: getCountNoun(profile.followers_count || 0, "followers") },
+        { key: "following", count: profile.following_count || 0, label: getCountNoun(profile.following_count || 0, "following") },
     ];
 
     const travelStatsCards = canSeeContent && profile.stats ? [
-        { key: "trips", value: profile.stats.total_trips, label: "Поездок" },
-        { key: "countries", value: profile.stats.unique_countries, label: "Стран" },
-        { key: "cities", value: profile.stats.unique_cities, label: "Городов" },
-        { key: "days", value: profile.stats.total_days, label: "Дней" },
+        { key: "trips", value: profile.stats.total_trips, label: getCountNoun(profile.stats.total_trips, "trips") },
+        { key: "countries", value: profile.stats.unique_countries, label: getCountNoun(profile.stats.unique_countries, "countries") },
+        { key: "cities", value: profile.stats.unique_cities, label: getCountNoun(profile.stats.unique_cities, "cities") },
+        { key: "days", value: profile.stats.total_days, label: getCountNoun(profile.stats.total_days, "days") },
+        { key: "items", value: profile.stats.total_items || 0, label: getCountNoun(profile.stats.total_items || 0, "items") },
     ] : [];
 
     return (
@@ -150,9 +169,9 @@ const PublicProfilePage = () => {
             {/* Full Navbar */}
             <nav className="navbar">
                 <div className="navbar-logo" onClick={() => navigate("/")}>
-                    <span>🧳</span> Luggify
+                    <span>🧳</span><span className="navbar-logo-text">Luggify</span>
                 </div>
-                <div className="navbar-center">
+                <div className="navbar-center navbar-search-desktop">
                     <NavbarUserSearch
                         lang="ru"
                         navigate={navigate}
@@ -160,6 +179,14 @@ const PublicProfilePage = () => {
                     />
                 </div>
                 <div className="navbar-user">
+                    <div className="navbar-search-mobile">
+                        <NavbarUserSearch
+                            lang="ru"
+                            navigate={navigate}
+                            currentUsername={currentUser?.username || ""}
+                            compact
+                        />
+                    </div>
                     {currentUser ? (
                         <>
                             <div className="navbar-profile" onClick={() => navigate("/profile")}>
@@ -219,12 +246,26 @@ const PublicProfilePage = () => {
 
                     <div className="profile-info-block">
                         <div className="profile-name-row">
-                            <h2>{profile.username}</h2>
+                            <div className="profile-title-strip">
+                                <div className="profile-name-heading">
+                                    <h2>{profile.username}</h2>
+                                    <span
+                                        className={`profile-name-status-icon ${profile.is_stats_public ? "public" : "private"}`}
+                                        title={profile.is_stats_public ? "Открытый профиль" : "Закрытый профиль"}
+                                        aria-label={profile.is_stats_public ? "Открытый профиль" : "Закрытый профиль"}
+                                    >
+                                        {profile.is_stats_public ? (
+                                            <UnlockIcon style={{ width: "14px", height: "14px", marginRight: 0 }} />
+                                        ) : (
+                                            <LockIcon style={{ width: "14px", height: "14px", marginRight: 0 }} />
+                                        )}
+                                    </span>
+                                </div>
+                            </div>
                         </div>
 
                         <div className="profile-meta-line">
                             <span>{profile.is_stats_public ? "Открытый профиль" : "Закрытый профиль"}</span>
-                            {profile.created_at && <span>С {formatDate(profile.created_at)}</span>}
                         </div>
 
                         {canSeeContent ? (
@@ -282,7 +323,7 @@ const PublicProfilePage = () => {
                 {travelStatsCards.length > 0 && (
                     <div className="profile-hero-metrics">
                         {travelStatsCards.map((item) => (
-                            <div key={item.key} className="profile-hero-metric">
+                            <div key={item.key} className="profile-hero-metric" data-metric-key={item.key}>
                                 <span className="profile-hero-metric-value">{item.value}</span>
                                 <span className="profile-hero-metric-label">{item.label}</span>
                             </div>
@@ -307,15 +348,19 @@ const PublicProfilePage = () => {
                                     className="checklist-preview-card"
                                     onClick={() => navigate(`/checklist/${cl.slug}`)}
                                 >
-                                    <div className="preview-city">📍 {cl.city}</div>
+                                    <div className="preview-city">
+                                        <span className="preview-city-text">{cl.city}</span>
+                                    </div>
                                     <div className="preview-dates">
                                         {formatDate(cl.start_date)} — {formatDate(cl.end_date)}
                                     </div>
-                                    <div className="preview-temp">
-                                        {cl.avg_temp > 0 ? "+" : ""}{Math.round(cl.avg_temp)}°C
-                                    </div>
                                     <div className="preview-items">
                                         {cl.items.length} вещей
+                                    </div>
+                                    <div className="preview-temp-row">
+                                        <div className="preview-temp">
+                                            {cl.avg_temp > 0 ? "+" : ""}{Math.round(cl.avg_temp)}°C
+                                        </div>
                                     </div>
                                 </div>
                             ))}

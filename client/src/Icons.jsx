@@ -141,6 +141,9 @@ export const MapPinIcon = (props) => (
 export const BarChartIcon = (props) => (
   <svg {...iconProps} {...props}><line x1="12" x2="12" y1="20" y2="10" /><line x1="18" x2="18" y1="20" y2="4" /><line x1="6" x2="6" y1="20" y2="16" /></svg>
 );
+export const EditIcon = (props) => (
+  <svg {...iconProps} {...props}><path d="M12 20h9" /><path d="m16.5 3.5 4 4L8 20l-5 1 1-5Z" /></svg>
+);
 export const ClockIcon = (props) => (
   <svg {...iconProps} {...props}><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
 );

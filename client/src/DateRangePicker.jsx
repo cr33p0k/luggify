@@ -39,7 +39,7 @@ const DateRangePicker = ({ value, onChange, lang = "ru", minDate: externalMinDat
   const minDate = externalMinDate || new Date();
 
   return (
-    <div className="input-group">
+    <div className="input-group date-range-group">
       <label>{t.label}</label>
       <div className="date-row">
         <div className="date-field">

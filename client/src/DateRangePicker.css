@@ -1,3 +1,10 @@
+.date-range-group > label {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  margin-bottom: 0.5rem;
+}
+
 .date-row {
   display: flex;
   gap: 0.5rem;

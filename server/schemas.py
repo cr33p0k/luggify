@@ -49,6 +49,7 @@ class UserOut(BaseModel):
     avatar: Optional[str] = None
     bio: Optional[str] = None
     social_links: Optional[Dict[str, str]] = None
+    packing_profile: Optional[Dict[str, Any]] = None
     followers_count: Optional[int] = 0
     following_count: Optional[int] = 0
     is_following: Optional[bool] = False
@@ -70,6 +71,7 @@ class UserUpdate(BaseModel):
     social_links: Optional[Dict[str, str]] = None
     avatar: Optional[str] = None
     is_stats_public: Optional[bool] = None
+    packing_profile: Optional[Dict[str, Any]] = None
 
 class UserInfo(BaseModel):
     avatar: Optional[str] = None
@@ -162,6 +164,7 @@ class ChecklistCreate(BaseModel):
     removed_items: Optional[List[str]] = None
     added_items: Optional[List[str]] = None
     item_quantities: Optional[Dict[str, int]] = None
+    packed_quantities: Optional[Dict[str, int]] = None
     daily_forecast: Optional[List[DailyForecast]] = None
     origin_city: Optional[str] = None
     tg_user_id: Optional[str] = None
@@ -180,11 +183,13 @@ class UserBackpackBase(BaseModel):
     kind: Optional[str] = "backpack"
     sort_order: Optional[int] = 0
     is_default: Optional[bool] = False
+    editor_user_ids: Optional[List[int]] = []
     items: Optional[List[str]] = []
     checked_items: Optional[List[str]] = []
     added_items: Optional[List[str]] = []
     removed_items: Optional[List[str]] = []
     item_quantities: Optional[Dict[str, int]] = {}
+    packed_quantities: Optional[Dict[str, int]] = {}
 
 class UserBaggageCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=60)
@@ -196,6 +201,7 @@ class UserBaggageUpdate(BaseModel):
     kind: Optional[str] = None
     sort_order: Optional[int] = None
     is_default: Optional[bool] = None
+    editor_user_ids: Optional[List[int]] = None
 
 class UserBackpackUpdate(UserBackpackBase):
     pass

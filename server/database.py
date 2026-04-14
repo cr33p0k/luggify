@@ -1,6 +1,9 @@
 import os
-from dotenv import load_dotenv
-load_dotenv()
+
+from env_utils import load_app_env
+
+
+load_app_env()
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy import create_engine

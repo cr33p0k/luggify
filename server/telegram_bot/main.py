@@ -7,14 +7,16 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, MenuButtonWebApp, Message, WebAppInfo
 
 from telegram_bot.config import get_bot_settings
 from telegram_bot.keyboards import (
+    MINI_APP_BUTTON_TEXT,
     build_ai_menu,
     build_checklist_keyboard,
     build_confirmation_keyboard,
     build_main_menu,
+    build_open_app_keyboard,
     build_trip_picker,
 )
 from telegram_bot.services import (
@@ -144,6 +146,22 @@ async def _safe_edit_checklist_message(callback: CallbackQuery, text: str, reply
             raise
 
 
+async def _configure_mini_app_button(bot: Bot, settings):
+    if not settings.mini_app_url:
+        return
+
+    try:
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text=MINI_APP_BUTTON_TEXT,
+                web_app=WebAppInfo(url=settings.mini_app_url),
+            )
+        )
+        logging.info("Telegram mini app menu button configured: %s", settings.mini_app_url)
+    except Exception:
+        logging.exception("Failed to configure Telegram mini app menu button")
+
+
 def _extract_command_argument(message: Message) -> str:
     command_text = (message.text or "").strip()
     return command_text.split(maxsplit=1)[1].strip() if " " in command_text else ""
@@ -196,9 +214,14 @@ async def handle_start(message: Message, state: FSMContext):
     welcome = (
         f"Привет, {message.from_user.first_name or 'путешественник'}!\n\n"
         "Я Telegram-помощник Luggify. Могу показать ближайшую поездку, напомнить, "
-        "что ещё не собрано, отвечать через AI и даже менять чеклист по вашей фразе."
+        "что ещё не собрано, отвечать через AI и даже менять чеклист по вашей фразе.\n\n"
+        "Ниже есть кнопка, которая открывает mini app Luggify прямо в Telegram."
     )
-    await message.answer(welcome, reply_markup=build_main_menu(settings))
+    open_app_keyboard = build_open_app_keyboard(settings)
+    await message.answer(
+        welcome,
+        reply_markup=open_app_keyboard or build_main_menu(settings),
+    )
 
 
 @router.message(Command("link"))
@@ -461,11 +484,11 @@ async def handle_checklist_noop(callback: CallbackQuery):
 async def handle_checklist_view(callback: CallbackQuery, state: FSMContext):
     await _reset_dialog_state(state)
     parts = (callback.data or "").split(":")
-    if len(parts) != 5:
+    if len(parts) != 6:
         await callback.answer("Не удалось открыть чеклист", show_alert=True)
         return
 
-    _, _, checklist_id_raw, section_key, page_raw = parts
+    _, _, checklist_id_raw, section_key, page_raw, interaction_mode = parts
     try:
         checklist_id = int(checklist_id_raw)
         page = int(page_raw)
@@ -478,6 +501,7 @@ async def handle_checklist_view(callback: CallbackQuery, state: FSMContext):
         checklist_id=checklist_id,
         section_key=section_key,
         page=page,
+        interaction_mode=interaction_mode,
     )
     if not view["ok"]:
         await callback.answer(view["message"], show_alert=True)
@@ -490,11 +514,11 @@ async def handle_checklist_view(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("cl:toggle:"))
 async def handle_checklist_toggle(callback: CallbackQuery):
     parts = (callback.data or "").split(":")
-    if len(parts) != 6:
+    if len(parts) != 7:
         await callback.answer("Не удалось переключить вещь", show_alert=True)
         return
 
-    _, _, checklist_id_raw, section_key, page_raw, item_index_raw = parts
+    _, _, checklist_id_raw, section_key, page_raw, interaction_mode, item_index_raw = parts
     try:
         checklist_id = int(checklist_id_raw)
         page = int(page_raw)
@@ -509,6 +533,7 @@ async def handle_checklist_toggle(callback: CallbackQuery):
         section_key=section_key,
         page=page,
         item_index=item_index,
+        interaction_mode=interaction_mode,
     )
     if not result["ok"]:
         await callback.answer(result["message"], show_alert=True)
@@ -520,6 +545,37 @@ async def handle_checklist_toggle(callback: CallbackQuery):
         result["view"]["text"],
         build_checklist_keyboard(result["view"]),
     )
+
+
+@router.callback_query(F.data.startswith("cl:mode:"))
+async def handle_checklist_mode(callback: CallbackQuery, state: FSMContext):
+    await _reset_dialog_state(state)
+    parts = (callback.data or "").split(":")
+    if len(parts) != 6:
+        await callback.answer("Не удалось сменить режим", show_alert=True)
+        return
+
+    _, _, checklist_id_raw, section_key, page_raw, interaction_mode = parts
+    try:
+        checklist_id = int(checklist_id_raw)
+        page = int(page_raw)
+    except ValueError:
+        await callback.answer("Некорректные данные кнопки", show_alert=True)
+        return
+
+    view = await build_interactive_checklist_view(
+        callback.from_user,
+        checklist_id=checklist_id,
+        section_key=section_key,
+        page=page,
+        interaction_mode=interaction_mode,
+    )
+    if not view["ok"]:
+        await callback.answer(view["message"], show_alert=True)
+        return
+
+    await callback.answer(f"Режим: {view['interaction_mode_label']}")
+    await _safe_edit_checklist_message(callback, view["text"], build_checklist_keyboard(view))
 
 
 @router.message()
@@ -541,6 +597,7 @@ async def main():
 
     logging.basicConfig(level=logging.INFO)
     bot = Bot(token=settings.token)
+    await _configure_mini_app_button(bot, settings)
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.include_router(router)
     await dispatcher.start_polling(bot)

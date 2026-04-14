@@ -378,11 +378,37 @@ def _normalize_quantity_map(raw_map: Optional[dict[str, Any]]) -> dict[str, int]
     return normalized
 
 
+def _normalize_packed_quantity_map(raw_map: Optional[dict[str, Any]]) -> dict[str, int]:
+    normalized: dict[str, int] = {}
+    for key, value in (raw_map or {}).items():
+        normalized_key = _normalize_item(str(key))
+        if not normalized_key:
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed <= 0:
+            continue
+        normalized[normalized_key] = parsed
+    return normalized
+
+
 def _get_item_quantity(quantity_map: Optional[dict[str, Any]], item: str) -> int:
     normalized_item = _normalize_item(item)
     if not normalized_item:
         return 1
     return _normalize_quantity_value((quantity_map or {}).get(normalized_item, 1))
+
+
+def _get_item_packed_quantity(quantity_map: Optional[dict[str, Any]], item: str) -> int:
+    normalized_item = _normalize_item(item)
+    if not normalized_item:
+        return 0
+    try:
+        return max(int((quantity_map or {}).get(normalized_item, 0) or 0), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _set_item_quantity(quantity_map: dict[str, int], item: str, quantity: int) -> None:
@@ -395,8 +421,56 @@ def _set_item_quantity(quantity_map: dict[str, int], item: str, quantity: int) -
         quantity_map[normalized_item] = quantity
 
 
-def _format_item_with_quantity(item: str, quantity_map: Optional[dict[str, Any]]) -> str:
+def _set_item_packed_quantity(quantity_map: dict[str, int], item: str, quantity: int) -> None:
+    normalized_item = _normalize_item(item)
+    if not normalized_item:
+        return
+    if quantity <= 0:
+        quantity_map.pop(normalized_item, None)
+    else:
+        quantity_map[normalized_item] = max(int(quantity), 0)
+
+
+def _hydrate_packed_quantities(
+    items: list[str],
+    checked_items: Optional[list[str]],
+    needed_quantities: Optional[dict[str, Any]],
+    packed_quantities: Optional[dict[str, Any]],
+) -> dict[str, int]:
+    hydrated = _normalize_packed_quantity_map(packed_quantities)
+    for item in checked_items or []:
+        packed = _get_item_packed_quantity(hydrated, item)
+        needed = _get_item_quantity(needed_quantities, item)
+        _set_item_packed_quantity(hydrated, item, max(packed, needed))
+    for item in items or []:
+        packed = _get_item_packed_quantity(hydrated, item)
+        needed = _get_item_quantity(needed_quantities, item)
+        if packed > needed:
+            _set_item_packed_quantity(hydrated, item, needed)
+    return hydrated
+
+
+def _sync_checked_items(
+    items: list[str],
+    needed_quantities: Optional[dict[str, Any]],
+    packed_quantities: Optional[dict[str, Any]],
+) -> list[str]:
+    synced = []
+    for item in items or []:
+        if _get_item_packed_quantity(packed_quantities, item) >= _get_item_quantity(needed_quantities, item):
+            synced.append(item)
+    return _dedupe_preserve(synced)
+
+
+def _format_item_with_quantity(
+    item: str,
+    quantity_map: Optional[dict[str, Any]],
+    packed_quantities: Optional[dict[str, Any]] = None,
+) -> str:
     quantity = _get_item_quantity(quantity_map, item)
+    packed = _get_item_packed_quantity(packed_quantities, item)
+    if packed_quantities is not None:
+        return f"{item} {packed}/{quantity}"
     return f"{item} ×{quantity}" if quantity > 1 else item
 
 
@@ -664,6 +738,40 @@ def _get_baggage_aliases(backpack) -> set[str]:
     return aliases
 
 
+def _pick_actor_backpack(checklist, actor_user_id: Optional[int]):
+    if actor_user_id is None:
+        return None
+    owned = [
+        backpack
+        for backpack in (checklist.backpacks or [])
+        if getattr(backpack, "user_id", None) == actor_user_id
+    ]
+    if not owned:
+        return None
+    owned.sort(key=lambda backpack: (
+        not bool(getattr(backpack, "is_default", False)),
+        getattr(backpack, "sort_order", 0) or 0,
+        getattr(backpack, "id", 0) or 0,
+    ))
+    return owned[0]
+
+
+def _build_backpack_reference(backpack) -> dict[str, Any]:
+    return {
+        "kind": "backpack",
+        "backpack_id": backpack.id,
+        "user_id": backpack.user_id,
+        "label": _get_baggage_label(backpack),
+    }
+
+
+def _resolve_default_section_reference(checklist, actor_user_id: Optional[int] = None) -> dict[str, Any]:
+    actor_backpack = _pick_actor_backpack(checklist, actor_user_id)
+    if actor_backpack:
+        return _build_backpack_reference(actor_backpack)
+    return {"kind": "shared", "label": "общие вещи"}
+
+
 def _guess_baggage_kind(name: str) -> str:
     normalized_name = _normalize_for_matching(name)
     if not normalized_name:
@@ -873,7 +981,7 @@ def _resolve_section_reference(checklist, raw_section: Optional[str], actor_user
         return None
 
     if any(alias in normalized for alias in SHARED_SECTION_ALIASES):
-        return {"kind": "shared", "label": "общие вещи"}
+        return _resolve_default_section_reference(checklist, actor_user_id)
 
     self_requested = any(alias in normalized for alias in SELF_SECTION_ALIASES)
     best_match = None
@@ -910,12 +1018,7 @@ def _resolve_section_reference(checklist, raw_section: Optional[str], actor_user
             best_match = backpack
 
     if best_match and best_score > 0:
-        return {
-            "kind": "backpack",
-            "backpack_id": best_match.id,
-            "user_id": best_match.user_id,
-            "label": _get_baggage_label(best_match),
-        }
+        return _build_backpack_reference(best_match)
 
     return None
 
@@ -949,6 +1052,13 @@ def _pick_user_backpack_snapshot(backpacks: list[dict[str, Any]], user_id: Optio
         return None
     owned.sort(key=lambda bp: (not bp.get("is_default", False), bp.get("sort_order", 0), bp.get("id", 0)))
     return owned[0]
+
+
+def _build_default_action_section(snapshot: dict[str, Any], actor_user_id: Optional[int] = None) -> dict[str, Any]:
+    actor_backpack = _pick_user_backpack_snapshot(snapshot["backpacks"], actor_user_id)
+    if actor_backpack:
+        return _build_backpack_section(snapshot, actor_backpack)
+    return _build_shared_section(snapshot)
 
 
 def _iter_candidate_source_sections(
@@ -1060,12 +1170,18 @@ def _find_source_section_for_request(
     return None
 
 
-def _take_transfer_state(section: dict[str, Any], actual_item: str) -> dict[str, bool]:
+def _take_transfer_state(section: dict[str, Any], actual_item: str) -> dict[str, Any]:
     normalized = _normalize_item(actual_item)
+    quantity = _get_item_quantity(section.get("item_quantities"), actual_item)
+    packed_quantity = min(
+        _get_item_packed_quantity(section.get("packed_quantities"), actual_item),
+        quantity,
+    )
     return {
-        "checked": any(_normalize_item(existing) == normalized for existing in section.get("checked_items", [])),
+        "checked": packed_quantity >= quantity,
         "added": any(_normalize_item(existing) == normalized for existing in section.get("added_items", [])),
-        "quantity": _get_item_quantity(section.get("item_quantities"), actual_item),
+        "quantity": quantity,
+        "packed_quantity": packed_quantity,
     }
 
 
@@ -1074,6 +1190,7 @@ def _remove_item_from_section(section: dict[str, Any], actual_item: str) -> None
     for key in ("items", "checked_items", "added_items", "removed_items"):
         section[key] = [existing for existing in section.get(key, []) if _normalize_item(existing) != normalized]
     _set_item_quantity(section.setdefault("item_quantities", {}), actual_item, 0)
+    _set_item_packed_quantity(section.setdefault("packed_quantities", {}), actual_item, 0)
 
 
 def _append_unique(target: list[str], item: str) -> list[str]:
@@ -1157,11 +1274,11 @@ def _resolve_action_section_snapshot(
 ) -> dict[str, Any]:
     section_ref = _resolve_section_reference(checklist, section_hint, actor_user_id) if section_hint else None
     if not section_ref or section_ref.get("kind") == "shared":
-        return _build_shared_section(snapshot)
+        return _build_default_action_section(snapshot, actor_user_id)
 
     backpack_snapshot = _get_backpack_snapshot(snapshot, section_ref["backpack_id"])
     if not backpack_snapshot:
-        return _build_shared_section(snapshot)
+        return _build_default_action_section(snapshot, actor_user_id)
     return _build_backpack_section(snapshot, backpack_snapshot)
 
 
@@ -1289,6 +1406,11 @@ def _extract_actions_fallback(command: str, checklist=None, actor_user_id: Optio
     if not lowered:
         return {"recognized_action_request": False, "actions": []}
 
+    explicit_uncheck_request = any(
+        re.match(rf"^(?:{alias})\b", cleaned_command, re.IGNORECASE)
+        for alias in ACTION_PATTERNS["uncheck"]
+    )
+
     aliases_by_phrase: list[tuple[str, str]] = []
     for action, aliases in ACTION_PATTERNS.items():
         for alias in aliases:
@@ -1299,6 +1421,9 @@ def _extract_actions_fallback(command: str, checklist=None, actor_user_id: Optio
     actions = []
 
     for alias, action in aliases_by_phrase:
+        if action == "check" and explicit_uncheck_request:
+            continue
+
         matched_scoped_variant = False
         alias_head_match = re.match(rf"^(?:{alias})\s+(.+)$", cleaned_command, re.IGNORECASE)
         if alias_head_match and checklist is not None:
@@ -1431,7 +1556,7 @@ async def _extract_actions_with_ai(command: str, checklist_items: list[str], lan
 
     try:
         async with httpx.AsyncClient(timeout=12.0) as client:
-            url = os.getenv("GEMINI_BASE_URL", DEFAULT_GEMINI_URL)
+            url = os.getenv("GEMINI_BASE_URL", "").strip() or DEFAULT_GEMINI_URL
             response = await client.post(f"{url}?key={api_key}", json=payload)
             if response.status_code != 200:
                 return None
@@ -1478,6 +1603,22 @@ async def _extract_actions_with_ai(command: str, checklist_items: list[str], lan
         return None
 
 
+def _build_ai_candidate_items(checklist, actor_user_id: Optional[int] = None) -> list[str]:
+    candidates: list[str] = []
+    actor_backpack = _pick_actor_backpack(checklist, actor_user_id)
+    if actor_backpack:
+        candidates.extend(actor_backpack.items or [])
+
+    candidates.extend(checklist.items or [])
+
+    for backpack in checklist.backpacks or []:
+        if actor_backpack and backpack.id == actor_backpack.id:
+            continue
+        candidates.extend(backpack.items or [])
+
+    return _dedupe_preserve(candidates)
+
+
 async def parse_checklist_actions(
     command: str,
     checklist,
@@ -1496,7 +1637,7 @@ async def parse_checklist_actions(
     if move_result["recognized_action_request"]:
         return _with_item_specs(move_result)
 
-    checklist_items = list(checklist.items or [])
+    checklist_items = _build_ai_candidate_items(checklist, actor_user_id)
     fallback_result = _extract_actions_fallback(command, checklist, actor_user_id)
     if fallback_result.get("actions"):
         return _with_item_specs(fallback_result)
@@ -1514,8 +1655,9 @@ def _build_success_message(
 ) -> str:
     def format_item_list(item_payload: dict[str, Any]) -> str:
         quantity_map = item_payload.get("item_quantities") or {}
+        packed_map = item_payload.get("packed_quantities")
         return ", ".join(
-            _format_item_with_quantity(name, quantity_map)
+            _format_item_with_quantity(name, quantity_map, packed_map)
             for name in item_payload.get("items", [])
         )
 
@@ -1598,6 +1740,13 @@ def _build_success_message(
                     item.get("section_user_id"),
                     language,
                 )
+                if len(item["items"]) == 1 and item.get("total_quantity") is not None:
+                    fragments.append(
+                        f"Marked in {section_label}: {item['items'][0]} {item.get('total_packed', 0)}/{item['total_quantity']}"
+                        if section_label
+                        else f"Marked: {item['items'][0]} {item.get('total_packed', 0)}/{item['total_quantity']}"
+                    )
+                    continue
                 fragments.append(
                     f"Marked in {section_label}: {item_list}" if section_label else f"Marked: {item_list}"
                 )
@@ -1609,6 +1758,13 @@ def _build_success_message(
                     item.get("section_user_id"),
                     language,
                 )
+                if len(item["items"]) == 1 and item.get("total_quantity") is not None:
+                    fragments.append(
+                        f"Updated in {section_label}: {item['items'][0]} {item.get('total_packed', 0)}/{item['total_quantity']}"
+                        if section_label
+                        else f"Updated: {item['items'][0]} {item.get('total_packed', 0)}/{item['total_quantity']}"
+                    )
+                    continue
                 fragments.append(
                     f"Unchecked in {section_label}: {item_list}" if section_label else f"Unchecked: {item_list}"
                 )
@@ -1702,6 +1858,13 @@ def _build_success_message(
                 item.get("section_user_id"),
                 language,
             )
+            if len(item["items"]) == 1 and item.get("total_quantity") is not None:
+                fragments.append(
+                    f"Отметил в {section_label}: {item['items'][0]} {item.get('total_packed', 0)}/{item['total_quantity']}"
+                    if section_label
+                    else f"Отметил: {item['items'][0]} {item.get('total_packed', 0)}/{item['total_quantity']}"
+                )
+                continue
             fragments.append(
                 f"Отметил в {section_label}: {item_list}" if section_label else f"Отметил: {item_list}"
             )
@@ -1713,13 +1876,26 @@ def _build_success_message(
                 item.get("section_user_id"),
                 language,
             )
+            if len(item["items"]) == 1 and item.get("total_quantity") is not None:
+                fragments.append(
+                    f"Обновил в {section_label}: {item['items'][0]} {item.get('total_packed', 0)}/{item['total_quantity']}"
+                    if section_label
+                    else f"Обновил: {item['items'][0]} {item.get('total_packed', 0)}/{item['total_quantity']}"
+                )
+                continue
             fragments.append(
                 f"Снял отметку в {section_label}: {item_list}" if section_label else f"Снял отметку: {item_list}"
             )
         elif item["type"] == "already_checked" and item["items"]:
-            fragments.append(f"{item_list} уже отмечено")
+            if len(item["items"]) == 1 and item.get("total_quantity") is not None:
+                fragments.append(f"{item['items'][0]} уже собрано: {item.get('total_packed', 0)}/{item['total_quantity']}")
+            else:
+                fragments.append(f"{item_list} уже отмечено")
         elif item["type"] == "already_unchecked" and item["items"]:
-            fragments.append(f"На {item_list} и так нет отметки")
+            if len(item["items"]) == 1 and item.get("total_quantity") is not None:
+                fragments.append(f"Для {item['items'][0]} уже 0/{item['total_quantity']}")
+            else:
+                fragments.append(f"На {item_list} и так нет отметки")
         elif item["type"] == "already_removed" and item["items"]:
             fragments.append(f"{item_list} уже убрано")
         elif item["type"] == "create_baggage" and item["items"]:
@@ -1760,18 +1936,35 @@ def _build_info_message(
     actor_user_id: Optional[int] = None,
 ) -> str:
     section = info_request.get("section")
+    if not section or section.get("kind") == "shared":
+        default_backpack = _pick_actor_backpack(checklist, actor_user_id)
+        if default_backpack:
+            section = _build_backpack_reference(default_backpack)
+
     if section and section.get("kind") == "backpack":
         backpack = next((bp for bp in (checklist.backpacks or []) if bp.id == section.get("backpack_id")), None)
         section_items = list(backpack.items or []) if backpack else []
         checked_items = list(backpack.checked_items or []) if backpack else []
         removed_items = list(backpack.removed_items or []) if backpack else []
         quantity_map = _normalize_quantity_map(backpack.item_quantities if backpack else {})
+        packed_map = _hydrate_packed_quantities(
+            section_items,
+            checked_items,
+            quantity_map,
+            getattr(backpack, "packed_quantities", None) if backpack else None,
+        )
         section_label = section.get("label") or "рюкзак"
     else:
         section_items = list(checklist.items or [])
         checked_items = list(checklist.checked_items or [])
         removed_items = list(checklist.removed_items or [])
         quantity_map = _normalize_quantity_map(getattr(checklist, "item_quantities", None))
+        packed_map = _hydrate_packed_quantities(
+            section_items,
+            checked_items,
+            quantity_map,
+            getattr(checklist, "packed_quantities", None),
+        )
         section_label = "общие вещи"
 
     visible_items = [item for item in section_items if _normalize_item(item) not in {_normalize_item(x) for x in removed_items}]
@@ -1784,25 +1977,25 @@ def _build_info_message(
     if request_type == "checked":
         return _format_list_message(
             f"Уже отмечено в разделе «{section_label}»:",
-            [_format_item_with_quantity(item, quantity_map) for item in checked_items],
+            [_format_item_with_quantity(item, quantity_map, packed_map) for item in checked_items],
             f"Пока ничего не отмечено в разделе «{section_label}».",
         )
     if request_type == "remaining":
         return _format_list_message(
             f"Ещё осталось собрать в разделе «{section_label}»:",
-            [_format_item_with_quantity(item, quantity_map) for item in remaining_items],
+            [_format_item_with_quantity(item, quantity_map, packed_map) for item in remaining_items],
             f"В разделе «{section_label}» всё уже собрано.",
         )
     if request_type == "removed":
         return _format_list_message(
             f"Скрыто или убрано в разделе «{section_label}»:",
-            [_format_item_with_quantity(item, quantity_map) for item in removed_items],
+            [_format_item_with_quantity(item, quantity_map, packed_map) for item in removed_items],
             f"В разделе «{section_label}» ничего не скрыто.",
         )
     if request_type == "items":
         return _format_list_message(
             f"Сейчас в разделе «{section_label}»:",
-            [_format_item_with_quantity(item, quantity_map) for item in visible_items],
+            [_format_item_with_quantity(item, quantity_map, packed_map) for item in visible_items],
             f"Раздел «{section_label}» пока пустой.",
         )
 
@@ -1822,10 +2015,25 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
         return {
             "action_results": [],
             "items": list(checklist.items or []),
-            "checked_items": list(checklist.checked_items or []),
+            "checked_items": _sync_checked_items(
+                list(checklist.items or []),
+                getattr(checklist, "item_quantities", None),
+                _hydrate_packed_quantities(
+                    list(checklist.items or []),
+                    list(checklist.checked_items or []),
+                    getattr(checklist, "item_quantities", None),
+                    getattr(checklist, "packed_quantities", None),
+                ),
+            ),
             "added_items": list(checklist.added_items or []),
             "removed_items": list(checklist.removed_items or []),
             "item_quantities": _normalize_quantity_map(getattr(checklist, "item_quantities", None)),
+            "packed_quantities": _hydrate_packed_quantities(
+                list(checklist.items or []),
+                list(checklist.checked_items or []),
+                getattr(checklist, "item_quantities", None),
+                getattr(checklist, "packed_quantities", None),
+            ),
             "backpacks": [
                 {
                     "id": backpack.id,
@@ -1840,6 +2048,12 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                     "added_items": list(backpack.added_items or []),
                     "removed_items": list(backpack.removed_items or []),
                     "item_quantities": _normalize_quantity_map(getattr(backpack, "item_quantities", None)),
+                    "packed_quantities": _hydrate_packed_quantities(
+                        list(backpack.items or []),
+                        list(backpack.checked_items or []),
+                        getattr(backpack, "item_quantities", None),
+                        getattr(backpack, "packed_quantities", None),
+                    ),
                 }
                 for backpack in (checklist.backpacks or [])
             ],
@@ -1852,6 +2066,12 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
             "added_items": list(checklist.added_items or []),
             "removed_items": list(checklist.removed_items or []),
             "item_quantities": _normalize_quantity_map(getattr(checklist, "item_quantities", None)),
+            "packed_quantities": _hydrate_packed_quantities(
+                list(checklist.items or []),
+                list(checklist.checked_items or []),
+                getattr(checklist, "item_quantities", None),
+                getattr(checklist, "packed_quantities", None),
+            ),
             "label": "общие вещи",
         },
         "backpacks": [
@@ -1868,6 +2088,12 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                 "added_items": list(backpack.added_items or []),
                 "removed_items": list(backpack.removed_items or []),
                 "item_quantities": _normalize_quantity_map(getattr(backpack, "item_quantities", None)),
+                "packed_quantities": _hydrate_packed_quantities(
+                    list(backpack.items or []),
+                    list(backpack.checked_items or []),
+                    getattr(backpack, "item_quantities", None),
+                    getattr(backpack, "packed_quantities", None),
+                ),
             }
             for backpack in (checklist.backpacks or [])
         ],
@@ -1878,6 +2104,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
     added_items = snapshot["shared"]["added_items"]
     removed_items = snapshot["shared"]["removed_items"]
     item_quantities = snapshot["shared"]["item_quantities"]
+    packed_quantities = snapshot["shared"]["packed_quantities"]
     action_results: list[dict[str, Any]] = []
 
     for action in actions:
@@ -1958,8 +2185,12 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                             actual_item,
                             target_existing_quantity + transfer_state["quantity"],
                         )
-                        if transfer_state["checked"]:
-                            _append_unique(snapshot["shared"]["checked_items"], actual_item)
+                        target_existing_packed = _get_item_packed_quantity(snapshot["shared"]["packed_quantities"], actual_item)
+                        _set_item_packed_quantity(
+                            snapshot["shared"]["packed_quantities"],
+                            actual_item,
+                            target_existing_packed + transfer_state["packed_quantity"],
+                        )
                         snapshot["shared"]["removed_items"] = [
                             existing for existing in snapshot["shared"]["removed_items"]
                             if _normalize_item(existing) != normalized_item
@@ -1972,8 +2203,12 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                             actual_item,
                             target_existing_quantity + transfer_state["quantity"],
                         )
-                        if transfer_state["checked"]:
-                            _append_unique(target_snapshot["checked_items"], actual_item)
+                        target_existing_packed = _get_item_packed_quantity(target_snapshot["packed_quantities"], actual_item)
+                        _set_item_packed_quantity(
+                            target_snapshot["packed_quantities"],
+                            actual_item,
+                            target_existing_packed + transfer_state["packed_quantity"],
+                        )
                         if transfer_state["added"]:
                             _append_unique(target_snapshot["added_items"], actual_item)
                         target_snapshot["removed_items"] = [
@@ -1986,6 +2221,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                     moved_items.append({
                         "name": actual_item,
                         "quantity": transfer_state["quantity"],
+                        "packed_quantity": transfer_state["packed_quantity"],
                     })
 
             if moved_items:
@@ -1994,6 +2230,10 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                     "items": _dedupe_preserve([entry["name"] for entry in moved_items]),
                     "item_quantities": {
                         _normalize_item(entry["name"]): entry["quantity"]
+                        for entry in moved_items
+                    },
+                    "packed_quantities": {
+                        _normalize_item(entry["name"]): entry["packed_quantity"]
                         for entry in moved_items
                     },
                     "target_label": target_section["label"],
@@ -2016,12 +2256,14 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
             section_added_items = added_items
             section_removed_items = removed_items
             section_item_quantities = item_quantities
+            section_packed_quantities = packed_quantities
         else:
             section_items = section_snapshot["items"]
             section_checked_items = section_snapshot["checked_items"]
             section_added_items = section_snapshot["added_items"]
             section_removed_items = section_snapshot["removed_items"]
             section_item_quantities = section_snapshot["item_quantities"]
+            section_packed_quantities = section_snapshot["packed_quantities"]
 
         if action_type == "add":
             add_candidate_pool = _build_add_candidate_pool(snapshot, action_section)
@@ -2043,6 +2285,8 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                     if spec["explicit_quantity"]:
                         next_quantity = current_quantity + spec["quantity"]
                         _set_item_quantity(section_item_quantities, existing_item, next_quantity)
+                        current_packed = _get_item_packed_quantity(section_packed_quantities, existing_item)
+                        _set_item_packed_quantity(section_packed_quantities, existing_item, min(current_packed, next_quantity))
                         action_results.append({
                             "type": "increase_quantity",
                             "items": [existing_item],
@@ -2053,6 +2297,11 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                         })
                     else:
                         _set_item_quantity(section_item_quantities, existing_item, current_quantity)
+                        _set_item_packed_quantity(
+                            section_packed_quantities,
+                            existing_item,
+                            min(_get_item_packed_quantity(section_packed_quantities, existing_item), current_quantity),
+                        )
                         action_results.append({
                             "type": "restore",
                             "items": [existing_item],
@@ -2065,6 +2314,8 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                     if spec["explicit_quantity"]:
                         next_quantity = current_quantity + spec["quantity"]
                         _set_item_quantity(section_item_quantities, existing_item, next_quantity)
+                        current_packed = _get_item_packed_quantity(section_packed_quantities, existing_item)
+                        _set_item_packed_quantity(section_packed_quantities, existing_item, min(current_packed, next_quantity))
                         action_results.append({
                             "type": "increase_quantity",
                             "items": [existing_item],
@@ -2085,6 +2336,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                 section_items.append(cleaned_item)
                 initial_quantity = spec["quantity"] if spec["explicit_quantity"] else 1
                 _set_item_quantity(section_item_quantities, cleaned_item, initial_quantity)
+                _set_item_packed_quantity(section_packed_quantities, cleaned_item, 0)
                 if all(_normalize_item(existing) != normalized_item for existing in section_added_items):
                     section_added_items.append(cleaned_item)
                 section_removed_items = [
@@ -2125,6 +2377,11 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                         next_quantity = max(current_quantity - spec["quantity"], 0)
                         if next_quantity > 0:
                             _set_item_quantity(section_item_quantities, item, next_quantity)
+                            _set_item_packed_quantity(
+                                section_packed_quantities,
+                                item,
+                                min(_get_item_packed_quantity(section_packed_quantities, item), next_quantity),
+                            )
                             action_results.append({
                                 "type": "decrease_quantity",
                                 "items": [item],
@@ -2142,6 +2399,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                         ]
                         section_removed_items.append(item)
                         _set_item_quantity(section_item_quantities, item, 0)
+                        _set_item_packed_quantity(section_packed_quantities, item, 0)
                         action_results.append({
                             "type": "remove",
                             "items": [item],
@@ -2169,8 +2427,15 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                     continue
                 for item in matched_items:
                     normalized_item = _normalize_item(item)
-                    if all(_normalize_item(existing) != normalized_item for existing in section_checked_items):
-                        section_checked_items.append(item)
+                    needed_quantity = _get_item_quantity(section_item_quantities, item)
+                    current_packed = _get_item_packed_quantity(section_packed_quantities, item)
+                    if current_packed < needed_quantity:
+                        next_packed = (
+                            min(current_packed + spec["quantity"], needed_quantity)
+                            if spec["explicit_quantity"]
+                            else needed_quantity
+                        )
+                        _set_item_packed_quantity(section_packed_quantities, item, next_packed)
                         section_removed_items = [
                             existing for existing in section_removed_items
                             if _normalize_item(existing) != normalized_item
@@ -2178,6 +2443,8 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                         action_results.append({
                             "type": "check",
                             "items": [item],
+                            "total_packed": next_packed,
+                            "total_quantity": needed_quantity,
                             **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
@@ -2185,6 +2452,8 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                         action_results.append({
                             "type": "already_checked",
                             "items": [item],
+                            "total_packed": current_packed,
+                            "total_quantity": needed_quantity,
                             **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
@@ -2202,11 +2471,15 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                     continue
                 for item in matched_items:
                     normalized_item = _normalize_item(item)
-                    if any(_normalize_item(existing) == normalized_item for existing in section_checked_items):
-                        section_checked_items = [
-                            existing for existing in section_checked_items
-                            if _normalize_item(existing) != normalized_item
-                        ]
+                    current_packed = _get_item_packed_quantity(section_packed_quantities, item)
+                    needed_quantity = _get_item_quantity(section_item_quantities, item)
+                    if current_packed > 0:
+                        next_packed = (
+                            max(current_packed - spec["quantity"], 0)
+                            if spec["explicit_quantity"]
+                            else 0
+                        )
+                        _set_item_packed_quantity(section_packed_quantities, item, next_packed)
                         section_removed_items = [
                             existing for existing in section_removed_items
                             if _normalize_item(existing) != normalized_item
@@ -2214,6 +2487,8 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                         action_results.append({
                             "type": "uncheck",
                             "items": [item],
+                            "total_packed": next_packed,
+                            "total_quantity": needed_quantity,
                             **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
@@ -2221,22 +2496,26 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                         action_results.append({
                             "type": "already_unchecked",
                             "items": [item],
+                            "total_packed": current_packed,
+                            "total_quantity": needed_quantity,
                             **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
 
         if is_shared_section:
             items = _dedupe_preserve(section_items)
-            checked_items = _dedupe_preserve(section_checked_items)
+            checked_items = _sync_checked_items(section_items, section_item_quantities, section_packed_quantities)
             added_items = _dedupe_preserve(section_added_items)
             removed_items = _dedupe_preserve(section_removed_items)
             item_quantities = _normalize_quantity_map(section_item_quantities)
+            packed_quantities = _normalize_packed_quantity_map(section_packed_quantities)
         else:
             section_snapshot["items"] = _dedupe_preserve(section_items)
-            section_snapshot["checked_items"] = _dedupe_preserve(section_checked_items)
+            section_snapshot["checked_items"] = _sync_checked_items(section_items, section_item_quantities, section_packed_quantities)
             section_snapshot["added_items"] = _dedupe_preserve(section_added_items)
             section_snapshot["removed_items"] = _dedupe_preserve(section_removed_items)
             section_snapshot["item_quantities"] = _normalize_quantity_map(section_item_quantities)
+            section_snapshot["packed_quantities"] = _normalize_packed_quantity_map(section_packed_quantities)
 
     return {
         "action_results": action_results,
@@ -2245,6 +2524,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
         "added_items": _dedupe_preserve(added_items),
         "removed_items": _dedupe_preserve(removed_items),
         "item_quantities": _normalize_quantity_map(item_quantities),
+        "packed_quantities": _normalize_packed_quantity_map(packed_quantities),
         "backpacks": snapshot["backpacks"],
     }
 
@@ -2427,6 +2707,7 @@ async def apply_checklist_ai_actions(
     checklist.added_items = simulated["added_items"]
     checklist.removed_items = simulated["removed_items"]
     checklist.item_quantities = simulated["item_quantities"]
+    checklist.packed_quantities = simulated["packed_quantities"]
     backpack_map = {backpack.id: backpack for backpack in (checklist.backpacks or [])}
     for backpack_snapshot in simulated["backpacks"]:
         backpack = backpack_map.get(backpack_snapshot["id"])
@@ -2437,6 +2718,7 @@ async def apply_checklist_ai_actions(
         backpack.added_items = _dedupe_preserve(backpack_snapshot["added_items"])
         backpack.removed_items = _dedupe_preserve(backpack_snapshot["removed_items"])
         backpack.item_quantities = _normalize_quantity_map(backpack_snapshot.get("item_quantities"))
+        backpack.packed_quantities = _normalize_packed_quantity_map(backpack_snapshot.get("packed_quantities"))
 
     await db.commit()
     updated_checklist = await crud.get_checklist_by_id(db, checklist.id)

@@ -6,9 +6,9 @@ import AuthModal from "./AuthModal";
 import ProfilePage from "./ProfilePage";
 import NavbarUserSearch from "./NavbarUserSearch";
 import {
-  PlaneIcon, TrainIcon, CarIcon, BusIcon, MaleIcon, FemaleIcon, UnisexIcon,
-  VacationIcon, BusinessIcon, ActiveIcon, BeachIcon, WinterIcon, PetIcon,
-  AllergyIcon, MedsIcon, CalendarIcon, SparkleIcon, WeatherIcon, UVIcon, LockIcon, UnlockIcon,
+  PlaneIcon, TrainIcon, CarIcon, BusIcon,
+  VacationIcon, BusinessIcon, ActiveIcon, BeachIcon, WinterIcon,
+  CalendarIcon, SparkleIcon, WeatherIcon, UVIcon, LockIcon, UnlockIcon,
   ClockIcon, DropletIcon, WindIcon, TentIcon, BackpackIcon, HotelIcon, MuseumIcon, SmartphoneIcon, GlobeIcon
 } from './Icons';
 import "./App.css";
@@ -28,10 +28,40 @@ const safeParseJson = (value, fallback = null) => {
   }
 };
 
-const buildCheckedItemsMap = (items = [], checkedItems = []) => {
+const DEFAULT_PACKING_PROFILE = {
+  gender: "unspecified",
+  traveling_with_pet: false,
+  has_allergies: false,
+  always_include_items: [],
+};
+
+const normalizePackingProfileItems = (items = []) => {
+  const normalized = [];
+  (Array.isArray(items) ? items : []).forEach((rawValue) => {
+    const item = String(rawValue || "").trim();
+    if (!item || normalized.includes(item)) return;
+    normalized.push(item);
+  });
+  return normalized;
+};
+
+const normalizePackingProfile = (value = {}) => {
+  const rawGender = String(value?.gender || "").trim().toLowerCase();
+  const gender = ["male", "female"].includes(rawGender) ? rawGender : "unspecified";
+  return {
+    gender,
+    traveling_with_pet: Boolean(value?.traveling_with_pet),
+    has_allergies: Boolean(value?.has_allergies),
+    always_include_items: normalizePackingProfileItems(value?.always_include_items),
+  };
+};
+
+const buildCheckedItemsMap = (items = [], checkedItems = [], quantityMap = {}, packedMap = {}) => {
   const checkedSet = new Set(checkedItems || []);
   return items.reduce((acc, item) => {
-    acc[item] = checkedSet.has(item);
+    const needed = getItemQuantity(quantityMap, item);
+    const packed = getPackedQuantity(packedMap, item);
+    acc[item] = packed >= needed || checkedSet.has(item);
     return acc;
   }, {});
 };
@@ -49,10 +79,31 @@ const normalizeQuantityMap = (value = {}) =>
     return acc;
   }, {});
 
+const normalizePackedQuantityMap = (value = {}) =>
+  Object.entries(value || {}).reduce((acc, [key, rawValue]) => {
+    const normalizedKey = normalizeItemKey(key);
+    const numericValue = Number(rawValue);
+    if (!normalizedKey || !Number.isFinite(numericValue)) {
+      return acc;
+    }
+    const safeValue = Math.max(0, Math.round(numericValue));
+    if (safeValue === 0) {
+      return acc;
+    }
+    acc[normalizedKey] = safeValue;
+    return acc;
+  }, {});
+
 const getItemQuantity = (quantityMap = {}, item) => {
   const normalizedKey = normalizeItemKey(item);
   if (!normalizedKey) return 1;
   return normalizeQuantityMap(quantityMap)[normalizedKey] || 1;
+};
+
+const getPackedQuantity = (quantityMap = {}, item) => {
+  const normalizedKey = normalizeItemKey(item);
+  if (!normalizedKey) return 0;
+  return normalizePackedQuantityMap(quantityMap)[normalizedKey] || 0;
 };
 
 const setItemQuantityInMap = (quantityMap = {}, item, nextQuantity) => {
@@ -68,9 +119,44 @@ const setItemQuantityInMap = (quantityMap = {}, item, nextQuantity) => {
   return nextMap;
 };
 
-const getDefaultBaggage = (backpacks = [], userId) => {
-  const own = (backpacks || []).filter((bp) => bp.user_id === userId);
-  return own.find((bp) => bp.is_default) || own.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0))[0] || null;
+const setPackedQuantityInMap = (quantityMap = {}, item, nextQuantity) => {
+  const normalizedKey = normalizeItemKey(item);
+  if (!normalizedKey) return normalizePackedQuantityMap(quantityMap);
+  const nextMap = normalizePackedQuantityMap(quantityMap);
+  const parsedQuantity = Number(nextQuantity);
+  if (!Number.isFinite(parsedQuantity) || parsedQuantity <= 0) {
+    delete nextMap[normalizedKey];
+    return nextMap;
+  }
+  nextMap[normalizedKey] = Math.max(0, Math.round(parsedQuantity));
+  return nextMap;
+};
+
+const getBaggageEditorIds = (baggage) =>
+  Array.isArray(baggage?.editor_user_ids)
+    ? baggage.editor_user_ids.map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0)
+    : [];
+
+const getOwnerBaggageEditorIds = (backpacks = [], ownerUserId, fallbackBaggage = null) => {
+  const uniqueIds = [];
+  (backpacks || []).forEach((baggage) => {
+    if (baggage.user_id !== ownerUserId) return;
+    getBaggageEditorIds(baggage).forEach((editorId) => {
+      if (!uniqueIds.includes(editorId)) {
+        uniqueIds.push(editorId);
+      }
+    });
+  });
+  if (uniqueIds.length > 0) {
+    return uniqueIds;
+  }
+  return fallbackBaggage ? getBaggageEditorIds(fallbackBaggage) : [];
+};
+
+const canUserEditBaggage = (baggage, userId, allBackpacks = []) => {
+  if (!baggage || !userId) return false;
+  if (baggage.user_id === userId) return true;
+  return getOwnerBaggageEditorIds(allBackpacks, baggage.user_id, baggage).includes(userId);
 };
 
 const sortBaggageList = (items = []) =>
@@ -126,7 +212,7 @@ const buildBaggageParticipants = (checklist, currentUser) => {
     }
   });
 
-  if (checklist?.user_id === currentUser?.id) {
+  if (currentUser && checklist?.user_id === currentUser.id) {
     ensureGroup(currentUser.id, currentUser.username);
   }
 
@@ -203,13 +289,52 @@ const formatChecklistDateRange = (start, end) => {
   return `${startLabel} — ${endLabel}`;
 };
 
+const NOTIFICATION_CACHE_TTL_MS = 2000;
+const notificationRequestCache = new Map();
+
+const fetchNotificationsCached = async (authHeaders = {}) => {
+  const cacheKey = authHeaders.Authorization || "__guest__";
+  const now = Date.now();
+  const cached = notificationRequestCache.get(cacheKey);
+
+  if (cached?.promise) {
+    return cached.promise;
+  }
+
+  if (cached && now - cached.timestamp < NOTIFICATION_CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  const promise = fetch(`${API_URL}/notifications`, { headers: authHeaders })
+    .then((response) => (response.ok ? response.json() : []))
+    .then((data) => {
+      notificationRequestCache.set(cacheKey, {
+        data,
+        timestamp: Date.now(),
+        promise: null,
+      });
+      return data;
+    })
+    .catch((error) => {
+      notificationRequestCache.delete(cacheKey);
+      throw error;
+    });
+
+  notificationRequestCache.set(cacheKey, {
+    data: cached?.data || [],
+    timestamp: cached?.timestamp || 0,
+    promise,
+  });
+
+  return promise;
+};
+
 const NotificationBell = ({ authHeaders, lang, navigate }) => {
   const [notifications, setNotifications] = useState([]);
   const [isOpen, setIsOpen] = useState(false);
   const unreadCount = notifications.filter(n => !n.is_read).length;
   const refreshNotifications = React.useCallback(() => {
-    fetch(`${API_URL}/notifications`, { headers: authHeaders })
-      .then(r => r.ok ? r.json() : [])
+    fetchNotificationsCached(authHeaders)
       .then(setNotifications)
       .catch(e => console.error("Error fetching notifications:", e));
   }, [authHeaders]);
@@ -1703,11 +1828,6 @@ const App = ({ page }) => {
   ]);
   const [options, setOptions] = useState({
     trip_type: "vacation",
-    gender: "unisex", // new
-    transport: "plane", // new
-    traveling_with_pet: false,
-    has_allergies: false,
-    has_chronic_diseases: false,
   });
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -1728,35 +1848,78 @@ const App = ({ page }) => {
   const [removedItems, setRemovedItems] = useState([]);
   const [addItemMode, setAddItemMode] = useState(false);
   const [newItem, setNewItem] = useState("");
+  const [showPackingModal, setShowPackingModal] = useState(false);
+  const [packingProfileDraft, setPackingProfileDraft] = useState(() => normalizePackingProfile(DEFAULT_PACKING_PROFILE));
+  const [packingProfileSaving, setPackingProfileSaving] = useState(false);
+  const [newBaseItem, setNewBaseItem] = useState("");
+  const [quantityEditor, setQuantityEditor] = useState(null);
   const [activeTab, setActiveTab] = useState("shared");
   const [activeParticipantId, setActiveParticipantId] = useState(null);
   const [showBaggageCreator, setShowBaggageCreator] = useState(false);
   const [newBaggageName, setNewBaggageName] = useState("");
   const [baggageBusy, setBaggageBusy] = useState(false);
+  const [renamingBaggageId, setRenamingBaggageId] = useState(null);
+  const [renamingBaggageName, setRenamingBaggageName] = useState("");
+  const [accessOwner, setAccessOwner] = useState(null);
+  const [accessEditorIds, setAccessEditorIds] = useState([]);
+  const [moveItemDialog, setMoveItemDialog] = useState(null);
+  const [moveItemBusy, setMoveItemBusy] = useState(false);
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [inviteToken, setInviteToken] = useState("");
   const [followers, setFollowers] = useState([]);
+  const [collaboratorQuery, setCollaboratorQuery] = useState("");
+  const [collaboratorResults, setCollaboratorResults] = useState([]);
+  const [selectedCollaborators, setSelectedCollaborators] = useState([]);
   const [viewportWidth, setViewportWidth] = useState(() =>
     typeof window === "undefined" ? 1280 : window.innerWidth
   );
 
-  // Computed: can current user edit this checklist?
-  const isOwnerOrCollaborator = user && result && (result.user_id === user.id || (result.backpacks && result.backpacks.some(b => b.user_id === user.id)));
+  // Computed: can current user view/edit different sections of this checklist?
+  const isChecklistParticipant = Boolean(user && result && (result.user_id === user.id || (result.backpacks && result.backpacks.some(b => b.user_id === user.id))));
   const baggageParticipants = buildBaggageParticipants(result, user);
   const activeParticipant = baggageParticipants.find((participant) => participant.userId === activeParticipantId) || null;
+  const activeBaggage = activeTab !== "shared"
+    ? (result?.backpacks || []).find((bag) => bag.id.toString() === activeTab)
+    : null;
+  const canEditActiveBaggage = Boolean(
+    user &&
+    activeBaggage &&
+    canUserEditBaggage(activeBaggage, user.id, result?.backpacks || [])
+  );
+  const canEditCurrentSection = activeTab === "shared" ? isChecklistParticipant : canEditActiveBaggage;
   const canManageSelectedParticipant = Boolean(
     user &&
-    result &&
     activeParticipant &&
-    (activeParticipant.userId === user.id || result.user_id === user.id)
+    activeParticipant.userId === user.id
   );
   const canReviewTrip = Boolean(
     user &&
     result &&
-    isOwnerOrCollaborator &&
+    isChecklistParticipant &&
     result.end_date &&
     result.end_date <= new Date().toISOString().slice(0, 10)
   );
+  const moveDestinations = sortAllBackpacks(
+    (result?.backpacks || []).filter(
+      (baggage) =>
+        baggage.id !== moveItemDialog?.sourceBackpackId &&
+        user &&
+        canUserEditBaggage(baggage, user.id, result?.backpacks || [])
+    )
+  ).map((baggage) => {
+    const participant = baggageParticipants.find((entry) => entry.userId === baggage.user_id);
+    const ownerLabel = participant?.isCurrentUser
+      ? (lang === "en" ? "Mine" : "Мне")
+      : participant?.username || baggage.user?.username || (lang === "en" ? "Participant" : "Участнику");
+    return {
+      id: baggage.id,
+      title: baggage.name || getBaggageKindLabel(baggage),
+      subtitle: `${ownerLabel} • ${getBaggageMetaLine(baggage)}`,
+      isMine: baggage.user_id === user?.id,
+    };
+  });
+  const ownMoveDestinations = moveDestinations.filter((destination) => destination.isMine);
+  const otherMoveDestinations = moveDestinations.filter((destination) => !destination.isMine);
   const checklistColumns = viewportWidth <= 600 ? 1 : viewportWidth <= 900 ? 2 : 3;
 
   const handleAuth = (userData, accessToken) => {
@@ -1773,6 +1936,10 @@ const App = ({ page }) => {
   }, [user]);
 
   useEffect(() => {
+    setPackingProfileDraft(normalizePackingProfile(user?.packing_profile || DEFAULT_PACKING_PROFILE));
+  }, [user]);
+
+  useEffect(() => {
     const handleResize = () => {
       setViewportWidth(window.innerWidth);
     };
@@ -1782,22 +1949,115 @@ const App = ({ page }) => {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  const handleLogout = () => {
+  useEffect(() => {
+    setQuantityEditor(null);
+  }, [activeTab, result?.slug]);
+
+  useEffect(() => {
+    setRenamingBaggageId(null);
+    setRenamingBaggageName("");
+  }, [activeParticipantId, activeTab]);
+
+  useEffect(() => {
+    if (!quantityEditor) return undefined;
+
+    const handlePointerDown = (event) => {
+      const target = event.target;
+      if (
+        target.closest(".quantity-editor-popover") ||
+        target.closest(".item-progress-trigger")
+      ) {
+        return;
+      }
+      setQuantityEditor(null);
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("touchstart", handlePointerDown);
+    };
+  }, [quantityEditor]);
+
+  const handleLogout = React.useCallback(() => {
     setUser(null);
     setToken(null);
     localStorage.removeItem("token");
     localStorage.removeItem("user");
     navigate('/');
-  };
+  }, [navigate]);
 
-  const authHeaders = token
-    ? { "Authorization": `Bearer ${token}` }
-    : {};
+  const authHeaders = React.useMemo(
+    () => (token ? { Authorization: `Bearer ${token}` } : {}),
+    [token]
+  );
+  const packingProfile = normalizePackingProfile(user?.packing_profile || DEFAULT_PACKING_PROFILE);
+  const packingProfileSummaryParts = [
+    ...(packingProfile.gender === "female"
+      ? [lang === "en" ? "Female" : "Женский"]
+      : packingProfile.gender === "male"
+        ? [lang === "en" ? "Male" : "Мужской"]
+        : []),
+    ...(packingProfile.traveling_with_pet ? [lang === "en" ? "With pet" : "С питомцем"] : []),
+    ...(packingProfile.has_allergies ? [lang === "en" ? "Allergies" : "Аллергии"] : []),
+  ];
+  const hasVisibleSharedItems = Boolean(
+    (result?.items || []).some((item) => {
+      const removed = new Set(result?.removed_items || []);
+      if (removed.has(item)) return false;
+      return !(result?.backpacks || []).some((backpack) => (backpack.items || []).includes(item));
+    })
+  );
+
+  useEffect(() => {
+    if (!token || !collaboratorQuery.trim()) {
+      setCollaboratorResults((prev) => (prev.length ? [] : prev));
+      return undefined;
+    }
+
+    const normalizedQuery = collaboratorQuery.trim();
+    if (normalizedQuery.length < 2) {
+      setCollaboratorResults((prev) => (prev.length ? [] : prev));
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      try {
+        const res = await fetch(`${API_URL}/users/search?q=${encodeURIComponent(normalizedQuery)}`, {
+          headers: authHeaders,
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          return;
+        }
+        const data = await res.json();
+        const selectedIds = new Set(selectedCollaborators.map((item) => item.id));
+        setCollaboratorResults(
+          (data || []).filter((item) => item.id !== user?.id && !selectedIds.has(item.id))
+        );
+      } catch (e) {
+        if (e.name !== "AbortError") {
+          console.error("Collaborator search error:", e);
+        }
+      }
+    }, 180);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [authHeaders, collaboratorQuery, selectedCollaborators, token, user?.id]);
 
   useEffect(() => {
     const fetchChecklist = async () => {
       try {
-        const res = await fetch(`${API_URL}/checklist/${id}`);
+        const requestOptions = authHeaders.Authorization ? { headers: authHeaders } : undefined;
+        let res = await fetch(`${API_URL}/checklist/${id}`, requestOptions);
+        if (res.status === 401 && authHeaders.Authorization) {
+          res = await fetch(`${API_URL}/checklist/${id}`);
+        }
         if (!res.ok) throw new Error("Чеклист не найден");
         const data = await res.json();
         setResult(data);
@@ -1811,11 +2071,18 @@ const App = ({ page }) => {
     if (id) {
       fetchChecklist();
     }
-  }, [id]);
+  }, [authHeaders, id]);
 
   useEffect(() => {
     if (result && result.items && savedSlug) {
-      setCheckedItems(buildCheckedItemsMap(result.items, result.checked_items));
+      setCheckedItems(
+        buildCheckedItemsMap(
+          result.items,
+          result.checked_items,
+          result.item_quantities || {},
+          result.packed_quantities || {}
+        )
+      );
     }
   }, [result, savedSlug]);
 
@@ -1845,7 +2112,20 @@ const App = ({ page }) => {
       return;
     }
 
-    if (activeTab === "shared") return;
+    if (activeTab === "shared") {
+      if (hasVisibleSharedItems) return;
+      const preferredParticipant =
+        participants.find((participant) => participant.userId === activeParticipantId)
+        || participants.find((participant) => participant.userId === user?.id)
+        || participants[0];
+      const fallbackBaggage =
+        preferredParticipant?.baggage.find((bp) => bp.is_default) || preferredParticipant?.baggage[0];
+      if (fallbackBaggage) {
+        setActiveParticipantId(preferredParticipant.userId);
+        setActiveTab(fallbackBaggage.id.toString());
+      }
+      return;
+    }
 
     const activeParticipantGroup = participants.find((participant) => participant.userId === activeParticipantId);
     const baggageStillExists = activeParticipantGroup?.baggage.some((bp) => bp.id.toString() === activeTab);
@@ -1854,7 +2134,7 @@ const App = ({ page }) => {
         activeParticipantGroup?.baggage.find((bp) => bp.is_default) || activeParticipantGroup?.baggage[0];
       setActiveTab(fallbackBaggage ? fallbackBaggage.id.toString() : "shared");
     }
-  }, [result, user, activeParticipantId, activeTab]);
+  }, [result, user, activeParticipantId, activeTab, hasVisibleSharedItems]);
 
   useEffect(() => {
     if (location.pathname === "/") {
@@ -1887,6 +2167,53 @@ const App = ({ page }) => {
     }));
   };
 
+  const handleAddBaseItem = () => {
+    const normalizedItem = newBaseItem.trim();
+    if (!normalizedItem) return;
+    setPackingProfileDraft((prev) => ({
+      ...prev,
+      always_include_items: normalizePackingProfileItems([...prev.always_include_items, normalizedItem]),
+    }));
+    setNewBaseItem("");
+  };
+
+  const handleRemoveBaseItem = (itemToRemove) => {
+    setPackingProfileDraft((prev) => ({
+      ...prev,
+      always_include_items: prev.always_include_items.filter((item) => item !== itemToRemove),
+    }));
+  };
+
+  const handleSavePackingProfile = async () => {
+    if (!authHeaders.Authorization) {
+      setShowAuth(true);
+      return;
+    }
+
+    setPackingProfileSaving(true);
+    try {
+      const res = await fetch(`${API_URL}/auth/me`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders,
+        },
+        body: JSON.stringify({ packing_profile: packingProfileDraft }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Не удалось сохранить настройки");
+      }
+      setUser(data);
+      localStorage.setItem("user", JSON.stringify(data));
+      setShowPackingModal(false);
+    } catch (e) {
+      alert(e.message || "Не удалось сохранить настройки");
+    } finally {
+      setPackingProfileSaving(false);
+    }
+  };
+
   const handleSubmit = async () => {
     setError(null);
     setResult(null);
@@ -1908,10 +2235,10 @@ const App = ({ page }) => {
           trip_type: options.trip_type,
           transport: d.transport || "plane",
         })),
-        gender: options.gender,
-        traveling_with_pet: options.traveling_with_pet,
-        has_allergies: options.has_allergies,
-        has_chronic_diseases: options.has_chronic_diseases,
+        gender: packingProfile.gender,
+        traveling_with_pet: packingProfile.traveling_with_pet,
+        has_allergies: packingProfile.has_allergies,
+        participant_user_ids: selectedCollaborators.map((person) => person.id),
         language: lang,
         origin_city: originCity?.fullName || originCity || "",
         return_transport: returnTransport,
@@ -1938,6 +2265,25 @@ const App = ({ page }) => {
 
       setResult(data);
       setSavedSlug(data.slug || null);
+
+      if (data?.slug && token && selectedCollaborators.length > 0) {
+        await Promise.all(
+          selectedCollaborators.map(async (collaborator) => {
+            try {
+              await fetch(`${API_URL}/checklists/${data.slug}/invite/${collaborator.id}`, {
+                method: "POST",
+                headers: authHeaders,
+              });
+            } catch (inviteError) {
+              console.error("Invite collaborator error:", inviteError);
+            }
+          })
+        );
+      }
+
+      setCollaboratorQuery("");
+      setCollaboratorResults([]);
+      setSelectedCollaborators([]);
     } catch {
       setError("Ошибка при запросе к серверу");
     }
@@ -1965,14 +2311,24 @@ const App = ({ page }) => {
     } catch (e) { console.error("Backpack sync error:", e); }
   };
 
-  const handleQuantityChange = (item, nextQuantity) => {
-    if (!isOwnerOrCollaborator) return;
-    const quantity = Math.max(1, Number(nextQuantity) || 1);
+  const handleQuantityStateChange = (item, nextNeededQuantity, nextPackedQuantity) => {
+    if (!canEditCurrentSection) return;
+    const quantity = Math.max(1, Number(nextNeededQuantity) || 1);
+    const packed = Math.max(0, Math.min(quantity, Number(nextPackedQuantity) || 0));
 
     if (activeTab === "shared") {
       const nextQuantities = setItemQuantityInMap(result?.item_quantities || {}, item, quantity);
-      setResult((prev) => ({ ...prev, item_quantities: nextQuantities }));
-      syncChecklist({ item_quantities: nextQuantities });
+      const nextPacked = setPackedQuantityInMap(result?.packed_quantities || {}, item, packed);
+      const nextCheckedMap = buildCheckedItemsMap(result?.items || [], result?.checked_items || [], nextQuantities, nextPacked);
+      const nextCheckedItems = Object.keys(nextCheckedMap).filter((entry) => nextCheckedMap[entry]);
+      setCheckedItems(buildCheckedItemsMap(result?.items || [], nextCheckedItems, nextQuantities, nextPacked));
+      setResult((prev) => ({
+        ...prev,
+        checked_items: nextCheckedItems,
+        item_quantities: nextQuantities,
+        packed_quantities: nextPacked,
+      }));
+      syncChecklist({ checked_items: nextCheckedItems, item_quantities: nextQuantities, packed_quantities: nextPacked });
       return;
     }
 
@@ -1981,26 +2337,97 @@ const App = ({ page }) => {
       const bp = next.backpacks?.find((bag) => bag.id.toString() === activeTab);
       if (bp) {
         bp.item_quantities = setItemQuantityInMap(bp.item_quantities || {}, item, quantity);
-        syncBackpackItems(activeTab, { item_quantities: bp.item_quantities });
+        bp.packed_quantities = setPackedQuantityInMap(bp.packed_quantities || {}, item, packed);
+        bp.checked_items = (bp.items || []).filter(
+          (existingItem) => getPackedQuantity(bp.packed_quantities || {}, existingItem) >= getItemQuantity(bp.item_quantities || {}, existingItem)
+        );
+        syncBackpackItems(activeTab, {
+          checked_items: bp.checked_items,
+          item_quantities: bp.item_quantities,
+          packed_quantities: bp.packed_quantities,
+        });
       }
       return next;
     });
   };
 
+  const toggleQuantityEditor = (item, neededQuantity, packedQuantity) => {
+    const sectionKey = activeTab;
+    setQuantityEditor((prev) => {
+      if (prev?.item === item && prev?.sectionKey === sectionKey) {
+        return null;
+      }
+      return {
+        item,
+        sectionKey,
+        needed: Math.max(1, Number(neededQuantity) || 1),
+        packed: Math.max(0, Math.min(Number(neededQuantity) || 1, Number(packedQuantity) || 0)),
+      };
+    });
+  };
+
+  const updateQuantityEditorDraft = (field, nextValue) => {
+    setQuantityEditor((prev) => {
+      if (!prev) return prev;
+      if (field === "needed") {
+        const needed = Math.max(1, Number(nextValue) || 1);
+        return {
+          ...prev,
+          needed,
+          packed: Math.min(prev.packed, needed),
+        };
+      }
+
+      const packed = Math.max(0, Math.min(prev.needed, Number(nextValue) || 0));
+      return {
+        ...prev,
+        packed,
+      };
+    });
+  };
+
+  const applyQuantityEditor = () => {
+    if (!quantityEditor) return;
+    handleQuantityStateChange(quantityEditor.item, quantityEditor.needed, quantityEditor.packed);
+    setQuantityEditor(null);
+  };
+
   const handleCheck = (item) => {
-    if (!isOwnerOrCollaborator) return;
+    if (!canEditCurrentSection) return;
     if (activeTab === "shared") {
-      const newChecked = { ...checkedItems, [item]: !checkedItems[item] };
-      setCheckedItems(newChecked);
-      syncChecklist({ checked_items: Object.keys(newChecked).filter(k => newChecked[k]) });
+      const needed = getItemQuantity(result?.item_quantities || {}, item);
+      const currentPacked = getPackedQuantity(result?.packed_quantities || {}, item);
+      const nextPacked = setPackedQuantityInMap(
+        result?.packed_quantities || {},
+        item,
+        currentPacked >= needed ? 0 : needed
+      );
+      const nextCheckedItems = (result?.items || []).filter(
+        (existingItem) => getPackedQuantity(nextPacked, existingItem) >= getItemQuantity(result?.item_quantities || {}, existingItem)
+      );
+      const nextCheckedMap = buildCheckedItemsMap(result?.items || [], nextCheckedItems, result?.item_quantities || {}, nextPacked);
+      setCheckedItems(nextCheckedMap);
+      setResult((prev) => ({ ...prev, checked_items: nextCheckedItems, packed_quantities: nextPacked }));
+      syncChecklist({ checked_items: nextCheckedItems, packed_quantities: nextPacked });
     } else {
       setResult(prev => {
         const next = { ...prev };
         const bp = next.backpacks?.find(b => b.id.toString() === activeTab);
         if (bp) {
-          const isChecked = !bp.checked_items.includes(item);
-          bp.checked_items = isChecked ? [...bp.checked_items, item] : bp.checked_items.filter(i => i !== item);
-          syncBackpackItems(activeTab, { checked_items: bp.checked_items });
+          const needed = getItemQuantity(bp.item_quantities || {}, item);
+          const currentPacked = getPackedQuantity(bp.packed_quantities || {}, item);
+          bp.packed_quantities = setPackedQuantityInMap(
+            bp.packed_quantities || {},
+            item,
+            currentPacked >= needed ? 0 : needed
+          );
+          bp.checked_items = (bp.items || []).filter(
+            (existingItem) => getPackedQuantity(bp.packed_quantities || {}, existingItem) >= getItemQuantity(bp.item_quantities || {}, existingItem)
+          );
+          syncBackpackItems(activeTab, {
+            checked_items: bp.checked_items,
+            packed_quantities: bp.packed_quantities,
+          });
         }
         return next;
       });
@@ -2008,18 +2435,32 @@ const App = ({ page }) => {
   };
 
   const handleRemoveItem = (item) => {
-    if (!isOwnerOrCollaborator) return;
+    if (!canEditCurrentSection) return;
     if (activeTab === "shared") {
       const newRemoved = [...removedItems, item];
       setRemovedItems(newRemoved);
-      syncChecklist({ removed_items: newRemoved });
+      const nextPacked = setPackedQuantityInMap(result?.packed_quantities || {}, item, 0);
+      const nextCheckedItems = (result?.items || []).filter(
+        (existingItem) => getPackedQuantity(nextPacked, existingItem) >= getItemQuantity(result?.item_quantities || {}, existingItem)
+      );
+      setCheckedItems(buildCheckedItemsMap(result?.items || [], nextCheckedItems, result?.item_quantities || {}, nextPacked));
+      setResult((prev) => ({ ...prev, checked_items: nextCheckedItems, packed_quantities: nextPacked }));
+      syncChecklist({ removed_items: newRemoved, checked_items: nextCheckedItems, packed_quantities: nextPacked });
     } else {
       setResult(prev => {
         const next = { ...prev };
         const bp = next.backpacks?.find(b => b.id.toString() === activeTab);
         if (bp) {
           bp.removed_items = [...bp.removed_items, item];
-          syncBackpackItems(activeTab, { removed_items: bp.removed_items });
+          bp.packed_quantities = setPackedQuantityInMap(bp.packed_quantities || {}, item, 0);
+          bp.checked_items = (bp.items || []).filter(
+            (existingItem) => getPackedQuantity(bp.packed_quantities || {}, existingItem) >= getItemQuantity(bp.item_quantities || {}, existingItem)
+          );
+          syncBackpackItems(activeTab, {
+            removed_items: bp.removed_items,
+            checked_items: bp.checked_items,
+            packed_quantities: bp.packed_quantities,
+          });
         }
         return next;
       });
@@ -2027,19 +2468,21 @@ const App = ({ page }) => {
   };
 
   const resetChecklist = () => {
-    if (!isOwnerOrCollaborator) return;
+    if (!canEditCurrentSection) return;
     if (activeTab === "shared") {
       const reset = {};
       result.items.forEach(item => { reset[item] = false; });
       setCheckedItems(reset);
-      syncChecklist({ checked_items: [] });
+      setResult((prev) => ({ ...prev, checked_items: [], packed_quantities: {} }));
+      syncChecklist({ checked_items: [], packed_quantities: {} });
     } else {
       setResult(prev => {
         const next = { ...prev };
         const bp = next.backpacks?.find(b => b.id.toString() === activeTab);
         if (bp) {
           bp.checked_items = [];
-          syncBackpackItems(activeTab, { checked_items: [] });
+          bp.packed_quantities = {};
+          syncBackpackItems(activeTab, { checked_items: [], packed_quantities: {} });
         }
         return next;
       });
@@ -2047,7 +2490,7 @@ const App = ({ page }) => {
   };
 
   const handleAddItem = () => {
-    if (!isOwnerOrCollaborator) return;
+    if (!canEditCurrentSection) return;
     const normalizedItem = newItem.trim();
     if (!normalizedItem) return;
     if (activeTab === "shared") {
@@ -2059,9 +2502,14 @@ const App = ({ page }) => {
             normalizedItem,
             getItemQuantity(result?.item_quantities || {}, normalizedItem)
           );
+          const nextPacked = setPackedQuantityInMap(
+            result?.packed_quantities || {},
+            normalizedItem,
+            getPackedQuantity(result?.packed_quantities || {}, normalizedItem)
+          );
           setRemovedItems(nextRemoved);
-          setResult((prev) => ({ ...prev, item_quantities: nextQuantities }));
-          syncChecklist({ removed_items: nextRemoved, item_quantities: nextQuantities });
+          setResult((prev) => ({ ...prev, item_quantities: nextQuantities, packed_quantities: nextPacked }));
+          syncChecklist({ removed_items: nextRemoved, item_quantities: nextQuantities, packed_quantities: nextPacked });
         }
         setNewItem("");
         setAddItemMode(false);
@@ -2069,8 +2517,9 @@ const App = ({ page }) => {
       }
       const newItems = [...result.items, normalizedItem];
       const nextQuantities = setItemQuantityInMap(result?.item_quantities || {}, normalizedItem, 1);
-      setResult(prev => ({ ...prev, items: newItems, item_quantities: nextQuantities }));
-      syncChecklist({ items: newItems, item_quantities: nextQuantities });
+      const nextPacked = setPackedQuantityInMap(result?.packed_quantities || {}, normalizedItem, 0);
+      setResult(prev => ({ ...prev, items: newItems, item_quantities: nextQuantities, packed_quantities: nextPacked }));
+      syncChecklist({ items: newItems, item_quantities: nextQuantities, packed_quantities: nextPacked });
     } else {
       setResult(prev => {
         const next = { ...prev };
@@ -2083,9 +2532,15 @@ const App = ({ page }) => {
               normalizedItem,
               getItemQuantity(bp.item_quantities || {}, normalizedItem)
             );
+            bp.packed_quantities = setPackedQuantityInMap(
+              bp.packed_quantities || {},
+              normalizedItem,
+              getPackedQuantity(bp.packed_quantities || {}, normalizedItem)
+            );
             syncBackpackItems(activeTab, {
               removed_items: bp.removed_items,
-              item_quantities: bp.item_quantities
+              item_quantities: bp.item_quantities,
+              packed_quantities: bp.packed_quantities
             });
           }
           return next;
@@ -2093,7 +2548,8 @@ const App = ({ page }) => {
         if (bp) {
           bp.items = [...bp.items, normalizedItem];
           bp.item_quantities = setItemQuantityInMap(bp.item_quantities || {}, normalizedItem, 1);
-          syncBackpackItems(activeTab, { items: bp.items, item_quantities: bp.item_quantities });
+          bp.packed_quantities = setPackedQuantityInMap(bp.packed_quantities || {}, normalizedItem, 0);
+          syncBackpackItems(activeTab, { items: bp.items, item_quantities: bp.item_quantities, packed_quantities: bp.packed_quantities });
         }
         return next;
       });
@@ -2115,7 +2571,7 @@ const App = ({ page }) => {
         .forEach((item) => allBackpackItems.add(item));
     });
 
-    const buildItemsForSection = (items = [], removed = [], checkedMap = {}, quantityMap = {}, extraFilter = null) =>
+    const buildItemsForSection = (items = [], removed = [], checkedMap = {}, quantityMap = {}, packedMap = {}, extraFilter = null) =>
       items
         .filter((item) => !removed.includes(item))
         .filter((item) => (typeof extraFilter === "function" ? extraFilter(item) : true))
@@ -2123,6 +2579,7 @@ const App = ({ page }) => {
           name: item,
           checked: Boolean(checkedMap[item]),
           quantity: getItemQuantity(quantityMap, item),
+          packed: getPackedQuantity(packedMap, item),
         }));
 
     const sharedItems = buildItemsForSection(
@@ -2130,6 +2587,7 @@ const App = ({ page }) => {
       removedItems,
       checkedItems,
       result.item_quantities || {},
+      result.packed_quantities || {},
       (item) => !allBackpackItems.has(item)
     );
 
@@ -2147,12 +2605,22 @@ const App = ({ page }) => {
       });
     }
 
-    sortAllBackpacks(result.backpacks || []).forEach((baggage) => {
+    sortAllBackpacks(
+      (result.backpacks || []).filter((baggage) => (
+        !result.hidden_sections?.includes(`backpack:${baggage.id}`) || baggage.user_id === user?.id
+      ))
+    ).forEach((baggage) => {
       const visibleItems = buildItemsForSection(
         baggage.items || [],
         baggage.removed_items || [],
-        buildCheckedItemsMap(baggage.items || [], baggage.checked_items || []),
-        baggage.item_quantities || {}
+        buildCheckedItemsMap(
+          baggage.items || [],
+          baggage.checked_items || [],
+          baggage.item_quantities || {},
+          baggage.packed_quantities || {}
+        ),
+        baggage.item_quantities || {},
+        baggage.packed_quantities || {}
       );
 
       if (!visibleItems.length) return;
@@ -2191,7 +2659,7 @@ const App = ({ page }) => {
                   <div class="print-item${item.checked ? " checked" : ""}">
                     <span class="print-check">${item.checked ? "✓" : ""}</span>
                     <span class="print-name">${escapeHtml(item.name)}</span>
-                    ${item.quantity > 1 ? `<span class="print-qty">×${item.quantity}</span>` : ""}
+                    <span class="print-qty">${item.packed}/${item.quantity}</span>
                   </div>
                 `
               )
@@ -2370,93 +2838,42 @@ const App = ({ page }) => {
     };
   };
 
-  const handleMoveToBackpack = (item) => {
-    if (!user || !result || !result.backpacks) return;
-    const myBp = getDefaultBaggage(result.backpacks, user.id);
-    if (!myBp) {
-      alert("У вас ещё нет личного багажа. Он создастся при принятии приглашения.");
-      return;
-    }
-
-    setResult(prev => {
-      const next = { ...prev };
-      const bp = next.backpacks.find(b => b.id === myBp.id);
-      const sharedQuantity = getItemQuantity(next.item_quantities || {}, item);
-      const sharedWasChecked = (next.checked_items || []).includes(item);
-      if (bp) {
-        if (!bp.items) bp.items = [];
-        if (!bp.items.includes(item)) {
-          bp.items = [...bp.items, item];
-        }
-        const nextBackpackQuantities = setItemQuantityInMap(
-          bp.item_quantities || {},
-          item,
-          getItemQuantity(bp.item_quantities || {}, item) + sharedQuantity
-        );
-        bp.item_quantities = nextBackpackQuantities;
-        bp.checked_items = sharedWasChecked && !(bp.checked_items || []).includes(item)
-          ? [...(bp.checked_items || []), item]
-          : (bp.checked_items || []);
-        syncBackpackItems(bp.id, {
-          items: bp.items,
-          checked_items: bp.checked_items,
-          item_quantities: bp.item_quantities,
-        });
-      }
-      next.items = (next.items || []).filter((existing) => existing !== item);
-      next.checked_items = (next.checked_items || []).filter((existing) => existing !== item);
-      next.removed_items = (next.removed_items || []).filter((existing) => existing !== item);
-      next.item_quantities = setItemQuantityInMap(next.item_quantities || {}, item, 0);
-      syncChecklist({
-        items: next.items,
-        checked_items: next.checked_items,
-        removed_items: next.removed_items,
-        item_quantities: next.item_quantities,
-      });
-      return next;
+  const openMoveItemDialog = (item, sourceBackpackId = null) => {
+    setMoveItemDialog({
+      item,
+      sourceBackpackId,
+      targetBackpackId: null,
     });
   };
 
-  const handleMoveToShared = (item, fromBpId) => {
-    setResult(prev => {
-      const next = { ...prev };
-      const bp = next.backpacks.find(b => b.id.toString() === fromBpId.toString());
-      const sourceQuantity = getItemQuantity(bp?.item_quantities || {}, item);
-      const sourceWasChecked = (bp?.checked_items || []).includes(item);
-      if (bp) {
-        if (!bp.items) bp.items = [];
-        if (bp.items.includes(item)) {
-          bp.items = bp.items.filter(i => i !== item);
-          bp.checked_items = (bp.checked_items || []).filter((existing) => existing !== item);
-          bp.removed_items = (bp.removed_items || []).filter((existing) => existing !== item);
-          bp.item_quantities = setItemQuantityInMap(bp.item_quantities || {}, item, 0);
-          syncBackpackItems(bp.id, {
-            items: bp.items,
-            checked_items: bp.checked_items,
-            removed_items: bp.removed_items,
-            item_quantities: bp.item_quantities,
-          });
-        }
-      }
-      if (!(next.items || []).includes(item)) {
-        next.items = [...(next.items || []), item];
-      }
-      if (sourceWasChecked && !(next.checked_items || []).includes(item)) {
-        next.checked_items = [...(next.checked_items || []), item];
-      }
-      next.removed_items = (next.removed_items || []).filter((existing) => existing !== item);
-      next.item_quantities = setItemQuantityInMap(
-        next.item_quantities || {},
-        item,
-        getItemQuantity(next.item_quantities || {}, item) + sourceQuantity
-      );
-      syncChecklist({
-        items: next.items,
-        removed_items: next.removed_items,
-        item_quantities: next.item_quantities,
+  const handleConfirmMoveItem = async () => {
+    if (!moveItemDialog?.item || !moveItemDialog?.targetBackpackId || !savedSlug || !authHeaders.Authorization) return;
+
+    setMoveItemBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/checklists/${savedSlug || id}/transfer-item`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders,
+        },
+        body: JSON.stringify({
+          item: moveItemDialog.item,
+          source_backpack_id: moveItemDialog.sourceBackpackId,
+          target_backpack_id: moveItemDialog.targetBackpackId,
+        }),
       });
-      return next;
-    });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Не удалось перенести вещь");
+      }
+      setResult(data);
+      setMoveItemDialog(null);
+    } catch (e) {
+      alert(e.message || "Не удалось перенести вещь");
+    } finally {
+      setMoveItemBusy(false);
+    }
   };
 
   const selectParticipant = (participantUserId) => {
@@ -2575,8 +2992,110 @@ const App = ({ page }) => {
     }
   };
 
+  const startRenameBaggage = (baggage) => {
+    setRenamingBaggageId(baggage.id);
+    setRenamingBaggageName(baggage.name || "");
+  };
+
+  const handleRenameBaggage = async (baggage) => {
+    const nextName = renamingBaggageName.trim();
+    if (!nextName || !authHeaders.Authorization) return;
+
+    setBaggageBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/baggage/${baggage.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: JSON.stringify({
+          name: nextName,
+          kind: guessBaggageKind(nextName),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Не удалось переименовать багаж");
+      }
+
+      setResult((prev) => ({
+        ...prev,
+        backpacks: sortAllBackpacks((prev.backpacks || []).map((bp) => (bp.id === data.id ? data : bp))),
+      }));
+      setRenamingBaggageId(null);
+      setRenamingBaggageName("");
+    } catch (e) {
+      alert(e.message || "Не удалось переименовать багаж");
+    } finally {
+      setBaggageBusy(false);
+    }
+  };
+
+  const openBaggageAccess = (participant) => {
+    const anchorBaggage =
+      participant?.baggage?.find((baggage) => baggage.is_default) || participant?.baggage?.[0];
+    if (!participant || !anchorBaggage) return;
+
+    setAccessOwner({
+      userId: participant.userId,
+      displayName: participant.isCurrentUser ? "Мой багаж" : `Багаж ${participant.username}`,
+      anchorBackpackId: anchorBaggage.id,
+    });
+    setAccessEditorIds(getOwnerBaggageEditorIds(result?.backpacks || [], participant.userId, anchorBaggage));
+  };
+
+  const handleToggleBaggageEditor = (participantUserId) => {
+    setAccessEditorIds((prev) => (
+      prev.includes(participantUserId)
+        ? prev.filter((id) => id !== participantUserId)
+        : [...prev, participantUserId]
+    ));
+  };
+
+  const handleSaveBaggageAccess = async () => {
+    if (!accessOwner || !authHeaders.Authorization) return;
+
+    setBaggageBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/baggage/${accessOwner.anchorBackpackId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: JSON.stringify({ editor_user_ids: accessEditorIds }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || "Не удалось обновить доступ");
+      }
+
+      setResult((prev) => ({
+        ...prev,
+        backpacks: sortAllBackpacks((prev.backpacks || []).map((bp) => (
+          bp.user_id === accessOwner.userId
+            ? { ...bp, editor_user_ids: data.editor_user_ids || accessEditorIds }
+            : bp
+        ))),
+      }));
+      setAccessOwner(null);
+      setAccessEditorIds([]);
+    } catch (e) {
+      alert(e.message || "Не удалось обновить доступ");
+    } finally {
+      setBaggageBusy(false);
+    }
+  };
+
+  const addCollaborator = (person) => {
+    setSelectedCollaborators((prev) => (
+      prev.some((item) => item.id === person.id) ? prev : [...prev, person]
+    ));
+    setCollaboratorQuery("");
+    setCollaboratorResults([]);
+  };
+
+  const removeCollaborator = (userId) => {
+    setSelectedCollaborators((prev) => prev.filter((item) => item.id !== userId));
+  };
+
   const handleToggleSectionVisibility = async (section) => {
-    if (!result || result.user_id !== user?.id) return;
+    if (!result || !authHeaders.Authorization) return;
 
     const isHidden = result.hidden_sections?.includes(section);
     let newHidden = [];
@@ -2620,7 +3139,12 @@ const App = ({ page }) => {
     if (!updatedChecklist) return;
 
     const nextSlug = updatedChecklist.slug || savedSlug;
-    const nextCheckedItems = buildCheckedItemsMap(updatedChecklist.items || [], updatedChecklist.checked_items || []);
+    const nextCheckedItems = buildCheckedItemsMap(
+      updatedChecklist.items || [],
+      updatedChecklist.checked_items || [],
+      updatedChecklist.item_quantities || {},
+      updatedChecklist.packed_quantities || {}
+    );
     const nextRemovedItems = updatedChecklist.removed_items || [];
 
     setSavedSlug(nextSlug || null);
@@ -2643,9 +3167,9 @@ const App = ({ page }) => {
       {/* Navbar */}
       <nav className="navbar">
         <div className="navbar-logo" onClick={() => navigate("/")}>
-          <span>🧳</span> Luggify
+          <span>🧳</span><span className="navbar-logo-text">Luggify</span>
         </div>
-        <div className="navbar-center">
+        <div className="navbar-center navbar-search-desktop">
           <NavbarUserSearch
             lang={lang}
             navigate={navigate}
@@ -2653,15 +3177,25 @@ const App = ({ page }) => {
           />
         </div>
         <div className="navbar-user">
-          <div className="language-switcher">
-            <button
-              className={`lang-btn ${lang === "ru" ? "active" : ""}`}
-              onClick={() => setLang("ru")}
-            >RU</button>
-            <button
-              className={`lang-btn ${lang === "en" ? "active" : ""}`}
-              onClick={() => setLang("en")}
-            >EN</button>
+          <div className="navbar-locale-tools">
+            <div className="language-switcher">
+              <button
+                className={`lang-btn ${lang === "ru" ? "active" : ""}`}
+                onClick={() => setLang("ru")}
+              >RU</button>
+              <button
+                className={`lang-btn ${lang === "en" ? "active" : ""}`}
+                onClick={() => setLang("en")}
+              >EN</button>
+            </div>
+            <div className="navbar-search-mobile">
+              <NavbarUserSearch
+                lang={lang}
+                navigate={navigate}
+                currentUsername={user?.username || ""}
+                compact
+              />
+            </div>
           </div>
           {user ? (
             <>
@@ -2750,9 +3284,9 @@ const App = ({ page }) => {
                   </div>
                   {destinations.map((dest, index) => (
                     <div key={dest.id} className="destination-row">
-                      <div className="destination-header">
-                        {destinations.length > 1 && <span className="destination-number">#{index + 1}</span>}
-                        {destinations.length > 1 && (
+                      {destinations.length > 1 && (
+                        <div className="destination-header">
+                          <span className="destination-number">#{index + 1}</span>
                           <button
                             className="remove-dest-btn"
                             onClick={() => handleRemoveDestination(dest.id)}
@@ -2760,8 +3294,8 @@ const App = ({ page }) => {
                           >
                             ×
                           </button>
-                        )}
-                      </div>
+                        </div>
+                      )}
                       <div className="form-field">
                         <CitySelect
                           value={dest.city}
@@ -2830,27 +3364,6 @@ const App = ({ page }) => {
                       </div>
                     </div>
                   </div>
-                  {/* Option Selections (Transport removed, now per-destination) */}
-                  {/* Gender Selection */}
-                  <div className="trip-type-selector">
-                    <label className="section-label">Пол:</label>
-                    <div className="trip-types">
-                      {[
-                        { id: "unisex", label: t.unisex, icon: <UnisexIcon /> },
-                        { id: "male", label: t.male, icon: <MaleIcon /> },
-                        { id: "female", label: t.female, icon: <FemaleIcon /> },
-                      ].map(type => (
-                        <div
-                          key={type.id}
-                          className={`trip-type-chip ${options.gender === type.id ? "active" : ""}`}
-                          onClick={() => setOptions({ ...options, gender: type.id })}
-                        >
-                          {type.icon} {type.label}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
                   <div className="trip-type-selector">
                     <label className="section-label">Тип поездки:</label>
                     <div className="trip-types">
@@ -2872,32 +3385,130 @@ const App = ({ page }) => {
                     </div>
                   </div>
 
-                  <div className="options-grid">
-                    <label className={`option-chip ${options.traveling_with_pet ? "active" : ""}`}>
-                      <input
-                        type="checkbox"
-                        checked={options.traveling_with_pet}
-                        onChange={e => setOptions({ ...options, traveling_with_pet: e.target.checked })}
-                      />
-                      <PetIcon /> {t.pet}
-                    </label>
-                    <label className={`option-chip ${options.has_allergies ? "active" : ""}`}>
-                      <input
-                        type="checkbox"
-                        checked={options.has_allergies}
-                        onChange={e => setOptions({ ...options, has_allergies: e.target.checked })}
-                      />
-                      <AllergyIcon /> {t.allergies}
-                    </label>
-                    <label className={`option-chip ${options.has_chronic_diseases ? "active" : ""}`}>
-                      <input
-                        type="checkbox"
-                        checked={options.has_chronic_diseases}
-                        onChange={e => setOptions({ ...options, has_chronic_diseases: e.target.checked })}
-                      />
-                      <MedsIcon /> {t.meds}
-                    </label>
-                  </div>
+                  {user && (
+                    <div className="packing-profile-summary-card home-setup-card">
+                      <div className="home-setup-card-head">
+                        <div className="home-setup-card-copy">
+                          <span className="home-setup-card-kicker">
+                            {lang === "en" ? "Quick start" : "Быстрый старт"}
+                          </span>
+                          <span className="home-setup-card-title">
+                            {lang === "en" ? "Packing settings" : "Настройки сборов"}
+                          </span>
+                        </div>
+                        <button
+                          className="packing-profile-summary-btn compact"
+                          type="button"
+                          onClick={() => setShowPackingModal(true)}
+                        >
+                          {lang === "en" ? "Configure" : "Настроить"}
+                        </button>
+                      </div>
+                      <div className="packing-profile-summary-tags">
+                        {packingProfileSummaryParts.length > 0 ? (
+                          packingProfileSummaryParts.map((part) => (
+                            <span key={part} className="packing-profile-summary-tag">
+                              {part}
+                            </span>
+                          ))
+                        ) : (
+                          <span className="packing-profile-summary-empty">
+                            {lang === "en" ? "No personal preferences yet" : "Пока без личных параметров"}
+                          </span>
+                        )}
+                        {packingProfile.always_include_items.length > 0 && (
+                          <span
+                            className="packing-profile-summary-tag accent"
+                            title={packingProfile.always_include_items.join(", ")}
+                          >
+                            {lang === "en"
+                              ? `+${packingProfile.always_include_items.length} base items`
+                              : `+${packingProfile.always_include_items.length} базовых вещей`}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {user && (
+                    <div className="collaborator-picker">
+                      <div className="collaborator-picker-panel home-setup-card">
+                        <div className="home-setup-card-head">
+                          <div className="home-setup-card-copy">
+                            <span className="home-setup-card-kicker">
+                              {lang === "en" ? "Optional" : "По желанию"}
+                            </span>
+                            <span className="home-setup-card-title">
+                              {lang === "en" ? "Collaborative checklist" : "Совместный чеклист"}
+                            </span>
+                          </div>
+                          {selectedCollaborators.length > 0 && (
+                            <span className="home-setup-card-counter">
+                              {lang === "en"
+                                ? `${selectedCollaborators.length} selected`
+                                : `${selectedCollaborators.length} выбрано`}
+                            </span>
+                          )}
+                        </div>
+                        {selectedCollaborators.length > 0 && (
+                          <div className="collaborator-chip-list">
+                            {selectedCollaborators.map((person) => (
+                              <button
+                                key={person.id}
+                                type="button"
+                                className="collaborator-chip"
+                                onClick={() => removeCollaborator(person.id)}
+                                title={lang === "en" ? "Remove" : "Убрать"}
+                              >
+                                <span className="collaborator-chip-avatar">
+                                  {person.avatar ? (
+                                    <img src={person.avatar} alt={person.username} />
+                                  ) : (
+                                    person.username.charAt(0).toUpperCase()
+                                  )}
+                                </span>
+                                <span className="collaborator-chip-name">{person.username}</span>
+                                <span className="collaborator-chip-remove">×</span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        <div className="collaborator-search-shell">
+                          <input
+                            type="text"
+                            className="collaborator-search-input"
+                            value={collaboratorQuery}
+                            onChange={(e) => setCollaboratorQuery(e.target.value)}
+                            placeholder={lang === "en" ? "Find user by username" : "Добавить пользователя по нику"}
+                          />
+                          {collaboratorResults.length > 0 && (
+                            <div className="collaborator-search-results">
+                              {collaboratorResults.map((person) => (
+                                <button
+                                  key={person.id}
+                                  type="button"
+                                  className="collaborator-search-item"
+                                  onClick={() => addCollaborator(person)}
+                                >
+                                  <span className="collaborator-search-avatar">
+                                    {person.avatar ? (
+                                      <img src={person.avatar} alt={person.username} />
+                                    ) : (
+                                      person.username.charAt(0).toUpperCase()
+                                    )}
+                                  </span>
+                                  <span className="collaborator-search-copy">
+                                    <strong>{person.username}</strong>
+                                    {person.bio && <span>{person.bio}</span>}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="form-field generate-field">
                     <button
@@ -2974,34 +3585,36 @@ const App = ({ page }) => {
                 {(savedSlug || id) && (result.user_id === user?.id || (result.backpacks && result.backpacks.length > 0)) && (
                   <div className="baggage-panel">
                     <div className="baggage-panel-primary">
-                      <button
-                        className={`scope-chip ${activeTab === "shared" ? "active" : ""}`}
-                        onClick={() => {
-                          setActiveTab("shared");
-                          setShowBaggageCreator(false);
-                          setNewBaggageName("");
-                        }}
-                      >
-                        <span className="scope-chip-avatar">
-                          <TentIcon style={{ marginRight: 0 }} />
-                        </span>
-                        <span className="scope-chip-body">
-                          <span className="scope-chip-name">Общие вещи</span>
-                          <span className="scope-chip-meta">Общий список поездки</span>
-                        </span>
-                        {result.user_id === user?.id && (
-                          <span
-                            className={`scope-chip-action ${result.hidden_sections?.includes("shared") ? "hidden" : "visible"}`}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleToggleSectionVisibility("shared");
-                            }}
-                            title={result.hidden_sections?.includes("shared") ? "Скрыто от других" : "Видно всем"}
-                          >
-                            {result.hidden_sections?.includes("shared") ? <LockIcon style={{ marginRight: 0 }} /> : <UnlockIcon style={{ marginRight: 0 }} />}
+                      {hasVisibleSharedItems && (
+                        <button
+                          className={`scope-chip ${activeTab === "shared" ? "active" : ""}`}
+                          onClick={() => {
+                            setActiveTab("shared");
+                            setShowBaggageCreator(false);
+                            setNewBaggageName("");
+                          }}
+                        >
+                          <span className="scope-chip-avatar">
+                            <TentIcon style={{ marginRight: 0 }} />
                           </span>
-                        )}
-                      </button>
+                          <span className="scope-chip-body">
+                            <span className="scope-chip-name">Неразобранные вещи</span>
+                            <span className="scope-chip-meta">Можно сразу разложить по багажам</span>
+                          </span>
+                          {result.user_id === user?.id && (
+                            <span
+                              className={`scope-chip-action ${result.hidden_sections?.includes("shared") ? "hidden" : "visible"}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleToggleSectionVisibility("shared");
+                              }}
+                              title={result.hidden_sections?.includes("shared") ? "Скрыто от других" : "Видно всем"}
+                            >
+                              {result.hidden_sections?.includes("shared") ? <LockIcon style={{ marginRight: 0 }} /> : <UnlockIcon style={{ marginRight: 0 }} />}
+                            </span>
+                          )}
+                        </button>
+                      )}
 
                       {baggageParticipants.length > 0 && (
                         <div className="participant-switcher">
@@ -3039,15 +3652,26 @@ const App = ({ page }) => {
                               {activeParticipant.baggage.length} багажа • {getParticipantVisibleItemCount(activeParticipant)} вещей
                             </div>
                           </div>
-                          {canManageSelectedParticipant && !showBaggageCreator && (
-                            <button
-                              className="baggage-create-btn"
-                              onClick={() => setShowBaggageCreator(true)}
-                              disabled={baggageBusy}
-                            >
-                              + Багаж
-                            </button>
-                          )}
+                          <div className="baggage-panel-actions">
+                            {canManageSelectedParticipant && activeParticipant.baggage.length > 0 && !showBaggageCreator && (
+                              <button
+                                className="baggage-create-btn secondary"
+                                onClick={() => openBaggageAccess(activeParticipant)}
+                                disabled={baggageBusy}
+                              >
+                                Доступ
+                              </button>
+                            )}
+                            {canManageSelectedParticipant && !showBaggageCreator && (
+                              <button
+                                className="baggage-create-btn"
+                                onClick={() => setShowBaggageCreator(true)}
+                                disabled={baggageBusy}
+                              >
+                                + Багаж
+                              </button>
+                            )}
+                          </div>
                         </div>
 
                         <div className="baggage-chip-row">
@@ -3061,8 +3685,63 @@ const App = ({ page }) => {
                                 <BackpackIcon style={{ marginRight: "6px" }} />
                                 <div className="baggage-chip-copy">
                                   <div className="baggage-chip-heading">
-                                    <span className="baggage-chip-name">{bp.name || "Багаж"}</span>
-                                    {bp.is_default && <span className="baggage-chip-badge">основной</span>}
+                                    {renamingBaggageId === bp.id ? (
+                                      <div
+                                        className="baggage-rename-row"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        <input
+                                          className="baggage-rename-input"
+                                          value={renamingBaggageName}
+                                          onChange={(e) => setRenamingBaggageName(e.target.value)}
+                                          onKeyDown={(e) => {
+                                            if (e.key === "Enter") handleRenameBaggage(bp);
+                                            if (e.key === "Escape") {
+                                              setRenamingBaggageId(null);
+                                              setRenamingBaggageName("");
+                                            }
+                                          }}
+                                          autoFocus
+                                        />
+                                        <button
+                                          type="button"
+                                          className="baggage-rename-btn save"
+                                          onClick={() => handleRenameBaggage(bp)}
+                                          disabled={baggageBusy || !renamingBaggageName.trim()}
+                                        >
+                                          OK
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="baggage-rename-btn"
+                                          onClick={() => {
+                                            setRenamingBaggageId(null);
+                                            setRenamingBaggageName("");
+                                          }}
+                                          disabled={baggageBusy}
+                                        >
+                                          ×
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      <>
+                                        <span className="baggage-chip-name">{bp.name || "Багаж"}</span>
+                                        {bp.is_default && <span className="baggage-chip-badge">основной</span>}
+                                        {bp.user_id === user?.id && (
+                                          <button
+                                            type="button"
+                                            className="baggage-rename-trigger"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              startRenameBaggage(bp);
+                                            }}
+                                            title="Переименовать багаж"
+                                          >
+                                            ✎
+                                          </button>
+                                        )}
+                                      </>
+                                    )}
                                   </div>
                                   <span className="baggage-chip-meta">
                                     {getBaggageMetaLine(bp)}
@@ -3070,7 +3749,7 @@ const App = ({ page }) => {
                                 </div>
                               </div>
                               <div className="baggage-chip-actions">
-                                {canManageSelectedParticipant && (
+                                {bp.user_id === user?.id && (
                                   <button
                                     className={`baggage-default-toggle ${bp.is_default ? "active" : ""}`}
                                     onClick={(e) => {
@@ -3083,7 +3762,7 @@ const App = ({ page }) => {
                                     <span className="baggage-default-toggle-dot" />
                                   </button>
                                 )}
-                                {result.user_id === user?.id && (
+                                {bp.user_id === user?.id && (
                                   <button
                                     className={`baggage-chip-action ${result.hidden_sections?.includes(`backpack:${bp.id}`) ? "hidden" : "visible"}`}
                                     onClick={(e) => {
@@ -3095,7 +3774,7 @@ const App = ({ page }) => {
                                     {result.hidden_sections?.includes(`backpack:${bp.id}`) ? <LockIcon style={{ marginRight: 0 }} /> : <UnlockIcon style={{ marginRight: 0 }} />}
                                   </button>
                                 )}
-                                {canManageSelectedParticipant && !bp.is_default && (
+                                {bp.user_id === user?.id && !bp.is_default && (
                                   <button
                                     className="baggage-chip-delete"
                                     onClick={(e) => {
@@ -3174,16 +3853,22 @@ const App = ({ page }) => {
 
                 <div className="checklist-card">
                   {(() => {
-                    const isSharedHidden = !isOwnerOrCollaborator && result.hidden_sections?.includes('shared');
-                    const isBackpacksHidden = !isOwnerOrCollaborator && result.hidden_sections?.includes('backpacks');
+                    const isSharedHidden = !isChecklistParticipant && result.hidden_sections?.includes('shared');
+                    const isBackpacksHidden = result.hidden_sections?.includes('backpacks');
 
                     if (activeTab === 'shared' && isSharedHidden) {
                       return <div className="section-restricted-msg"><LockIcon /> {result.user?.username || 'Владелец'} ограничил просмотр общего списка</div>;
                     }
                     if (activeTab !== 'shared') {
-                      const isThisBpIsHidden = !isOwnerOrCollaborator && result.hidden_sections?.includes(`backpack:${activeTab}`);
-                      if (isBackpacksHidden || isThisBpIsHidden) {
-                        return <div className="section-restricted-msg"><LockIcon /> {result.user?.username || 'Владелец'} ограничил просмотр этого рюкзака</div>;
+                      const bp = result.backpacks?.find((entry) => entry.id.toString() === activeTab);
+                      const isThisBpIsHidden = result.hidden_sections?.includes(`backpack:${activeTab}`);
+                      const canViewThisBaggage = Boolean(
+                        !bp
+                          || !isThisBpIsHidden
+                          || bp.user_id === user?.id
+                      );
+                      if ((isBackpacksHidden && result.user_id !== user?.id) || !canViewThisBaggage) {
+                        return <div className="section-restricted-msg"><LockIcon /> {(bp?.user?.username || result.user?.username || 'Владелец')} ограничил просмотр этого багажа</div>;
                       }
                     }
 
@@ -3191,14 +3876,21 @@ const App = ({ page }) => {
                     let targetRemoved = removedItems;
                     let targetChecked = checkedItems;
                     let targetQuantities = normalizeQuantityMap(result.item_quantities || {});
+                    let targetPackedQuantities = normalizePackedQuantityMap(result.packed_quantities || {});
 
                     if (activeTab !== "shared" && result.backpacks) {
                       const bp = result.backpacks.find(b => b.id.toString() === activeTab);
                       if (bp) {
                         targetItems = bp.items || [];
                         targetRemoved = bp.removed_items || [];
-                        targetChecked = (bp.checked_items || []).reduce((acc, cur) => { acc[cur] = true; return acc; }, {});
+                        targetChecked = buildCheckedItemsMap(
+                          bp.items || [],
+                          bp.checked_items || [],
+                          bp.item_quantities || {},
+                          bp.packed_quantities || {}
+                        );
                         targetQuantities = normalizeQuantityMap(bp.item_quantities || {});
+                        targetPackedQuantities = normalizePackedQuantityMap(bp.packed_quantities || {});
                       }
                     }
 
@@ -3226,6 +3918,8 @@ const App = ({ page }) => {
                               {col.map((item) => (
                                 (() => {
                                   const quantity = getItemQuantity(targetQuantities, item);
+                                  const packedQuantity = getPackedQuantity(targetPackedQuantities, item);
+                                  const packedState = `${packedQuantity}/${quantity}`;
                                   return (
                                 <label
                                   key={item}
@@ -3236,71 +3930,43 @@ const App = ({ page }) => {
                                     className="checklist-checkbox"
                                     checked={targetChecked[item] || false}
                                     onChange={() => handleCheck(item)}
-                                    disabled={!isOwnerOrCollaborator}
+                                    disabled={!canEditCurrentSection}
                                   />
                                   <span className="checklist-item-text">{item}</span>
                                   <span className="item-right-controls">
-                                    {(isOwnerOrCollaborator || quantity > 1) && (
-                                      <div
-                                        className="item-quantity-control"
-                                        onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                                        onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                                    {canEditCurrentSection ? (
+                                      <button
+                                        type="button"
+                                        className={`item-progress-badge item-progress-trigger${packedQuantity >= quantity ? " complete" : packedQuantity > 0 ? " partial" : ""}`}
+                                        onClick={(e) => {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          toggleQuantityEditor(item, quantity, packedQuantity);
+                                        }}
                                       >
-                                        {isOwnerOrCollaborator && (
-                                          <button
-                                            type="button"
-                                            className="item-quantity-btn"
-                                            onClick={(e) => {
-                                              e.preventDefault();
-                                              e.stopPropagation();
-                                              handleQuantityChange(item, Math.max(1, quantity - 1));
-                                            }}
-                                            disabled={quantity <= 1}
-                                          >
-                                            −
-                                          </button>
-                                        )}
-                                        <input
-                                          type="number"
-                                          min="1"
-                                          className="item-quantity-input"
-                                          value={quantity}
-                                          readOnly={!isOwnerOrCollaborator}
-                                          onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                                          onChange={(e) => handleQuantityChange(item, e.target.value)}
-                                        />
-                                        {isOwnerOrCollaborator && (
-                                          <button
-                                            type="button"
-                                            className="item-quantity-btn"
-                                            onClick={(e) => {
-                                              e.preventDefault();
-                                              e.stopPropagation();
-                                              handleQuantityChange(item, quantity + 1);
-                                            }}
-                                          >
-                                            +
-                                          </button>
-                                        )}
-                                      </div>
+                                        {packedState}
+                                      </button>
+                                    ) : (
+                                      <span className={`item-progress-badge${packedQuantity >= quantity ? " complete" : packedQuantity > 0 ? " partial" : ""}`}>
+                                        {packedState}
+                                      </span>
                                     )}
-                                    {isOwnerOrCollaborator && (
+                                    {canEditCurrentSection && (
                                       <span className="item-action-group">
-                                        {activeTab === "shared" && result?.backpacks?.some(b => b.user_id === user?.id) && (
+                                        {(activeTab === "shared"
+                                          ? result?.backpacks?.length > 0
+                                          : result?.backpacks?.length > 1) && (
                                           <button
                                             className="checklist-action-btn"
-                                            title="Взять себе (Перенести в рюкзак)"
-                                            onClick={e => { e.preventDefault(); handleMoveToBackpack(item); }}
+                                            title={activeTab === "shared" ? "Разложить по багажу" : "Переложить в другой багаж"}
+                                            onClick={e => {
+                                              e.preventDefault();
+                                              openMoveItemDialog(item, activeTab === "shared" ? null : Number(activeTab));
+                                            }}
                                             tabIndex={-1}
-                                          ><BackpackIcon style={{ width: '16px', height: '16px', marginRight: 0 }} /></button>
-                                        )}
-                                        {activeTab !== "shared" && (
-                                          <button
-                                            className="checklist-action-btn"
-                                            title="Вернуть в общий список"
-                                            onClick={e => { e.preventDefault(); handleMoveToShared(item, activeTab); }}
-                                            tabIndex={-1}
-                                          ><TentIcon style={{ width: '16px', height: '16px', marginRight: 0 }} /></button>
+                                          >
+                                            <BackpackIcon style={{ width: '16px', height: '16px', marginRight: 0 }} />
+                                          </button>
                                         )}
                                         <button
                                           className="checklist-remove-btn"
@@ -3311,6 +3977,93 @@ const App = ({ page }) => {
                                       </span>
                                     )}
                                   </span>
+                                  {canEditCurrentSection && quantityEditor?.item === item && quantityEditor?.sectionKey === activeTab && (
+                                    <div
+                                      className="quantity-editor-popover"
+                                      onClick={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                      }}
+                                      onMouseDown={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                      }}
+                                    >
+                                      <div className="quantity-editor-title">{item}</div>
+                                      <div className="quantity-editor-row">
+                                        <span className="quantity-editor-label">Нужно</span>
+                                        <div className="item-quantity-control quantity-editor-control">
+                                          <button
+                                            type="button"
+                                            className="item-quantity-btn"
+                                            onClick={() => updateQuantityEditorDraft("needed", Math.max(1, quantityEditor.needed - 1))}
+                                            disabled={quantityEditor.needed <= 1}
+                                          >
+                                            −
+                                          </button>
+                                          <input
+                                            type="number"
+                                            min="1"
+                                            className="item-quantity-input"
+                                            value={quantityEditor.needed}
+                                            onChange={(e) => updateQuantityEditorDraft("needed", e.target.value)}
+                                          />
+                                          <button
+                                            type="button"
+                                            className="item-quantity-btn"
+                                            onClick={() => updateQuantityEditorDraft("needed", quantityEditor.needed + 1)}
+                                          >
+                                            +
+                                          </button>
+                                        </div>
+                                      </div>
+                                      <div className="quantity-editor-row">
+                                        <span className="quantity-editor-label">Собрано</span>
+                                        <div className="item-quantity-control quantity-editor-control">
+                                          <button
+                                            type="button"
+                                            className="item-quantity-btn"
+                                            onClick={() => updateQuantityEditorDraft("packed", Math.max(0, quantityEditor.packed - 1))}
+                                            disabled={quantityEditor.packed <= 0}
+                                          >
+                                            −
+                                          </button>
+                                          <input
+                                            type="number"
+                                            min="0"
+                                            max={quantityEditor.needed}
+                                            className="item-quantity-input"
+                                            value={quantityEditor.packed}
+                                            onChange={(e) => updateQuantityEditorDraft("packed", e.target.value)}
+                                          />
+                                          <button
+                                            type="button"
+                                            className="item-quantity-btn"
+                                            onClick={() => updateQuantityEditorDraft("packed", Math.min(quantityEditor.needed, quantityEditor.packed + 1))}
+                                            disabled={quantityEditor.packed >= quantityEditor.needed}
+                                          >
+                                            +
+                                          </button>
+                                        </div>
+                                      </div>
+                                      <div className="quantity-editor-actions">
+                                        <button
+                                          type="button"
+                                          className="quantity-editor-btn"
+                                          onClick={applyQuantityEditor}
+                                        >
+                                          Применить
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="quantity-editor-btn subtle"
+                                          onClick={() => setQuantityEditor(null)}
+                                        >
+                                          Закрыть
+                                        </button>
+                                      </div>
+                                    </div>
+                                  )}
                                 </label>
                                   );
                                 })()
@@ -3323,7 +4076,7 @@ const App = ({ page }) => {
                   })()}
 
                   <div className="checklist-actions">
-                    {isOwnerOrCollaborator && (
+                    {canEditCurrentSection && (
                       <>
                         <button className="action-btn" onClick={resetChecklist}>Сбросить отметки</button>
                         <button className="action-btn" onClick={() => setAddItemMode(v => !v)}>
@@ -3345,7 +4098,7 @@ const App = ({ page }) => {
                         )}
                       </>
                     )}
-                    {isOwnerOrCollaborator && (
+                    {isChecklistParticipant && (
                       <button className="action-btn" onClick={handlePrintChecklist}>
                         {t.print || "Печать"}
                       </button>
@@ -3438,7 +4191,7 @@ const App = ({ page }) => {
                 {/* Itinerary Section */}
                 {result && result.start_date && result.end_date && savedSlug && (
                   <div className="itinerary-wrapper">
-                    {!isOwnerOrCollaborator && result.hidden_sections?.includes('itinerary') ? (
+                    {!isChecklistParticipant && result.hidden_sections?.includes('itinerary') ? (
                       <div className="section-restricted-msg" style={{ background: 'var(--bg-secondary)' }}>
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}><LockIcon /> {result.user?.username || 'Владелец'} ограничил просмотр плана поездки</div>
                       </div>
@@ -3447,7 +4200,7 @@ const App = ({ page }) => {
                         checklist={result}
                         lang={lang}
                         slug={savedSlug}
-                        isOwner={!!isOwnerOrCollaborator}
+                        isOwner={!!isChecklistParticipant}
                         realOwnerId={result.user_id}
                         currentUserId={user?.id}
                         hiddenSections={result.hidden_sections}
@@ -3521,7 +4274,269 @@ const App = ({ page }) => {
         )}
       </div>
 
+      {showPackingModal && (
+        <div className="modal-overlay" onClick={() => {
+          setPackingProfileDraft(normalizePackingProfile(user?.packing_profile || DEFAULT_PACKING_PROFILE));
+          setNewBaseItem("");
+          setShowPackingModal(false);
+        }}>
+          <div className="modal-content packing-settings-modal" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => {
+              setPackingProfileDraft(normalizePackingProfile(user?.packing_profile || DEFAULT_PACKING_PROFILE));
+              setNewBaseItem("");
+              setShowPackingModal(false);
+            }}>&times;</button>
+            <h3>{lang === "en" ? "Packing settings" : "Настройки сборов"}</h3>
+            <p className="packing-settings-copy">
+              {lang === "en"
+                ? "These preferences are applied when a new checklist is generated from the home page."
+                : "Эти параметры будут использоваться при создании нового чеклиста с главной страницы."}
+            </p>
+
+            <div className="packing-settings-group">
+              <span className="packing-settings-label">{lang === "en" ? "Gender" : "Пол"}</span>
+              <div className="packing-settings-segmented">
+                {[
+                  { id: "unspecified", label: lang === "en" ? "Not specified" : "Не указан" },
+                  { id: "male", label: lang === "en" ? "Male" : "Мужской" },
+                  { id: "female", label: lang === "en" ? "Female" : "Женский" },
+                ].map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`packing-settings-pill ${packingProfileDraft.gender === item.id ? "active" : ""}`}
+                    onClick={() => setPackingProfileDraft((prev) => ({ ...prev, gender: item.id }))}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="packing-settings-group">
+              <span className="packing-settings-label">{lang === "en" ? "Extra factors" : "Дополнительные факторы"}</span>
+              <div className="packing-settings-toggles">
+                {[
+                  {
+                    key: "traveling_with_pet",
+                    label: lang === "en" ? "Traveling with pet" : "Путешествую с питомцем",
+                  },
+                  {
+                    key: "has_allergies",
+                    label: lang === "en" ? "There are allergies" : "Есть аллергии",
+                  },
+                ].map((item) => (
+                  <label key={item.key} className={`packing-settings-toggle ${packingProfileDraft[item.key] ? "active" : ""}`}>
+                    <input
+                      type="checkbox"
+                      className="packing-settings-toggle-input"
+                      checked={Boolean(packingProfileDraft[item.key])}
+                      onChange={(e) => setPackingProfileDraft((prev) => ({ ...prev, [item.key]: e.target.checked }))}
+                    />
+                    <span className="packing-settings-toggle-box" aria-hidden="true" />
+                    <span>{item.label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="packing-settings-group">
+              <span className="packing-settings-label">{lang === "en" ? "Always add" : "Всегда добавлять"}</span>
+              <div className="packing-base-items-editor">
+                <div className="packing-base-items-input-row">
+                  <input
+                    type="text"
+                    className="packing-base-items-input"
+                    value={newBaseItem}
+                    onChange={(e) => setNewBaseItem(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        handleAddBaseItem();
+                      }
+                    }}
+                    placeholder={lang === "en" ? "For example: contact lenses" : "Например: линзы"}
+                  />
+                  <button type="button" className="packing-base-items-add" onClick={handleAddBaseItem}>
+                    {lang === "en" ? "Add" : "Добавить"}
+                  </button>
+                </div>
+                {packingProfileDraft.always_include_items.length > 0 ? (
+                  <div className="packing-base-items-list">
+                    {packingProfileDraft.always_include_items.map((item) => (
+                      <button
+                        key={item}
+                        type="button"
+                        className="packing-base-item-chip"
+                        onClick={() => handleRemoveBaseItem(item)}
+                        title={lang === "en" ? "Remove item" : "Убрать вещь"}
+                      >
+                        <span>{item}</span>
+                        <span>×</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="packing-base-items-empty">
+                    {lang === "en" ? "No personal base items yet" : "Пока нет личных базовых вещей"}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="packing-settings-actions">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setPackingProfileDraft(normalizePackingProfile(user?.packing_profile || DEFAULT_PACKING_PROFILE));
+                  setNewBaseItem("");
+                  setShowPackingModal(false);
+                }}
+                disabled={packingProfileSaving}
+              >
+                {lang === "en" ? "Cancel" : "Отмена"}
+              </button>
+              <button type="button" className="btn-primary" onClick={handleSavePackingProfile} disabled={packingProfileSaving}>
+                {packingProfileSaving ? "..." : (lang === "en" ? "Save" : "Сохранить")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {moveItemDialog && (
+        <div className="modal-overlay" onClick={() => !moveItemBusy && setMoveItemDialog(null)}>
+          <div className="modal-content baggage-access-modal item-move-modal" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => !moveItemBusy && setMoveItemDialog(null)}>&times;</button>
+            <h3>{lang === "en" ? "Move item" : "Переложить вещь"}</h3>
+            <p className="invite-modal-desc">
+              {lang === "en"
+                ? `Choose whether to move "${moveItemDialog.item}" to your baggage or assign it to another participant.`
+                : `Выбери, куда переложить «${moveItemDialog.item}»: к себе в другой багаж или другому участнику.`}
+            </p>
+            <div className="baggage-access-list move-destination-groups">
+              {ownMoveDestinations.length > 0 && (
+                <div className="move-destination-section">
+                  <div className="move-destination-title">
+                    {lang === "en" ? "Move to my baggage" : "Переложить к себе"}
+                  </div>
+                  <div className="move-destination-subtitle">
+                    {lang === "en" ? "Another suitcase, backpack or bag of yours." : "В другой свой чемодан, рюкзак или сумку."}
+                  </div>
+                  <div className="baggage-access-list">
+                    {ownMoveDestinations.map((destination) => (
+                      <button
+                        key={destination.id}
+                        type="button"
+                        className={`baggage-access-item move-destination-item ${moveItemDialog.targetBackpackId === destination.id ? "active" : ""}`}
+                        onClick={() => setMoveItemDialog((prev) => ({ ...prev, targetBackpackId: destination.id }))}
+                      >
+                        <span className="baggage-access-check" aria-hidden="true" />
+                        <span className="baggage-access-avatar">
+                          {getInitial(destination.title)}
+                        </span>
+                        <span className="baggage-access-copy">
+                          <strong>{destination.title}</strong>
+                          <span>{destination.subtitle}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {otherMoveDestinations.length > 0 && (
+                <div className="move-destination-section">
+                  <div className="move-destination-title">
+                    {lang === "en" ? "Give to another participant" : "Передать другому участнику"}
+                  </div>
+                  <div className="move-destination-subtitle">
+                    {lang === "en" ? "Move the item straight into someone else's baggage." : "Сразу переложить вещь в багаж другого человека."}
+                  </div>
+                  <div className="baggage-access-list">
+                    {otherMoveDestinations.map((destination) => (
+                      <button
+                        key={destination.id}
+                        type="button"
+                        className={`baggage-access-item move-destination-item ${moveItemDialog.targetBackpackId === destination.id ? "active" : ""}`}
+                        onClick={() => setMoveItemDialog((prev) => ({ ...prev, targetBackpackId: destination.id }))}
+                      >
+                        <span className="baggage-access-check" aria-hidden="true" />
+                        <span className="baggage-access-avatar">
+                          {getInitial(destination.title)}
+                        </span>
+                        <span className="baggage-access-copy">
+                          <strong>{destination.title}</strong>
+                          <span>{destination.subtitle}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {moveDestinations.length === 0 && (
+                <div className="packing-base-items-empty">
+                  {lang === "en" ? "There is nowhere to move this item yet." : "Пока некуда переложить эту вещь."}
+                </div>
+              )}
+            </div>
+            <div className="baggage-access-actions">
+              <button className="action-btn" onClick={() => setMoveItemDialog(null)} disabled={moveItemBusy}>
+                {lang === "en" ? "Cancel" : "Отмена"}
+              </button>
+              <button
+                className="action-btn primary"
+                onClick={handleConfirmMoveItem}
+                disabled={moveItemBusy || !moveItemDialog.targetBackpackId}
+              >
+                {moveItemBusy ? "..." : (lang === "en" ? "Move" : "Переложить")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Модальное окно приглашения */}
+      {accessOwner && (
+        <div className="modal-overlay" onClick={() => setAccessOwner(null)}>
+          <div className="modal-content baggage-access-modal" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close" onClick={() => setAccessOwner(null)}>&times;</button>
+            <h3>Доступ к багажу</h3>
+            <p className="invite-modal-desc">
+              Выбери, кто сможет отмечать, добавлять и удалять вещи во всем разделе «{accessOwner.displayName}».
+            </p>
+            <div className="baggage-access-list">
+              {baggageParticipants
+                .filter((participant) => participant.userId !== accessOwner.userId)
+                .map((participant) => (
+                  <label key={participant.userId} className={`baggage-access-item ${accessEditorIds.includes(participant.userId) ? "active" : ""}`}>
+                    <input
+                      type="checkbox"
+                      className="baggage-access-input"
+                      checked={accessEditorIds.includes(participant.userId)}
+                      onChange={() => handleToggleBaggageEditor(participant.userId)}
+                    />
+                    <span className="baggage-access-check" aria-hidden="true" />
+                    <span className="baggage-access-avatar">
+                      {getInitial(participant.isCurrentUser ? "Я" : participant.username)}
+                    </span>
+                    <span className="baggage-access-copy">
+                      <strong>{participant.isCurrentUser ? "Я" : participant.username}</strong>
+                      <span>{participant.baggage.length} багажа</span>
+                    </span>
+                  </label>
+                ))}
+            </div>
+            <div className="baggage-access-actions">
+              <button className="action-btn" onClick={() => setAccessOwner(null)} disabled={baggageBusy}>Закрыть</button>
+              <button className="action-btn primary" onClick={handleSaveBaggageAccess} disabled={baggageBusy}>Сохранить доступ</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showInviteModal && (
         <div className="modal-overlay" onClick={() => setShowInviteModal(false)}>
           <div className="modal-content" onClick={e => e.stopPropagation()}>

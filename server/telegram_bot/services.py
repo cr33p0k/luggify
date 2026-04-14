@@ -10,6 +10,12 @@ from database import SessionLocal
 from telegram_link import TelegramLinkTokenError, decode_telegram_link_token
 
 CHECKLIST_BUTTON_PAGE_SIZE = 8
+DEFAULT_CHECKLIST_INTERACTION_MODE = "pack"
+CHECKLIST_INTERACTION_MODES = {
+    "pack": "+1",
+    "unpack": "-1",
+    "complete": "✓ всё",
+}
 
 
 def _merge_checklists(*collections):
@@ -60,10 +66,40 @@ def _pick_primary_checklist(checklists):
     return checklists[0]
 
 
-def _remaining_items(checklist):
-    checked = set(checklist.checked_items or [])
-    removed = set(checklist.removed_items or [])
-    return [item for item in (checklist.items or []) if item not in checked and item not in removed]
+def _get_section_visible_items(section: dict) -> list[str]:
+    removed = {_normalize_text(item) for item in section.get("removed_items") or []}
+    return [
+        item
+        for item in section.get("items") or []
+        if _normalize_text(item) not in removed
+    ]
+
+
+def _get_section_progress(section: dict) -> dict:
+    quantity_map = section.get("item_quantities") or {}
+    packed_map = section.get("packed_quantities") or {}
+    visible_items = _get_section_visible_items(section)
+    checked_count = sum(
+        min(_get_item_packed_quantity(packed_map, item), _get_item_quantity(quantity_map, item))
+        for item in visible_items
+    )
+    total_count = sum(_get_item_quantity(quantity_map, item) for item in visible_items)
+    remaining_items = [
+        item
+        for item in visible_items
+        if _get_item_packed_quantity(packed_map, item) < _get_item_quantity(quantity_map, item)
+    ]
+    remaining_count = sum(
+        max(_get_item_quantity(quantity_map, item) - _get_item_packed_quantity(packed_map, item), 0)
+        for item in remaining_items
+    )
+    return {
+        "visible_items": visible_items,
+        "checked_count": checked_count,
+        "total_count": total_count,
+        "remaining_items": remaining_items,
+        "remaining_count": remaining_count,
+    }
 
 
 def _format_dates(checklist):
@@ -325,24 +361,28 @@ def format_checklist_title(checklist):
     return checklist.city
 
 
-def _encode_section_key(backpack_id: int | None = None) -> str:
-    return "s" if backpack_id is None else f"b{backpack_id}"
+def _encode_section_key(backpack_id: int) -> str:
+    return f"b{backpack_id}"
 
 
 def _normalize_section_key(section_key: str | None) -> str:
-    if not section_key or section_key in {"shared", "s"}:
-        return "s"
     if isinstance(section_key, str):
         if section_key.startswith("bp:"):
             suffix = section_key.split(":", 1)[1]
-            return f"b{suffix}" if suffix.isdigit() else "s"
+            return f"b{suffix}" if suffix.isdigit() else ""
         if re.fullmatch(r"b\d+", section_key):
             return section_key
-    return "s"
+    return ""
 
 
 def _normalize_items_list(items):
     return list(items or [])
+
+
+def _normalize_interaction_mode(mode: str | None) -> str:
+    if mode in CHECKLIST_INTERACTION_MODES:
+        return mode
+    return DEFAULT_CHECKLIST_INTERACTION_MODE
 
 
 def _normalize_quantity_map(raw_map):
@@ -359,13 +399,54 @@ def _normalize_quantity_map(raw_map):
     return normalized
 
 
+def _normalize_packed_quantity_map(raw_map):
+    normalized = {}
+    for key, value in (raw_map or {}).items():
+        normalized_key = _normalize_text(str(key))
+        if not normalized_key:
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed <= 0:
+            continue
+        normalized[normalized_key] = parsed
+    return normalized
+
+
 def _get_item_quantity(quantity_map, item_name: str) -> int:
     normalized_key = _normalize_text(item_name)
     return _normalize_quantity_map(quantity_map).get(normalized_key, 1)
 
 
-def _format_item_with_quantity(item_name: str, quantity_map) -> str:
+def _get_item_packed_quantity(quantity_map, item_name: str) -> int:
+    normalized_key = _normalize_text(item_name)
+    return _normalize_packed_quantity_map(quantity_map).get(normalized_key, 0)
+
+
+def _hydrate_packed_quantities(items, checked_items, quantity_map, packed_map):
+    hydrated = _normalize_packed_quantity_map(packed_map)
+    for item in checked_items or []:
+        hydrated[_normalize_text(item)] = max(
+            _get_item_packed_quantity(hydrated, item),
+            _get_item_quantity(quantity_map, item),
+        )
+    for item in items or []:
+        normalized = _normalize_text(item)
+        hydrated[normalized] = min(
+            _get_item_packed_quantity(hydrated, item),
+            _get_item_quantity(quantity_map, item),
+        )
+        if hydrated[normalized] <= 0:
+            hydrated.pop(normalized, None)
+    return hydrated
+
+
+def _format_item_with_quantity(item_name: str, quantity_map, packed_map=None) -> str:
     quantity = _get_item_quantity(quantity_map, item_name)
+    if packed_map is not None:
+        return f"{item_name} {_get_item_packed_quantity(packed_map, item_name)}/{quantity}"
     return f"{item_name} ×{quantity}" if quantity > 1 else item_name
 
 
@@ -381,19 +462,17 @@ def _build_baggage_label(backpack, actor_user_id: int | None = None) -> str:
     return f"{username} · {baggage_name}"
 
 
-def _build_checklist_sections(checklist, actor_user_id: int | None = None) -> list[dict]:
-    sections = [
-        {
-            "key": "s",
-            "label": "Общие вещи",
-            "items": _normalize_items_list(checklist.items),
-            "checked_items": _normalize_items_list(checklist.checked_items),
-            "removed_items": _normalize_items_list(checklist.removed_items),
-            "item_quantities": _normalize_quantity_map(getattr(checklist, "item_quantities", None)),
-        }
-    ]
+def _build_checklist_sections(
+    checklist,
+    actor_user_id: int | None = None,
+    own_only: bool = False,
+) -> list[dict]:
+    backpacks = list(checklist.backpacks or [])
+    if own_only and actor_user_id is not None:
+        backpacks = [backpack for backpack in backpacks if backpack.user_id == actor_user_id]
 
-    for backpack in (checklist.backpacks or []):
+    sections = []
+    for backpack in backpacks:
         sections.append(
             {
                 "key": _encode_section_key(backpack.id),
@@ -402,6 +481,12 @@ def _build_checklist_sections(checklist, actor_user_id: int | None = None) -> li
                 "checked_items": _normalize_items_list(backpack.checked_items),
                 "removed_items": _normalize_items_list(backpack.removed_items),
                 "item_quantities": _normalize_quantity_map(getattr(backpack, "item_quantities", None)),
+                "packed_quantities": _hydrate_packed_quantities(
+                    _normalize_items_list(backpack.items),
+                    _normalize_items_list(backpack.checked_items),
+                    _normalize_quantity_map(getattr(backpack, "item_quantities", None)),
+                    getattr(backpack, "packed_quantities", None),
+                ),
             }
         )
     return sections
@@ -412,28 +497,29 @@ def _build_interactive_checklist_view_data(
     actor_user_id: int | None = None,
     section_key: str | None = None,
     page: int = 0,
+    interaction_mode: str | None = None,
 ) -> dict:
     sections = _build_checklist_sections(checklist, actor_user_id)
+    if not sections:
+        return {
+            "ok": False,
+            "message": "В этой поездке пока нет рюкзака. Откройте приложение и добавьте багаж, чтобы бот мог работать с чеклистом.",
+        }
+
     selected_key = _normalize_section_key(section_key)
+    safe_mode = _normalize_interaction_mode(interaction_mode)
     selected_section = next((section for section in sections if section["key"] == selected_key), None)
     if not selected_section:
         selected_section = sections[0]
         selected_key = selected_section["key"]
 
-    removed_normalized = {_normalize_text(item) for item in selected_section["removed_items"]}
-    checked_normalized = {_normalize_text(item) for item in selected_section["checked_items"]}
     quantity_map = selected_section.get("item_quantities") or {}
-    visible_items = [
-        item for item in selected_section["items"]
-        if _normalize_text(item) not in removed_normalized
-    ]
-    checked_count = sum(
-        _get_item_quantity(quantity_map, item)
-        for item in visible_items
-        if _normalize_text(item) in checked_normalized
-    )
-    total_count = sum(_get_item_quantity(quantity_map, item) for item in visible_items)
-    page_count = max(1, (total_count + CHECKLIST_BUTTON_PAGE_SIZE - 1) // CHECKLIST_BUTTON_PAGE_SIZE)
+    packed_map = selected_section.get("packed_quantities") or {}
+    progress = _get_section_progress(selected_section)
+    visible_items = progress["visible_items"]
+    checked_count = progress["checked_count"]
+    total_count = progress["total_count"]
+    page_count = max(1, (len(visible_items) + CHECKLIST_BUTTON_PAGE_SIZE - 1) // CHECKLIST_BUTTON_PAGE_SIZE)
     safe_page = min(max(page, 0), page_count - 1)
     start = safe_page * CHECKLIST_BUTTON_PAGE_SIZE
     page_items = visible_items[start:start + CHECKLIST_BUTTON_PAGE_SIZE]
@@ -445,6 +531,8 @@ def _build_interactive_checklist_view_data(
         "title": format_checklist_title(checklist),
         "section_key": selected_key,
         "section_label": selected_section["label"],
+        "interaction_mode": safe_mode,
+        "interaction_mode_label": CHECKLIST_INTERACTION_MODES[safe_mode],
         "sections": [
             {
                 "key": section["key"],
@@ -458,9 +546,11 @@ def _build_interactive_checklist_view_data(
         "items": [
             {
                 "name": item,
-                "label": _format_item_with_quantity(item, quantity_map),
+                "label": _format_item_with_quantity(item, quantity_map, packed_map),
                 "quantity": _get_item_quantity(quantity_map, item),
-                "checked": _normalize_text(item) in checked_normalized,
+                "packed": _get_item_packed_quantity(packed_map, item),
+                "partial": 0 < _get_item_packed_quantity(packed_map, item) < _get_item_quantity(quantity_map, item),
+                "checked": _get_item_packed_quantity(packed_map, item) >= _get_item_quantity(quantity_map, item),
             }
             for item in page_items
         ],
@@ -472,8 +562,9 @@ def _build_interactive_checklist_view_data(
             f"{format_checklist_title(checklist)}\n"
             f"Раздел: {selected_section['label']}\n"
             f"Собрано: {checked_count}/{total_count}\n"
+            f"Режим кнопок: {CHECKLIST_INTERACTION_MODES[safe_mode]}\n"
             f"Осталось: {max(total_count - checked_count, 0)}"
-            + ("\n\nНажмите на вещь ниже, чтобы отметить или снять отметку." if total_count else "\n\nВ этом разделе пока пусто.")
+            + ("\n\nКнопки ниже работают по выбранному режиму." if total_count else "\n\nВ этом разделе пока пусто.")
         ),
     }
 
@@ -484,6 +575,7 @@ async def build_interactive_checklist_view(
     checklist_id: int | None = None,
     section_key: str | None = None,
     page: int = 0,
+    interaction_mode: str | None = None,
 ) -> dict:
     async with SessionLocal() as db:
         current_user = await crud.get_user_by_tg_id(db, str(tg_user.id))
@@ -505,6 +597,7 @@ async def build_interactive_checklist_view(
             actor_user_id=current_user.id if current_user else None,
             section_key=section_key,
             page=page,
+            interaction_mode=interaction_mode,
         )
 
 
@@ -514,6 +607,7 @@ async def toggle_interactive_checklist_item(
     section_key: str,
     page: int,
     item_index: int,
+    interaction_mode: str | None = None,
 ) -> dict:
     async with SessionLocal() as db:
         current_user = await crud.get_user_by_tg_id(db, str(tg_user.id))
@@ -525,12 +619,32 @@ async def toggle_interactive_checklist_item(
             }
 
         actor_user_id = current_user.id if current_user else None
+        if not _normalize_section_key(section_key):
+            updated_view = _build_interactive_checklist_view_data(
+                checklist,
+                actor_user_id=actor_user_id,
+                section_key=None,
+                page=0,
+                interaction_mode=interaction_mode,
+            )
+            if not updated_view["ok"]:
+                return updated_view
+            return {
+                "ok": True,
+                "view": updated_view,
+                "message": "Открыл актуальный рюкзак",
+            }
+
         view = _build_interactive_checklist_view_data(
             checklist,
             actor_user_id=actor_user_id,
             section_key=section_key,
             page=page,
+            interaction_mode=interaction_mode,
         )
+        if not view["ok"]:
+            return view
+
         if item_index < 0 or item_index >= len(view["items"]):
             return {
                 "ok": False,
@@ -539,35 +653,57 @@ async def toggle_interactive_checklist_item(
 
         item_name = view["items"][item_index]["name"]
         normalized_item = _normalize_text(item_name)
+        selected_mode = _normalize_interaction_mode(interaction_mode)
 
-        if view["section_key"] == "s":
-            checked_items = list(checklist.checked_items or [])
-            removed_items = [item for item in (checklist.removed_items or []) if _normalize_text(item) != normalized_item]
-            is_checked = any(_normalize_text(item) == normalized_item for item in checked_items)
-            if is_checked:
-                checked_items = [item for item in checked_items if _normalize_text(item) != normalized_item]
-            else:
-                checked_items.append(item_name)
-            checklist.checked_items = checked_items
-            checklist.removed_items = removed_items
+        def _compute_next_packed(current_packed: int, needed: int) -> int:
+            if selected_mode == "unpack":
+                return max(0, current_packed - 1)
+            if selected_mode == "complete":
+                return 0 if current_packed >= needed else needed
+            return min(needed, current_packed + 1)
+
+        def _build_feedback(previous_packed: int, next_packed: int, needed: int) -> str:
+            progress = f"{next_packed}/{needed}"
+            if selected_mode == "unpack":
+                if previous_packed <= 0:
+                    return f"{item_name} уже пусто"
+                return f"{item_name}: {progress}"
+            if selected_mode == "complete":
+                return f"{item_name}: {progress}"
+            if previous_packed >= needed:
+                return f"{item_name} уже собрано полностью"
+            return f"{item_name}: {progress}"
+
+        backpack_id = int(view["section_key"][1:])
+        backpack = next((bp for bp in (checklist.backpacks or []) if bp.id == backpack_id), None)
+        if not backpack:
+            return {
+                "ok": False,
+                "message": "Не удалось найти нужный рюкзак. Откройте чеклист заново.",
+            }
+
+        quantity_map = _normalize_quantity_map(getattr(backpack, "item_quantities", None))
+        packed_map = _hydrate_packed_quantities(
+            _normalize_items_list(backpack.items),
+            _normalize_items_list(backpack.checked_items),
+            quantity_map,
+            getattr(backpack, "packed_quantities", None),
+        )
+        removed_items = [item for item in (backpack.removed_items or []) if _normalize_text(item) != normalized_item]
+        needed_quantity = _get_item_quantity(quantity_map, item_name)
+        previous_packed = _get_item_packed_quantity(packed_map, item_name)
+        next_packed = _compute_next_packed(previous_packed, needed_quantity)
+        if next_packed > 0:
+            packed_map[normalized_item] = next_packed
         else:
-            backpack_id = int(view["section_key"][1:])
-            backpack = next((bp for bp in (checklist.backpacks or []) if bp.id == backpack_id), None)
-            if not backpack:
-                return {
-                    "ok": False,
-                    "message": "Не удалось найти нужный рюкзак. Откройте чеклист заново.",
-                }
-
-            checked_items = list(backpack.checked_items or [])
-            removed_items = [item for item in (backpack.removed_items or []) if _normalize_text(item) != normalized_item]
-            is_checked = any(_normalize_text(item) == normalized_item for item in checked_items)
-            if is_checked:
-                checked_items = [item for item in checked_items if _normalize_text(item) != normalized_item]
-            else:
-                checked_items.append(item_name)
-            backpack.checked_items = checked_items
-            backpack.removed_items = removed_items
+            packed_map.pop(normalized_item, None)
+        backpack.packed_quantities = packed_map
+        backpack.checked_items = [
+            item for item in (backpack.items or [])
+            if _get_item_packed_quantity(packed_map, item) >= _get_item_quantity(quantity_map, item)
+        ]
+        backpack.removed_items = removed_items
+        feedback_message = _build_feedback(previous_packed, next_packed, needed_quantity)
 
         await db.commit()
         updated_checklist = await crud.get_checklist_by_id(db, checklist.id)
@@ -576,27 +712,43 @@ async def toggle_interactive_checklist_item(
             actor_user_id=actor_user_id,
             section_key=view["section_key"],
             page=page,
+            interaction_mode=selected_mode,
         )
 
         return {
             "ok": True,
             "view": updated_view,
-            "message": "Отметил" if not view["items"][item_index]["checked"] else "Снял отметку",
+            "message": feedback_message,
         }
 
 
 async def build_trip_overview_text(tg_user: TelegramUser, selected_slug: str = None) -> str:
-    checklist = await get_selected_or_primary_checklist(tg_user, selected_slug)
-    if not checklist:
+    async with SessionLocal() as db:
+        current_user = await crud.get_user_by_tg_id(db, str(tg_user.id))
+        if selected_slug:
+            checklist = await _get_checklist_by_slug_with_session(db, tg_user, selected_slug)
+        else:
+            checklist = await _get_primary_checklist_with_session(db, tg_user)
+
+        if not checklist:
+            return (
+                "У вас пока нет поездок в Luggify.\n\n"
+                "Откройте mini app, создайте первую поездку, и я смогу подсказывать по ней."
+            )
+
+        actor_user_id = current_user.id if current_user else None
+        sections = _build_checklist_sections(checklist, actor_user_id, own_only=actor_user_id is not None)
+
+    if not sections:
         return (
-            "У вас пока нет поездок в Luggify.\n\n"
-            "Откройте mini app, создайте первую поездку, и я смогу подсказывать по ней."
+            f"Поездка: {format_checklist_title(checklist)}\n\n"
+            "В этой поездке пока нет рюкзака, поэтому боту нечего считать."
         )
 
-    remaining = _remaining_items(checklist)
-    quantity_map = _normalize_quantity_map(getattr(checklist, "item_quantities", None))
-    total_items = sum(_get_item_quantity(quantity_map, item) for item in (checklist.items or []))
-    checked_items = total_items - sum(_get_item_quantity(quantity_map, item) for item in remaining)
+    progress_items = [_get_section_progress(section) for section in sections]
+    total_items = sum(progress["total_count"] for progress in progress_items)
+    checked_items = sum(progress["checked_count"] for progress in progress_items)
+    remaining_items = sum(progress["remaining_count"] for progress in progress_items)
     today = date.today()
 
     if checklist.start_date and checklist.end_date and checklist.start_date <= today <= checklist.end_date:
@@ -611,23 +763,49 @@ async def build_trip_overview_text(tg_user: TelegramUser, selected_slug: str = N
         f"Город: {checklist.city}\n"
         f"Даты: {_format_dates(checklist)}\n"
         f"Собрано: {checked_items}/{total_items}\n"
-        f"Осталось вещей: {len(remaining)}"
+        f"Осталось вещей: {remaining_items}"
     )
 
 
 async def build_remaining_items_text(tg_user: TelegramUser, selected_slug: str = None) -> str:
-    checklist = await get_selected_or_primary_checklist(tg_user, selected_slug)
-    if not checklist:
-        return "Пока не вижу поездок. Сначала создайте чеклист, и я подскажу, что осталось собрать."
+    async with SessionLocal() as db:
+        current_user = await crud.get_user_by_tg_id(db, str(tg_user.id))
+        if selected_slug:
+            checklist = await _get_checklist_by_slug_with_session(db, tg_user, selected_slug)
+        else:
+            checklist = await _get_primary_checklist_with_session(db, tg_user)
 
-    remaining = _remaining_items(checklist)
-    if not remaining:
+        if not checklist:
+            return "Пока не вижу поездок. Сначала создайте чеклист, и я подскажу, что осталось собрать."
+
+        actor_user_id = current_user.id if current_user else None
+        sections = _build_checklist_sections(checklist, actor_user_id, own_only=actor_user_id is not None)
+
+    if not sections:
+        return f"По поездке в {checklist.city} пока нет рюкзака, поэтому боту нечего проверять."
+
+    remaining_rows = []
+    total_items = 0
+    remaining_total = 0
+    show_section_labels = len(sections) > 1
+
+    for section in sections:
+        progress = _get_section_progress(section)
+        total_items += progress["total_count"]
+        remaining_total += progress["remaining_count"]
+        quantity_map = section.get("item_quantities") or {}
+        packed_map = section.get("packed_quantities") or {}
+        for item in progress["remaining_items"]:
+            label = _format_item_with_quantity(item, quantity_map, packed_map)
+            remaining_rows.append(f"• {section['label']}: {label}" if show_section_labels else f"• {label}")
+
+    if total_items == 0:
+        return f"По поездке в {checklist.city} в твоём багаже пока нет вещей."
+    if not remaining_rows:
         return f"По поездке в {checklist.city} у вас всё отмечено. Похоже, вы отлично собраны."
 
-    quantity_map = _normalize_quantity_map(getattr(checklist, "item_quantities", None))
-    preview = "\n".join(f"• {_format_item_with_quantity(item, quantity_map)}" for item in remaining[:10])
-    suffix = "\n…" if len(remaining) > 10 else ""
-    remaining_total = sum(_get_item_quantity(quantity_map, item) for item in remaining)
+    preview = "\n".join(remaining_rows[:10])
+    suffix = "\n…" if len(remaining_rows) > 10 else ""
     return f"По поездке в {checklist.city} ещё осталось {remaining_total} вещей:\n{preview}{suffix}"
 
 

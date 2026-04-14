@@ -32,6 +32,7 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_AUTH_MAX_AGE: ${TELEGRAM_AUTH_MAX_AGE:-86400}
       ALLOW_INSECURE_TELEGRAM_AUTH: ${ALLOW_INSECURE_TELEGRAM_AUTH:-false}
+      RAPIDAPI_KEY: ${RAPIDAPI_KEY:-}
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
       db:
@@ -49,7 +50,8 @@ services:
       - ./client:/app
       - /app/node_modules
     environment:
-      VITE_API_URL: http://localhost:8000
+      VITE_API_URL: /api
+      VITE_PROXY_API_URL: http://server:8000
       VITE_TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-luggify_bot}
     depends_on:
       - server
@@ -68,6 +70,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://luggify:luggify@db:5432/luggify_db
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_MINI_APP_URL: ${TELEGRAM_MINI_APP_URL:-}
+      WEB_APP_URL: ${WEB_APP_URL:-}
       TELEGRAM_AUTH_MAX_AGE: ${TELEGRAM_AUTH_MAX_AGE:-86400}
       ALLOW_INSECURE_TELEGRAM_AUTH: ${ALLOW_INSECURE_TELEGRAM_AUTH:-false}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}

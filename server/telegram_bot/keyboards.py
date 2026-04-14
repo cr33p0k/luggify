@@ -4,6 +4,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from telegram_bot.config import TelegramBotSettings
 
 
+MINI_APP_BUTTON_TEXT = "Open Luggify"
+
+
 def build_main_menu(settings: TelegramBotSettings) -> ReplyKeyboardMarkup:
     keyboard = [
         [
@@ -20,11 +23,6 @@ def build_main_menu(settings: TelegramBotSettings) -> ReplyKeyboardMarkup:
         ],
     ]
 
-    if settings.mini_app_url:
-        keyboard.append(
-            [KeyboardButton(text="Открыть mini app", web_app=WebAppInfo(url=settings.mini_app_url))]
-        )
-
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
         resize_keyboard=True,
@@ -35,16 +33,26 @@ def build_main_menu(settings: TelegramBotSettings) -> ReplyKeyboardMarkup:
 def build_ai_menu(settings: TelegramBotSettings) -> ReplyKeyboardMarkup:
     keyboard = [[KeyboardButton(text="Стоп AI")]]
     keyboard.append([KeyboardButton(text="Чеклист"), KeyboardButton(text="Выбрать поездку")])
-    if settings.mini_app_url:
-        keyboard.append(
-            [KeyboardButton(text="Открыть mini app", web_app=WebAppInfo(url=settings.mini_app_url))]
-        )
 
     return ReplyKeyboardMarkup(
         keyboard=keyboard,
         resize_keyboard=True,
         input_field_placeholder="Напишите вопрос про поездку",
     )
+
+
+def build_open_app_keyboard(settings: TelegramBotSettings) -> InlineKeyboardMarkup | None:
+    if not settings.mini_app_url:
+        return None
+
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text=MINI_APP_BUTTON_TEXT,
+            web_app=WebAppInfo(url=settings.mini_app_url),
+        )
+    )
+    return builder.as_markup()
 
 
 def build_trip_picker(
@@ -92,24 +100,43 @@ def build_checklist_keyboard(view: dict) -> InlineKeyboardMarkup:
     checklist_id = view["checklist_id"]
     section_key = view["section_key"]
     page = view["page"]
+    interaction_mode = view.get("interaction_mode", "pack")
 
     section_buttons = []
     for section in view["sections"]:
         section_buttons.append(
             InlineKeyboardButton(
                 text=_trim_button_label(section["label"], 18),
-                callback_data=f"cl:view:{checklist_id}:{section['key']}:{0 if not section['active'] else page}",
+                callback_data=f"cl:view:{checklist_id}:{section['key']}:{0 if not section['active'] else page}:{interaction_mode}",
                 style="primary" if section["active"] else None,
             )
         )
     if section_buttons:
         builder.row(*section_buttons, width=3)
 
+    builder.row(
+        InlineKeyboardButton(
+            text="−1",
+            callback_data=f"cl:mode:{checklist_id}:{section_key}:{page}:unpack",
+            style="primary" if interaction_mode == "unpack" else None,
+        ),
+        InlineKeyboardButton(
+            text="+1",
+            callback_data=f"cl:mode:{checklist_id}:{section_key}:{page}:pack",
+            style="primary" if interaction_mode == "pack" else None,
+        ),
+        InlineKeyboardButton(
+            text="✓ всё",
+            callback_data=f"cl:mode:{checklist_id}:{section_key}:{page}:complete",
+            style="primary" if interaction_mode == "complete" else None,
+        ),
+    )
+
     item_buttons = [
         InlineKeyboardButton(
             text=_trim_button_label(("✓ " if item["checked"] else "") + item.get("label", item["name"]), 30),
-            callback_data=f"cl:toggle:{checklist_id}:{section_key}:{page}:{item_index}",
-            style="success" if item["checked"] else None,
+            callback_data=f"cl:toggle:{checklist_id}:{section_key}:{page}:{interaction_mode}:{item_index}",
+            style="success" if item["checked"] else "primary" if item.get("partial") else None,
         )
         for item_index, item in enumerate(view["items"])
     ]
@@ -122,7 +149,7 @@ def build_checklist_keyboard(view: dict) -> InlineKeyboardMarkup:
             nav_row.append(
                 InlineKeyboardButton(
                     text="‹ Назад",
-                    callback_data=f"cl:view:{checklist_id}:{section_key}:{view['page'] - 1}",
+                    callback_data=f"cl:view:{checklist_id}:{section_key}:{view['page'] - 1}:{interaction_mode}",
                 )
             )
         nav_row.append(
@@ -135,7 +162,7 @@ def build_checklist_keyboard(view: dict) -> InlineKeyboardMarkup:
             nav_row.append(
                 InlineKeyboardButton(
                     text="Вперёд ›",
-                    callback_data=f"cl:view:{checklist_id}:{section_key}:{view['page'] + 1}",
+                    callback_data=f"cl:view:{checklist_id}:{section_key}:{view['page'] + 1}:{interaction_mode}",
                 )
             )
         builder.row(*nav_row)
@@ -143,7 +170,7 @@ def build_checklist_keyboard(view: dict) -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(
             text="Обновить",
-            callback_data=f"cl:view:{checklist_id}:{section_key}:{page}",
+            callback_data=f"cl:view:{checklist_id}:{section_key}:{page}:{interaction_mode}",
         )
     )
     return builder.as_markup()

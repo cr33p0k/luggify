@@ -22,12 +22,20 @@
 ```env
 TELEGRAM_BOT_TOKEN=your_bot_token
 GEMINI_API_KEY=your_gemini_api_key
-TELEGRAM_MINI_APP_URL=https://your-public-mini-app-url
+WEB_APP_URL=https://your-public-web-url
+VITE_API_URL=/api
+VITE_PROXY_API_URL=http://server:8000
+# Необязательно: если нужно переопределить URL mini app вручную.
+TELEGRAM_MINI_APP_URL=
 TELEGRAM_AUTH_MAX_AGE=86400
 ALLOW_INSECURE_TELEGRAM_AUTH=false
 ```
 
-`TELEGRAM_MINI_APP_URL` можно временно не задавать. Тогда кнопка открытия mini app просто не появится.
+Mini app теперь живёт в основном фронтенде на `/tma`. Обычно достаточно указать `WEB_APP_URL`, например `https://luggify.example.com`; бот сам откроет `https://luggify.example.com/tma`.
+
+`TELEGRAM_MINI_APP_URL` нужен только как ручное переопределение. Даже если указать его без `/tma`, бот всё равно добавит `/tma`, чтобы случайно не открыть старый экран.
+
+Если домена пока нет, можно использовать временный tunnel. В локальном Docker-режиме `VITE_API_URL=/api`, поэтому frontend сам прокинет API-запросы через Vite proxy в backend. Для Docker target должен быть `VITE_PROXY_API_URL=http://server:8000`.
 
 ## Как подключить именно `@luggify_bot`
 
@@ -45,7 +53,23 @@ TELEGRAM_BOT_TOKEN=123456:your_real_token
 GEMINI_API_KEY=your_gemini_api_key
 ```
 
-5. Если mini app пока не нужен, `TELEGRAM_MINI_APP_URL` можно оставить пустым.
+5. Для mini app добавь публичный URL основного фронтенда:
+
+```env
+WEB_APP_URL=https://your-public-web-url
+VITE_API_URL=/api
+VITE_PROXY_API_URL=http://server:8000
+```
+
+Старый отдельный фронт `client-tg` больше не используется.
+
+Если домена нет, возьми временный HTTPS-адрес через tunnel:
+
+```bash
+cloudflared tunnel --url http://localhost:5173
+```
+
+Скопируй выданный `https://...trycloudflare.com` в `WEB_APP_URL`, затем перезапусти `telegram-bot`.
 
 ## Как запустить через Docker
 
@@ -137,3 +161,4 @@ docker compose exec db psql -U luggify -d luggify_db -c "update users set tg_id=
 
 - Сам бот через long polling может работать локально без публичного сервера.
 - Mini app для Telegram обычно требует публичный `https` URL, поэтому для кнопки mini app на этапе локальной разработки удобнее использовать staging или tunnel.
+- После изменения `WEB_APP_URL` или `TELEGRAM_MINI_APP_URL` перезапусти `telegram-bot`, потому что нативная кнопка Telegram выставляется при старте бота.

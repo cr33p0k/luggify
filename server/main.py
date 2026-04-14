@@ -1,7 +1,12 @@
 import os
 import re
 from datetime import datetime, timedelta, date
-from urllib.parse import quote as url_quote
+from urllib.parse import quote as url_quote, urlparse, parse_qs
+
+from env_utils import load_app_env
+
+load_app_env()
+
 import httpx
 from fastapi import FastAPI, Query, Depends, HTTPException, Body, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,7 +14,6 @@ from fastapi.responses import Response
 import time
 import asyncio
 from pydantic import BaseModel
-from dotenv import load_dotenv
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
@@ -23,8 +27,6 @@ from auth import (
 from telegram_auth import TelegramAuthError, parse_telegram_auth_payload
 from telegram_link import create_telegram_link_token
 
-load_dotenv()
-
 
 def _parse_csv_env(name: str, defaults: list[str]) -> list[str]:
     raw = os.getenv(name, "")
@@ -36,6 +38,7 @@ def _parse_csv_env(name: str, defaults: list[str]) -> list[str]:
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HISTORICAL_URL = "https://archive-api.open-meteo.com/v1/archive"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+LOCATION_COUNTRY_CACHE: dict[str, Optional[str]] = {}
 from translations import WMO_CODES, get_item, get_category_map
 
 default_cors_origins = [
@@ -95,12 +98,225 @@ def build_trip_review_payload(review: models.TripReview) -> dict:
     }
 
 
+def _split_location_segments(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [segment.strip() for segment in value.split("+") if segment.strip()]
+
+
+def _extract_city_and_country(segment: str) -> tuple[Optional[str], Optional[str]]:
+    parts = [part.strip() for part in segment.split(",") if part.strip()]
+    if not parts:
+        return None, None
+    city = parts[0]
+    country = parts[-1] if len(parts) > 1 else None
+    if country == city:
+        country = None
+    return city, country.casefold() if country else None
+
+
+async def _resolve_country_for_city(city_name: str, client: httpx.AsyncClient) -> Optional[str]:
+    normalized_city = re.sub(r"\s+", " ", city_name or "").strip()
+    if not normalized_city:
+        return None
+
+    cache_key = normalized_city.casefold()
+    if cache_key in LOCATION_COUNTRY_CACHE:
+        return LOCATION_COUNTRY_CACHE[cache_key]
+
+    headers = {"User-Agent": "Luggify/1.0"}
+    try:
+        resp = await client.get(
+            NOMINATIM_URL,
+            params={
+                "q": normalized_city,
+                "format": "json",
+                "limit": 1,
+                "addressdetails": 1,
+            },
+            headers=headers,
+            timeout=10.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data:
+                country = (data[0].get("address", {}) or {}).get("country")
+                LOCATION_COUNTRY_CACHE[cache_key] = country.casefold() if country else None
+                return LOCATION_COUNTRY_CACHE[cache_key]
+    except Exception:
+        pass
+
+    LOCATION_COUNTRY_CACHE[cache_key] = None
+    return None
+
+
+async def collect_location_stats(checklists) -> tuple[set[str], set[str]]:
+    cities: set[str] = set()
+    countries: set[str] = set()
+    unresolved_cities: set[str] = set()
+
+    for checklist in checklists:
+        for segment in _split_location_segments(getattr(checklist, "city", None)):
+            city, country = _extract_city_and_country(segment)
+            if city:
+                cities.add(city.casefold())
+            if country:
+                countries.add(country)
+            elif city:
+                unresolved_cities.add(city)
+
+    if unresolved_cities:
+        async with httpx.AsyncClient() as client:
+            resolved = await asyncio.gather(
+                *[_resolve_country_for_city(city, client) for city in sorted(unresolved_cities)]
+            )
+        for country in resolved:
+            if country:
+                countries.add(country)
+
+    return cities, countries
+
+
+def _safe_positive_int(value, fallback: int = 1) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def count_total_items_for_user(checklists, user_id: int) -> int:
+    total = 0
+
+    def count_section_items(items, removed_items, item_quantities) -> int:
+        removed = set(removed_items or [])
+        quantity_map = item_quantities or {}
+        section_total = 0
+
+        for item in items or []:
+            if item in removed:
+                continue
+            section_total += _safe_positive_int(quantity_map.get(item, 1))
+
+        return section_total
+
+    for checklist in checklists:
+        if checklist.user_id == user_id:
+            total += count_section_items(
+                checklist.items,
+                checklist.removed_items,
+                checklist.item_quantities,
+            )
+
+        for backpack in checklist.backpacks or []:
+            if backpack.user_id == user_id:
+                total += count_section_items(
+                    backpack.items,
+                    backpack.removed_items,
+                    backpack.item_quantities,
+                )
+
+    return total
+
+
 def is_checklist_participant(checklist: models.Checklist, user_id: int) -> bool:
     if not checklist or not user_id:
         return False
     if checklist.user_id == user_id:
         return True
     return any(bp.user_id == user_id for bp in (checklist.backpacks or []))
+
+
+def can_edit_shared_section(checklist: models.Checklist, user_id: int) -> bool:
+    return is_checklist_participant(checklist, user_id)
+
+
+def get_baggage_editor_ids(checklist: models.Checklist, owner_user_id: int) -> list[int]:
+    editor_ids: list[int] = []
+    for backpack in checklist.backpacks or []:
+        if backpack.user_id != owner_user_id:
+            continue
+        for raw_value in backpack.editor_user_ids or []:
+            try:
+                parsed = int(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if parsed <= 0 or parsed == owner_user_id or parsed in editor_ids:
+                continue
+            editor_ids.append(parsed)
+    return editor_ids
+
+
+def is_backpack_hidden_for_viewer(
+    backpack: models.UserBackpack,
+    checklist: models.Checklist,
+    user_id: int | None,
+) -> bool:
+    if not backpack or not checklist:
+        return False
+    if f"backpack:{backpack.id}" not in (checklist.hidden_sections or []):
+        return False
+    return backpack.user_id != user_id
+
+
+def can_edit_baggage(backpack: models.UserBackpack, checklist: models.Checklist, user_id: int) -> bool:
+    if not backpack or not checklist or not user_id:
+        return False
+    if not is_checklist_participant(checklist, user_id):
+        return False
+    if backpack.user_id == user_id:
+        return True
+    if is_backpack_hidden_for_viewer(backpack, checklist, user_id):
+        return False
+    return user_id in get_baggage_editor_ids(checklist, backpack.user_id)
+
+
+def can_manage_baggage(backpack: models.UserBackpack, user_id: int) -> bool:
+    if not backpack or not user_id:
+        return False
+    return backpack.user_id == user_id
+
+
+def normalize_item_key(value: str | None) -> str:
+    return (value or "").strip().lower().replace("ё", "е")
+
+
+def get_map_quantity(quantity_map: dict | None, item: str, fallback: int = 0) -> int:
+    normalized_key = normalize_item_key(item)
+    if not normalized_key:
+        return fallback
+    raw_value = (quantity_map or {}).get(normalized_key, fallback)
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed
+
+
+def set_map_quantity(quantity_map: dict | None, item: str, value: int, *, keep_zero: bool = False) -> dict:
+    normalized_key = normalize_item_key(item)
+    next_map = dict(quantity_map or {})
+    if not normalized_key:
+        return next_map
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = 0
+    if parsed <= 0 and not keep_zero:
+        next_map.pop(normalized_key, None)
+        return next_map
+    next_map[normalized_key] = parsed
+    return next_map
+
+
+def rebuild_checked_items(items: list[str] | None, item_quantities: dict | None, packed_quantities: dict | None) -> list[str]:
+    checked_items: list[str] = []
+    for item in items or []:
+        needed = max(1, get_map_quantity(item_quantities, item, 1))
+        packed = max(0, get_map_quantity(packed_quantities, item, 0))
+        if packed >= needed:
+            checked_items.append(item)
+    return checked_items
 
 # Словарь переводов погодных условий
 
@@ -111,13 +327,14 @@ class PackingRequest(BaseModel):
     start_date: str
     end_date: str
     trip_type: str = "vacation"  # vacation, business, active, beach, winter
-    gender: str = "unisex"       # male, female, unisex
+    gender: str = "unspecified"  # male, female, unspecified
     transport: str = "plane"     # plane, train, car, bus
     traveling_with_pet: bool = False
     has_allergies: bool = False
     has_chronic_diseases: bool = False
     language: str = "ru"
     origin_city: str = ""
+    participant_user_ids: List[int] = []
 
 class TripSegment(BaseModel):
     city: str
@@ -128,13 +345,92 @@ class TripSegment(BaseModel):
 
 class MultiCityPackingRequest(BaseModel):
     segments: List[TripSegment]
-    gender: str = "unisex"
+    gender: str = "unspecified"
     traveling_with_pet: bool = False
     has_allergies: bool = False
     has_chronic_diseases: bool = False
     language: str = "ru"
     origin_city: str = ""
     return_transport: str = "plane"
+    participant_user_ids: List[int] = []
+
+
+def build_runtime_packing_profile(profile: dict | None = None, overrides: dict | None = None) -> dict:
+    normalized = crud._normalize_packing_profile(profile)
+    if overrides is None:
+        return normalized
+
+    override_gender = str(overrides.get("gender") or "").strip().lower()
+    normalized["gender"] = override_gender if override_gender in {"male", "female"} else "unspecified"
+    normalized["traveling_with_pet"] = bool(overrides.get("traveling_with_pet"))
+    normalized["has_allergies"] = bool(overrides.get("has_allergies"))
+    return normalized
+
+
+async def build_personal_baggage_items_for_segments(
+    segments: list[dict[str, str]],
+    profile: dict,
+    language: str,
+) -> set[str]:
+    items: set[str] = set()
+    for segment in segments:
+        data = await calculate_packing_data(
+            segment["city"],
+            segment["start_date"],
+            segment["end_date"],
+            segment["trip_type"],
+            segment["transport"],
+            profile.get("gender", "unspecified"),
+            bool(profile.get("traveling_with_pet")),
+            bool(profile.get("has_allergies")),
+            False,
+            language,
+        )
+        items.update(data["items"])
+    items.update(profile.get("always_include_items") or [])
+    return items
+
+
+async def build_participant_baggage_payloads(
+    db: AsyncSession,
+    current_user,
+    participant_user_ids: list[int],
+    segments: list[dict[str, str]],
+    owner_overrides: dict,
+    language: str,
+) -> dict[int, list[str]] | None:
+    unique_participant_ids: list[int] = []
+    for raw_value in participant_user_ids or []:
+        try:
+            parsed = int(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if parsed <= 0 or parsed == current_user.id or parsed in unique_participant_ids:
+            continue
+        unique_participant_ids.append(parsed)
+
+    if not current_user and unique_participant_ids:
+        raise HTTPException(status_code=401, detail="Нужна авторизация для совместного чеклиста")
+
+    if not current_user:
+        return None
+
+    payloads: dict[int, list[str]] = {}
+    owner_profile = build_runtime_packing_profile(current_user.packing_profile, owner_overrides)
+    payloads[current_user.id] = sorted(
+        await build_personal_baggage_items_for_segments(segments, owner_profile, language)
+    )
+
+    for participant_user_id in unique_participant_ids:
+        participant_user = await crud.get_user_by_id(db, participant_user_id)
+        if not participant_user:
+            raise HTTPException(status_code=404, detail=f"Пользователь {participant_user_id} не найден")
+        participant_profile = build_runtime_packing_profile(participant_user.packing_profile)
+        payloads[participant_user_id] = sorted(
+            await build_personal_baggage_items_for_segments(segments, participant_profile, language)
+        )
+
+    return payloads
 
 class ChecklistResponse(schemas.ChecklistOut):
     daily_forecast: list[schemas.DailyForecast]
@@ -142,8 +438,10 @@ class ChecklistResponse(schemas.ChecklistOut):
 class StatsResponse(BaseModel):
     total_trips: int
     total_days: int
+    average_trip_days: int
     unique_cities: int
     unique_countries: int
+    total_items: int
     upcoming_trips: int
 
 class ChecklistStateUpdate(BaseModel):
@@ -151,6 +449,7 @@ class ChecklistStateUpdate(BaseModel):
     removed_items: Optional[List[str]] = None
     added_items: Optional[List[str]] = None
     item_quantities: Optional[dict[str, int]] = None
+    packed_quantities: Optional[dict[str, int]] = None
     is_public: Optional[bool] = None
     items: Optional[List[str]] = None
 
@@ -159,7 +458,14 @@ class BackpackStateUpdate(BaseModel):
     removed_items: Optional[List[str]] = None
     added_items: Optional[List[str]] = None
     item_quantities: Optional[dict[str, int]] = None
+    packed_quantities: Optional[dict[str, int]] = None
     items: Optional[List[str]] = None
+
+
+class BaggageTransferRequest(BaseModel):
+    item: str
+    source_backpack_id: Optional[int] = None
+    target_backpack_id: int
 
 class UserPrivacyUpdate(BaseModel):
     is_stats_public: bool
@@ -502,11 +808,23 @@ async def get_public_profile(
         
         # Лучше считать полную статистику, раз пользователь разрешил её показывать
         all_stats_checklists = await get_all_user_checklists(db, user.id)
+        cities, countries = await collect_location_stats(all_stats_checklists)
+        total_days = 0
+        trips_with_dates = 0
+        for checklist in all_stats_checklists:
+            if checklist.start_date and checklist.end_date:
+                days = (checklist.end_date - checklist.start_date).days + 1
+                if days > 0:
+                    total_days += days
+                    trips_with_dates += 1
+
         stats = {
             "total_trips": len(all_stats_checklists),
-            "total_days": sum((c.end_date - c.start_date).days + 1 for c in all_stats_checklists if c.start_date and c.end_date),
-            "unique_cities": len({c.city.split(",")[0].strip() for c in all_stats_checklists if c.city}),
-            "unique_countries": len({c.city.split(",")[-1].strip() for c in all_stats_checklists if c.city and "," in c.city}),
+            "total_days": total_days,
+            "average_trip_days": round(total_days / trips_with_dates) if trips_with_dates else 0,
+            "unique_cities": len(cities),
+            "unique_countries": len(countries),
+            "total_items": count_total_items_for_user(all_stats_checklists, user.id),
             "upcoming_trips": sum(1 for c in all_stats_checklists if c.start_date and c.start_date > datetime.now().date())
         }
 
@@ -599,6 +917,24 @@ async def unfollow_user_endpoint(username: str, user=Depends(require_current_use
             raise HTTPException(status_code=400, detail="Вы не подписаны на этого пользователя")
         return {"status": "request_cancelled"}
     return {"status": "unfollowed"}
+
+@app.delete("/users/{username}/followers/{follower_username}")
+async def remove_follower_endpoint(username: str, follower_username: str, user=Depends(require_current_user), db: AsyncSession = Depends(get_db)):
+    target_user = await crud.get_user_by_username(db, username)
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    if target_user.id != user.id:
+        raise HTTPException(status_code=403, detail="Можно управлять только своими подписчиками")
+
+    follower_user = await crud.get_user_by_username(db, follower_username)
+    if not follower_user:
+        raise HTTPException(status_code=404, detail="Подписчик не найден")
+
+    success = await crud.remove_follower(db, user.id, follower_user.id)
+    if not success:
+        raise HTTPException(status_code=400, detail="Этот пользователь не подписан на вас")
+
+    return {"status": "removed"}
 
 @app.get("/users/{username}/followers", response_model=List[schemas.UserOut])
 async def get_user_followers(username: str, current_user: Optional[models.User] = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -761,14 +1097,15 @@ LEVELS = [
     {"name_ru": "Легенда", "name_en": "Legend", "icon": "👑", "min": 8, "max": 9},
 ]
 
-def compute_achievements(checklists):
+async def compute_achievements(checklists):
     """Вычисляет ачивки на основе чеклистов пользователя"""
     total = len(checklists)
     total_days = 0
-    countries = set()
     has_multi_city = False
     has_cold = False
     has_hot = False
+
+    _, countries = await collect_location_stats(checklists)
 
     for c in checklists:
         if c.start_date and c.end_date:
@@ -777,8 +1114,6 @@ def compute_achievements(checklists):
                 total_days += days
         if c.city and "+" in c.city:
             has_multi_city = True
-        if c.city and "," in c.city:
-            countries.add(c.city.split(",")[-1].strip())
         if c.avg_temp is not None:
             if c.avg_temp < 0:
                 has_cold = True
@@ -854,7 +1189,7 @@ async def get_my_achievements(
 ):
     """Достижения и уровень пользователя (включая совместные чеклисты)"""
     checklists = await get_all_user_checklists(db, user.id)
-    return compute_achievements(checklists)
+    return await compute_achievements(checklists)
 
 
 # === Feature: Feedback Stats ===
@@ -895,10 +1230,10 @@ async def get_my_stats(
     
     total_trips = len(checklists)
     total_days = 0
-    cities = set()
-    countries = set()
+    trips_with_dates = 0
     upcoming = 0
     today = datetime.now().date()
+    cities, countries = await collect_location_stats(checklists)
     
     for c in checklists:
         # Дни
@@ -906,25 +1241,19 @@ async def get_my_stats(
             days = (c.end_date - c.start_date).days + 1
             if days > 0:
                 total_days += days
-        
-        # Города и Страны
-        if c.city:
-            cities.add(c.city.split(",")[0].strip()) # Только имя города
-            if "," in c.city:
-                countries.add(c.city.split(",")[-1].strip())
-            else:
-                # Если страна не указана явно, считаем город уникальным местом
-                pass
-        
+                trips_with_dates += 1
+
         # Предстоящие
         if c.start_date and c.start_date > today:
             upcoming += 1
-            
+	            
     return {
         "total_trips": total_trips,
         "total_days": total_days,
+        "average_trip_days": round(total_days / trips_with_dates) if trips_with_dates else 0,
         "unique_cities": len(cities),
         "unique_countries": len(countries),
+        "total_items": count_total_items_for_user(checklists, user.id),
         "upcoming_trips": upcoming
     }
 
@@ -965,10 +1294,11 @@ END:VCALENDAR"""
     )
 
 
-# === Feature: Attractions (Curated + Wikipedia) ===
+# === Feature: Attractions (Google Places + Curated Fallback) ===
 
-ATTRACTIONS_CACHE = {}
 ATTRACTIONS_LOCKS = {}
+ATTRACTIONS_CACHE_MAX_AGE_DAYS = 60
+ATTRACTION_NAME_CACHE: dict[str, Optional[str]] = {}
 
 
 # Топ достопримечательности для популярных городов (en.wikipedia article titles)
@@ -1029,6 +1359,744 @@ _CURATED = {
     "Sochi": ["Sochi Olympic Park","Rosa Khutor","Sochi Park","Krasnaya Polyana","Skypark AJ Hackett Sochi","Fisht Olympic Stadium","Akhun Mountain","Riviera Park (Sochi)","Sochi Art Museum","Dagomys Tea Plantation","Stalin's dacha","Sochi Arboretum","Orekhovsky Waterfall","Sochi Discovery World Aquarium","Agura Waterfalls"],
 }
 
+_CURATED_CITY_ALIASES = {
+    "амстердам": "Amsterdam",
+    "афины": "Athens",
+    "барселона": "Barcelona",
+    "берлин": "Berlin",
+    "будапешт": "Budapest",
+    "буэнос айрес": "Buenos Aires",
+    "варшава": "Warsaw",
+    "вена": "Vienna",
+    "дубай": "Dubai",
+    "единбург": "Edinburgh",
+    "казань": "Kazan",
+    "каир": "Cairo",
+    "копенгаген": "Copenhagen",
+    "краков": "Krakow",
+    "лиссабон": "Lisbon",
+    "лондон": "London",
+    "мадрид": "Madrid",
+    "милан": "Milan",
+    "москва": "Moscow",
+    "мюнхен": "Munich",
+    "нью йорк": "New York City",
+    "нью-йорк": "New York City",
+    "осло": "Oslo",
+    "париж": "Paris",
+    "пекин": "Beijing",
+    "петербург": "Saint Petersburg",
+    "прага": "Prague",
+    "рим": "Rome",
+    "санкт петербург": "Saint Petersburg",
+    "санкт-петербург": "Saint Petersburg",
+    "сеул": "Seoul",
+    "сингапур": "Singapore",
+    "сочи": "Sochi",
+    "стамбул": "Istanbul",
+    "стокгольм": "Stockholm",
+    "токио": "Tokyo",
+    "флоренция": "Florence",
+    "хельсинки": "Helsinki",
+    "чикаго": "Chicago",
+    "эдинбург": "Edinburgh",
+}
+
+
+def _normalize_city_lookup(value: str) -> str:
+    return re.sub(r"[^0-9a-zа-я]+", " ", (value or "").replace("ё", "е").casefold()).strip()
+
+
+_CURATED_LOOKUP = {_normalize_city_lookup(name): name for name in _CURATED}
+for alias, target in _CURATED_CITY_ALIASES.items():
+    _CURATED_LOOKUP[_normalize_city_lookup(alias)] = target
+
+
+def _needs_attraction_image_refresh(image_url: str | None) -> bool:
+    return not image_url
+
+
+_LATIN_ATTRACTION_RE = re.compile(r"[A-Za-z]")
+_CYRILLIC_ATTRACTION_RE = re.compile(r"[А-Яа-яЁё]")
+_ATTRACTION_RU_NAME_OVERRIDES = {
+    "parliament viewpoint": "Смотровая на парламент",
+    "széchenyi thermal bath": "Купальни Сеченьи",
+    "szechenyi thermal bath": "Купальни Сеченьи",
+}
+_ATTRACTION_RU_WORDS = {
+    "academy": "академия",
+    "arch": "арка",
+    "avenue": "авеню",
+    "basilica": "базилика",
+    "bath": "купальня",
+    "baths": "купальни",
+    "bridge": "мост",
+    "castle": "замок",
+    "cathedral": "собор",
+    "chain": "цепной",
+    "church": "церковь",
+    "citadel": "цитадель",
+    "fort": "форт",
+    "fortress": "крепость",
+    "garden": "сад",
+    "gardens": "сады",
+    "hall": "зал",
+    "heroes": "героев",
+    "hill": "холм",
+    "island": "остров",
+    "liberty": "свободы",
+    "market": "рынок",
+    "museum": "музей",
+    "palace": "дворец",
+    "parliament": "парламент",
+    "park": "парк",
+    "princess": "принцесса",
+    "saint": "святого",
+    "square": "площадь",
+    "statue": "статуя",
+    "thermal": "термальные",
+    "tower": "башня",
+    "viewpoint": "смотровая",
+}
+_LATIN_TO_RU_DIGRAPHS = {
+    "shch": "щ",
+    "sch": "щ",
+    "yo": "ё",
+    "zh": "ж",
+    "kh": "х",
+    "ts": "ц",
+    "ch": "ч",
+    "sh": "ш",
+    "yu": "ю",
+    "ya": "я",
+    "ye": "е",
+    "yi": "и",
+    "iy": "ий",
+}
+_LATIN_TO_RU_CHARS = {
+    "a": "а",
+    "b": "б",
+    "c": "к",
+    "d": "д",
+    "e": "е",
+    "f": "ф",
+    "g": "г",
+    "h": "х",
+    "i": "и",
+    "j": "й",
+    "k": "к",
+    "l": "л",
+    "m": "м",
+    "n": "н",
+    "o": "о",
+    "p": "п",
+    "q": "к",
+    "r": "р",
+    "s": "с",
+    "t": "т",
+    "u": "у",
+    "v": "в",
+    "w": "в",
+    "x": "кс",
+    "y": "и",
+    "z": "з",
+}
+
+
+def _is_google_attraction_image(image_url: str | None) -> bool:
+    image = str(image_url or "").strip().lower()
+    return (
+        "googleusercontent.com/place-photos/" in image
+        or "googleusercontent.com/places/" in image
+    )
+
+
+def _is_google_place_photo(image_url: str | None) -> bool:
+    return _is_google_attraction_image(image_url)
+
+
+def _needs_ru_attraction_name_localization(name: str | None, lang: str) -> bool:
+    normalized_name = str(name or "").strip()
+    if lang != "ru" or not normalized_name:
+        return False
+    return bool(_LATIN_ATTRACTION_RE.search(normalized_name)) and not bool(
+        _CYRILLIC_ATTRACTION_RE.search(normalized_name)
+    )
+
+
+def _transliterate_latin_token_to_ru(token: str) -> str:
+    normalized = str(token or "").strip()
+    if not normalized:
+        return ""
+
+    lower = normalized.lower()
+    result: list[str] = []
+    index = 0
+    while index < len(lower):
+        matched = False
+        for source, target in sorted(_LATIN_TO_RU_DIGRAPHS.items(), key=lambda item: len(item[0]), reverse=True):
+            if lower.startswith(source, index):
+                result.append(target)
+                index += len(source)
+                matched = True
+                break
+        if matched:
+            continue
+        result.append(_LATIN_TO_RU_CHARS.get(lower[index], lower[index]))
+        index += 1
+
+    transliterated = "".join(result)
+    if normalized[0].isupper():
+        transliterated = transliterated.capitalize()
+    return transliterated
+
+
+def _translate_or_transliterate_attraction_token(token: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z]+", "", str(token or "")).strip().lower()
+    if not normalized:
+        return str(token or "").strip()
+    return _ATTRACTION_RU_WORDS.get(normalized) or _transliterate_latin_token_to_ru(token)
+
+
+def _fallback_translate_attraction_name_to_ru(name: str | None) -> str:
+    normalized_name = str(name or "").strip()
+    if not normalized_name:
+        return ""
+
+    override = _ATTRACTION_RU_NAME_OVERRIDES.get(normalized_name.casefold())
+    if override:
+        return override
+
+    patterns = [
+        (re.compile(r"^(?P<base>.+?)\s+viewpoint$", re.IGNORECASE), lambda base: f"Смотровая {base}"),
+        (re.compile(r"^(?P<base>.+?)\s+bridge$", re.IGNORECASE), lambda base: f"{base} мост"),
+        (re.compile(r"^(?P<base>.+?)\s+castle$", re.IGNORECASE), lambda base: f"Замок {base}"),
+        (re.compile(r"^(?P<base>.+?)\s+palace$", re.IGNORECASE), lambda base: f"Дворец {base}"),
+        (re.compile(r"^(?P<base>.+?)\s+basilica$", re.IGNORECASE), lambda base: f"Базилика {base}"),
+        (re.compile(r"^(?P<base>.+?)\s+cathedral$", re.IGNORECASE), lambda base: f"Собор {base}"),
+        (re.compile(r"^(?P<base>.+?)\s+church$", re.IGNORECASE), lambda base: f"Церковь {base}"),
+        (re.compile(r"^(?P<base>.+?)\s+square$", re.IGNORECASE), lambda base: f"Площадь {base}"),
+    ]
+    for pattern, formatter in patterns:
+        match = pattern.match(normalized_name)
+        if not match:
+            continue
+        translated_base = " ".join(
+            _translate_or_transliterate_attraction_token(part)
+            for part in match.group("base").split()
+            if part.strip()
+        ).strip()
+        return formatter(translated_base).strip()
+
+    translated_tokens = []
+    for token in normalized_name.split():
+        translated_tokens.append(_translate_or_transliterate_attraction_token(token))
+    return " ".join(token for token in translated_tokens if token).strip()
+
+
+def _extract_google_maps_cid(link: str | None) -> str:
+    raw_link = str(link or "").strip()
+    if not raw_link:
+        return ""
+    try:
+        parsed = urlparse(raw_link)
+        return (parse_qs(parsed.query).get("cid") or [""])[0].strip()
+    except Exception:
+        return ""
+
+
+def _cached_attractions_need_google_refresh(attractions: list[dict]) -> bool:
+    if not attractions:
+        return True
+
+    has_google_photo = False
+    for attraction in attractions:
+        image = str((attraction or {}).get("image") or "").strip()
+        if not image:
+            return True
+        if _is_google_place_photo(image):
+            has_google_photo = True
+
+    return not has_google_photo
+
+
+def _cached_attractions_need_name_refresh(attractions: list[dict], lang: str) -> bool:
+    if lang != "ru":
+        return False
+    return any(
+        _needs_ru_attraction_name_localization((attraction or {}).get("name"), lang)
+        for attraction in (attractions or [])
+    )
+
+
+_COMMERCIAL_ATTRACTION_RE = re.compile(
+    r"(cruise|sightseeing|guided|tour|tickets?|boat trip|river cruise|package|excursion|"
+    r"экскурс|тур(ы|ы\b|а\b)?|круиз|билет|прогулк|корабл|лодк)",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_attractions(attractions: list[dict], limit: int) -> tuple[list[dict], bool]:
+    sanitized: list[dict] = []
+    seen_names: set[str] = set()
+    changed = False
+
+    for attraction in attractions or []:
+        name = str((attraction or {}).get("name") or "").strip()
+        if not name:
+            changed = True
+            continue
+
+        normalized_name = re.sub(r"\s+", " ", name.casefold()).strip()
+        if normalized_name in seen_names:
+            changed = True
+            continue
+
+        if _COMMERCIAL_ATTRACTION_RE.search(name):
+            changed = True
+            continue
+
+        seen_names.add(normalized_name)
+        sanitized.append(attraction)
+
+        if len(sanitized) >= max(limit, 1):
+            break
+
+    if len(sanitized) != len(attractions or []):
+        changed = True
+
+    return sanitized, changed
+
+
+def _merge_attractions(primary: list[dict], secondary: list[dict], limit: int) -> list[dict]:
+    merged: list[dict] = []
+    seen_names: set[str] = set()
+
+    for source in (primary or [], secondary or []):
+        for attraction in source:
+            name = str((attraction or {}).get("name") or "").strip()
+            if not name:
+                continue
+            normalized_name = re.sub(r"\s+", " ", name.casefold()).strip()
+            if normalized_name in seen_names:
+                continue
+            if _COMMERCIAL_ATTRACTION_RE.search(name):
+                continue
+
+            seen_names.add(normalized_name)
+            merged.append(attraction)
+            if len(merged) >= max(limit, 1):
+                return merged
+
+    return merged
+
+
+def _finalize_attractions(attractions: list[dict], limit: int) -> list[dict]:
+    finalized: list[dict] = []
+    seen_names: set[str] = set()
+    seen_links: set[str] = set()
+    seen_images: set[str] = set()
+
+    for attraction in attractions or []:
+        name = str((attraction or {}).get("name") or "").strip()
+        link = str((attraction or {}).get("link") or "").strip()
+        image = str((attraction or {}).get("image") or "").strip()
+        normalized_name = re.sub(r"\s+", " ", name.casefold()).strip()
+
+        if not name or _COMMERCIAL_ATTRACTION_RE.search(name):
+            continue
+        if normalized_name and normalized_name in seen_names:
+            continue
+        if link and link in seen_links:
+            continue
+        if image and image in seen_images:
+            continue
+
+        if normalized_name:
+            seen_names.add(normalized_name)
+        if link:
+            seen_links.add(link)
+        if image:
+            seen_images.add(image)
+        finalized.append(attraction)
+
+        if len(finalized) >= max(limit, 1):
+            break
+
+    return finalized
+
+
+async def _restore_google_images_from_cache(
+    db: AsyncSession,
+    city_name: str,
+    cache_key: str,
+    attractions: list[dict],
+) -> tuple[list[dict], bool]:
+    if not attractions:
+        return attractions, False
+
+    normalized_city = city_name.strip().lower()
+    rows = await db.execute(
+        select(models.CityAttraction).where(models.CityAttraction.city_name.like(f"{normalized_city}_%"))
+    )
+    cached_variants = rows.scalars().all()
+
+    google_by_link: dict[str, str] = {}
+    google_by_name: dict[str, str] = {}
+    for variant in cached_variants:
+        if not variant or not variant.data:
+            continue
+        for item in variant.data:
+            image = str((item or {}).get("image") or "").strip()
+            if not _is_google_attraction_image(image):
+                continue
+            link = str((item or {}).get("link") or "").strip()
+            name = re.sub(r"\s+", " ", str((item or {}).get("name") or "").casefold()).strip()
+            if link and link not in google_by_link:
+                google_by_link[link] = image
+            if name and name not in google_by_name:
+                google_by_name[name] = image
+
+    updated_items: list[dict] = []
+    changed = False
+    for attraction in attractions:
+        next_item = dict(attraction)
+        current_image = str(attraction.get("image") or "").strip()
+        if _is_google_attraction_image(current_image):
+            updated_items.append(next_item)
+            continue
+
+        link = str(attraction.get("link") or "").strip()
+        name_key = re.sub(r"\s+", " ", str(attraction.get("name") or "").casefold()).strip()
+        replacement = google_by_link.get(link) or google_by_name.get(name_key)
+        if replacement and replacement != current_image:
+            next_item["image"] = replacement
+            changed = True
+        updated_items.append(next_item)
+
+    return updated_items, changed
+
+
+async def _restore_localized_names_from_cache(
+    db: AsyncSession,
+    city_name: str,
+    attractions: list[dict],
+    lang: str,
+) -> tuple[list[dict], bool]:
+    if lang != "ru" or not attractions:
+        return attractions, False
+
+    normalized_city = city_name.strip().lower()
+    rows = await db.execute(
+        select(models.CityAttraction).where(models.CityAttraction.city_name.like(f"{normalized_city}_%"))
+    )
+    cached_variants = rows.scalars().all()
+
+    localized_by_cid: dict[str, str] = {}
+    localized_by_link: dict[str, str] = {}
+    for variant in cached_variants:
+        if not variant or not variant.data:
+            continue
+        for item in variant.data:
+            cached_name = str((item or {}).get("name") or "").strip()
+            if not cached_name or _needs_ru_attraction_name_localization(cached_name, "ru"):
+                continue
+            cached_link = str((item or {}).get("link") or "").strip()
+            cached_cid = _extract_google_maps_cid(cached_link)
+            if cached_cid and cached_cid not in localized_by_cid:
+                localized_by_cid[cached_cid] = cached_name
+            if cached_link and cached_link not in localized_by_link:
+                localized_by_link[cached_link] = cached_name
+
+    updated_items: list[dict] = []
+    changed = False
+    for attraction in attractions:
+        next_item = dict(attraction)
+        current_name = str(attraction.get("name") or "").strip()
+        if not _needs_ru_attraction_name_localization(current_name, lang):
+            updated_items.append(next_item)
+            continue
+
+        link = str(attraction.get("link") or "").strip()
+        cid = _extract_google_maps_cid(link)
+        replacement = localized_by_cid.get(cid) or localized_by_link.get(link)
+        if replacement and replacement != current_name:
+            next_item["name"] = replacement
+            changed = True
+        updated_items.append(next_item)
+
+    return updated_items, changed
+
+
+def _build_google_places_headers(rapidapi_key: str, field_mask: str) -> dict[str, str]:
+    return {
+        "x-rapidapi-key": rapidapi_key,
+        "x-rapidapi-host": "google-map-places-new-v2.p.rapidapi.com",
+        "Content-Type": "application/json",
+        "X-Goog-FieldMask": field_mask,
+    }
+
+
+async def _search_wikipedia_title(
+    query: str,
+    wiki_lang: str,
+    client: httpx.AsyncClient,
+) -> Optional[str]:
+    if not query:
+        return None
+    try:
+        response = await client.get(
+            f"https://{wiki_lang}.wikipedia.org/w/api.php",
+            params={
+                "action": "query",
+                "list": "search",
+                "srsearch": query,
+                "format": "json",
+                "utf8": 1,
+                "srlimit": 1,
+            },
+            headers={"User-Agent": "Luggify/1.0"},
+        )
+        if response.status_code != 200:
+            return None
+        pages = (response.json().get("query") or {}).get("search") or []
+        if not pages:
+            return None
+        return str(pages[0].get("title") or "").strip() or None
+    except Exception:
+        return None
+
+
+async def _localize_attraction_names_with_wikipedia(
+    attractions: list[dict],
+    city_name: str,
+    lang: str,
+    client: httpx.AsyncClient,
+) -> tuple[list[dict], bool]:
+    if lang != "ru" or not attractions:
+        return attractions, False
+
+    updated_items: list[dict] = []
+    changed = False
+
+    for attraction in attractions:
+        next_item = dict(attraction)
+        current_name = str(attraction.get("name") or "").strip()
+        if not _needs_ru_attraction_name_localization(current_name, lang):
+            updated_items.append(next_item)
+            continue
+
+        override_name = _ATTRACTION_RU_NAME_OVERRIDES.get(current_name.casefold())
+        if override_name:
+            next_item["name"] = override_name
+            changed = override_name != current_name or changed
+            updated_items.append(next_item)
+            continue
+
+        cache_key = f"ru:{city_name}:{current_name}".casefold()
+        localized_name = ATTRACTION_NAME_CACHE.get(cache_key)
+        if localized_name is None:
+            for query in (
+                f"intitle:{current_name} {city_name}",
+                f"{current_name} {city_name}",
+                current_name,
+            ):
+                localized_name = await _search_wikipedia_title(query, "ru", client)
+                if localized_name and not _needs_ru_attraction_name_localization(localized_name, "ru"):
+                    break
+            ATTRACTION_NAME_CACHE[cache_key] = localized_name or ""
+
+        if localized_name == "":
+            localized_name = None
+
+        if localized_name and not _needs_ru_attraction_name_localization(localized_name, "ru"):
+            next_item["name"] = localized_name
+            changed = localized_name != current_name or changed
+
+        updated_items.append(next_item)
+
+    return updated_items, changed
+
+
+async def _localize_attraction_names_with_google(
+    attractions: list[dict],
+    city_name: str,
+    lang: str,
+    rapidapi_key: str,
+    client: httpx.AsyncClient,
+) -> tuple[list[dict], bool]:
+    if lang != "ru" or not rapidapi_key or not attractions:
+        return attractions, False
+
+    search_url = "https://google-map-places-new-v2.p.rapidapi.com/v1/places:searchText"
+    headers = _build_google_places_headers(
+        rapidapi_key,
+        "places.displayName,places.googleMapsUri",
+    )
+    updated_items: list[dict] = []
+    changed = False
+
+    for attraction in attractions:
+        next_item = dict(attraction)
+        current_name = str(attraction.get("name") or "").strip()
+        if not _needs_ru_attraction_name_localization(current_name, lang):
+            updated_items.append(next_item)
+            continue
+
+        current_link = str(attraction.get("link") or "").strip()
+        current_cid = _extract_google_maps_cid(current_link)
+        try:
+            response = await client.post(
+                search_url,
+                json={
+                    "textQuery": f"{current_name} {city_name}",
+                    "languageCode": "ru",
+                    "maxResultCount": 1,
+                },
+                headers=headers,
+            )
+            if response.status_code != 200:
+                updated_items.append(next_item)
+                continue
+
+            places = response.json().get("places", [])
+            if not places:
+                updated_items.append(next_item)
+                continue
+
+            localized = places[0]
+            localized_name = str(((localized.get("displayName") or {}).get("text")) or "").strip()
+            localized_link = str(localized.get("googleMapsUri") or "").strip()
+            localized_cid = _extract_google_maps_cid(localized_link)
+            same_place = (
+                (current_cid and localized_cid and current_cid == localized_cid)
+                or (current_link and localized_link and current_link == localized_link)
+                or not current_link
+            )
+            if same_place and localized_name and not _needs_ru_attraction_name_localization(localized_name, "ru"):
+                next_item["name"] = localized_name
+                changed = localized_name != current_name or changed
+        except Exception:
+            pass
+
+        updated_items.append(next_item)
+
+    return updated_items, changed
+
+
+def _apply_fallback_ru_name_translation(
+    attractions: list[dict],
+    lang: str,
+) -> tuple[list[dict], bool]:
+    if lang != "ru" or not attractions:
+        return attractions, False
+
+    updated_items: list[dict] = []
+    changed = False
+    for attraction in attractions:
+        next_item = dict(attraction)
+        if _needs_ru_attraction_name_localization(next_item.get("name"), "ru"):
+            fallback_name = _fallback_translate_attraction_name_to_ru(next_item.get("name"))
+            if fallback_name and fallback_name != next_item.get("name"):
+                next_item["name"] = fallback_name
+                changed = True
+        updated_items.append(next_item)
+    return updated_items, changed
+
+
+async def _hydrate_google_photos_for_final_attractions(
+    attractions: list[dict],
+    photo_ref_by_link: dict[str, str],
+    rapidapi_key: str,
+    client: httpx.AsyncClient,
+) -> tuple[list[dict], bool]:
+    if not attractions or not rapidapi_key or not photo_ref_by_link:
+        return attractions, False
+
+    updated_items: list[dict] = []
+    changed = False
+    for attraction in attractions:
+        next_item = dict(attraction)
+        current_image = str(attraction.get("image") or "").strip()
+        if _is_google_attraction_image(current_image):
+            updated_items.append(next_item)
+            continue
+
+        link = str(attraction.get("link") or "").strip()
+        photo_ref = str(photo_ref_by_link.get(link) or "").strip()
+        if not photo_ref:
+            updated_items.append(next_item)
+            continue
+
+        try:
+            photo_resp = await client.get(
+                f"https://google-map-places-new-v2.p.rapidapi.com/v1/{photo_ref}/media",
+                headers={
+                    "x-rapidapi-key": rapidapi_key,
+                    "x-rapidapi-host": "google-map-places-new-v2.p.rapidapi.com",
+                },
+                params={"maxWidthPx": "800", "skipHttpRedirect": "true"},
+            )
+            if photo_resp.status_code == 200:
+                image_url = str(photo_resp.json().get("photoUri") or "").strip()
+                if image_url and image_url != current_image:
+                    next_item["image"] = image_url
+                    changed = True
+        except Exception:
+            pass
+
+        updated_items.append(next_item)
+
+    return updated_items, changed
+
+
+def _select_best_google_photo_ref(photos: list[dict] | None) -> str:
+    candidates = photos or []
+    if not candidates:
+        return ""
+
+    target_aspect_ratio = 0.82
+    best_ref = ""
+    best_score = float("-inf")
+
+    for photo in candidates[:5]:
+        photo_ref = str((photo or {}).get("name") or "").strip()
+        width = int((photo or {}).get("widthPx") or 0)
+        height = int((photo or {}).get("heightPx") or 0)
+        if not photo_ref:
+            continue
+
+        aspect_ratio = (width / height) if width > 0 and height > 0 else target_aspect_ratio
+        aspect_penalty = abs(aspect_ratio - target_aspect_ratio) * 1200
+        area_bonus = min(width * height, 20_000_000) / 20_000
+        long_edge_bonus = min(max(width, height), 5000) / 50
+        portrait_bonus = 80 if height >= width else 0
+        score = area_bonus + long_edge_bonus + portrait_bonus - aspect_penalty
+
+        if score > best_score:
+            best_score = score
+            best_ref = photo_ref
+
+    return best_ref
+
+
+def _build_curated_attractions(city_name: str, limit: int) -> list[dict]:
+    normalized_city = _normalize_city_lookup(city_name)
+    curated_key = _CURATED_LOOKUP.get(normalized_city)
+    if not curated_key:
+        return []
+
+    results = []
+    for title in _CURATED.get(curated_key, [])[: max(limit, 1)]:
+        results.append(
+            {
+                "name": title,
+                "image": None,
+                "link": f"https://www.google.com/maps/search/?api=1&query={url_quote(f'{title}, {city_name}')}",
+            }
+        )
+    return results
+
 @app.get("/attractions")
 async def get_attractions(
     city: str = Query(...),
@@ -1036,15 +2104,61 @@ async def get_attractions(
     limit: int = Query(10),
     db: AsyncSession = Depends(get_db)  # Add DB dependency
 ):
-    """Достопримечательности (Google Places API V2 + DB Cache + Wiki Pictures)"""
+    """Достопримечательности (Google Places API V2 + DB cache)."""
     city_name = city.split(",")[0].strip()
     cache_key = f"{city_name}_{lang}_{limit}".lower()
+    merge_limit = max(limit * 2, limit)
+    rapidapi_key = os.getenv("RAPIDAPI_KEY", "").strip()
+    curated_results = _build_curated_attractions(city_name, merge_limit) if lang == "en" else []
     
     # 1. Поиск в БД (Кэш)
     cached_obj = await crud.get_city_attractions(db, cache_key)
     if cached_obj:
-        # Проверяем свежесть (например, 30 дней)
-        if (datetime.now() - cached_obj.updated_at).days < 180:
+        sanitized_cached, changed = _sanitize_attractions(cached_obj.data or [], limit)
+        merged_cached = _merge_attractions(sanitized_cached, curated_results, merge_limit)
+        changed = changed or len(merged_cached) != len(sanitized_cached)
+        merged_cached, restored_names = await _restore_localized_names_from_cache(
+            db,
+            city_name,
+            merged_cached,
+            lang,
+        )
+        changed = changed or restored_names
+        merged_cached, restored_google = await _restore_google_images_from_cache(
+            db,
+            city_name,
+            cache_key,
+            merged_cached,
+        )
+        changed = changed or restored_google
+        needs_name_refresh = bool(rapidapi_key) and _cached_attractions_need_name_refresh(merged_cached, lang)
+        if needs_name_refresh:
+            async with httpx.AsyncClient(timeout=30) as client:
+                merged_cached, localized_changed = await _localize_attraction_names_with_google(
+                    merged_cached,
+                    city_name,
+                    lang,
+                    rapidapi_key,
+                    client,
+                )
+                changed = changed or localized_changed
+                merged_cached, wiki_changed = await _localize_attraction_names_with_wikipedia(
+                    merged_cached,
+                    city_name,
+                    lang,
+                    client,
+                )
+                changed = changed or wiki_changed
+            merged_cached, fallback_changed = _apply_fallback_ru_name_translation(merged_cached, lang)
+            changed = changed or fallback_changed
+        hydrated_cached = _finalize_attractions(merged_cached, limit)
+        if changed:
+            cached_obj = await crud.save_city_attractions(db, cache_key, hydrated_cached)
+        should_refresh_from_google = bool(rapidapi_key) and (
+            _cached_attractions_need_google_refresh(cached_obj.data or [])
+            or _cached_attractions_need_name_refresh(cached_obj.data or [], lang)
+        )
+        if (datetime.now() - cached_obj.updated_at).days < ATTRACTIONS_CACHE_MAX_AGE_DAYS and not should_refresh_from_google:
             return {"attractions": cached_obj.data}
 
     # Lock для ин-мемори (если несколько юзеров одновременно запросили новый город)
@@ -1054,27 +2168,135 @@ async def get_attractions(
     async with ATTRACTIONS_LOCKS[cache_key]:
         # Двойная проверка на случай, если другой таск уже сохранил
         cached_obj = await crud.get_city_attractions(db, cache_key)
-        if cached_obj and (datetime.now() - cached_obj.updated_at).days < 30:
+        if cached_obj:
+            sanitized_cached, changed = _sanitize_attractions(cached_obj.data or [], limit)
+            merged_cached = _merge_attractions(sanitized_cached, curated_results, merge_limit)
+            changed = changed or len(merged_cached) != len(sanitized_cached)
+            merged_cached, restored_names = await _restore_localized_names_from_cache(
+                db,
+                city_name,
+                merged_cached,
+                lang,
+            )
+            changed = changed or restored_names
+            merged_cached, restored_google = await _restore_google_images_from_cache(
+                db,
+                city_name,
+                cache_key,
+                merged_cached,
+            )
+            changed = changed or restored_google
+            needs_name_refresh = bool(rapidapi_key) and _cached_attractions_need_name_refresh(merged_cached, lang)
+            if needs_name_refresh:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    merged_cached, localized_changed = await _localize_attraction_names_with_google(
+                        merged_cached,
+                        city_name,
+                        lang,
+                        rapidapi_key,
+                        client,
+                    )
+                    changed = changed or localized_changed
+                    merged_cached, wiki_changed = await _localize_attraction_names_with_wikipedia(
+                        merged_cached,
+                        city_name,
+                        lang,
+                        client,
+                    )
+                    changed = changed or wiki_changed
+                merged_cached, fallback_changed = _apply_fallback_ru_name_translation(merged_cached, lang)
+                changed = changed or fallback_changed
+            hydrated_cached = _finalize_attractions(merged_cached, limit)
+            if changed:
+                cached_obj = await crud.save_city_attractions(db, cache_key, hydrated_cached)
+        should_refresh_from_google = bool(rapidapi_key) and (
+            _cached_attractions_need_google_refresh((cached_obj.data if cached_obj else []) or [])
+            or _cached_attractions_need_name_refresh((cached_obj.data if cached_obj else []) or [], lang)
+        )
+        if cached_obj and (datetime.now() - cached_obj.updated_at).days < ATTRACTIONS_CACHE_MAX_AGE_DAYS and not should_refresh_from_google:
             return {"attractions": cached_obj.data}
 
         results = []
+
+        async def return_fallback_results():
+            cached_fallback = await crud.get_city_attractions(db, cache_key)
+            if cached_fallback and cached_fallback.data:
+                sanitized_cached, changed = _sanitize_attractions(cached_fallback.data or [], limit)
+                merged_cached = _merge_attractions(sanitized_cached, curated_results, merge_limit)
+                changed = changed or len(merged_cached) != len(sanitized_cached)
+                merged_cached, restored_names = await _restore_localized_names_from_cache(
+                    db,
+                    city_name,
+                    merged_cached,
+                    lang,
+                )
+                changed = changed or restored_names
+                merged_cached, restored_google = await _restore_google_images_from_cache(
+                    db,
+                    city_name,
+                    cache_key,
+                    merged_cached,
+                )
+                changed = changed or restored_google
+                needs_name_refresh = bool(rapidapi_key) and _cached_attractions_need_name_refresh(merged_cached, lang)
+                if needs_name_refresh:
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        merged_cached, localized_changed = await _localize_attraction_names_with_google(
+                            merged_cached,
+                            city_name,
+                            lang,
+                            rapidapi_key,
+                            client,
+                        )
+                        changed = changed or localized_changed
+                        merged_cached, wiki_changed = await _localize_attraction_names_with_wikipedia(
+                            merged_cached,
+                            city_name,
+                            lang,
+                            client,
+                        )
+                        changed = changed or wiki_changed
+                    merged_cached, fallback_changed = _apply_fallback_ru_name_translation(merged_cached, lang)
+                    changed = changed or fallback_changed
+                hydrated_cached = _finalize_attractions(merged_cached, limit)
+                if changed:
+                    cached_fallback = await crud.save_city_attractions(db, cache_key, hydrated_cached)
+                return {"attractions": cached_fallback.data}
+            if curated_results:
+                fallback_curated_results, _ = _sanitize_attractions(curated_results, limit)
+                fallback_curated_results, _ = await _restore_localized_names_from_cache(
+                    db,
+                    city_name,
+                    fallback_curated_results,
+                    lang,
+                )
+                fallback_curated_results, _ = await _restore_google_images_from_cache(
+                    db,
+                    city_name,
+                    cache_key,
+                    fallback_curated_results,
+                )
+                hydrated_curated = _finalize_attractions(fallback_curated_results, limit)
+                await crud.save_city_attractions(db, cache_key, hydrated_curated)
+                return {"attractions": hydrated_curated}
+            return {"attractions": []}
+
         try:
-            rapidapi_key = os.getenv("RAPIDAPI_KEY")
             if not rapidapi_key:
-                raise Exception("RAPIDAPI_KEY is not configured")
+                return await return_fallback_results()
 
             url = "https://google-map-places-new-v2.p.rapidapi.com/v1/places:searchText"
+            max_result_count = min(max(limit * 3, limit), 20)
             payload = {
-                "textQuery": f"top tourist attractions in {city_name}",
+                "textQuery": f"top landmarks and tourist attractions in {city_name}",
                 "languageCode": lang,
-                "maxResultCount": limit
+                "maxResultCount": max_result_count
             }
-            headers = {
-                "x-rapidapi-key": rapidapi_key,
-                "x-rapidapi-host": "google-map-places-new-v2.p.rapidapi.com",
-                "Content-Type": "application/json",
-                "X-Goog-FieldMask": "places.displayName,places.rating,places.googleMapsUri,places.userRatingCount,places.photos"
-            }
+            headers = _build_google_places_headers(
+                rapidapi_key,
+                "places.displayName,places.rating,places.googleMapsUri,places.userRatingCount,places.photos",
+            )
+            photo_ref_by_link: dict[str, str] = {}
 
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(url, json=payload, headers=headers)
@@ -1085,50 +2307,61 @@ async def get_attractions(
                     places = []
 
                 if not places:
-                    cached_obj = await crud.get_city_attractions(db, cache_key)
-                    if cached_obj:
-                        return {"attractions": cached_obj.data}
-                    return {"attractions": []}
+                    return await return_fallback_results()
                 
                 for p in places:
                     name = p.get("displayName", {}).get("text", "")
                     if not name:
                         continue
-                        
-                    maps_url = p.get("googleMapsUri", f"https://www.google.com/maps/search/?api=1&query={url_quote(name + ', ' + city_name)}")
-                    image_url = None
                     
-                    # Получаем фото через Google Places Photo API
+                    maps_url = p.get("googleMapsUri", f"https://www.google.com/maps/search/?api=1&query={url_quote(name + ', ' + city_name)}")
+
                     photos = p.get("photos", [])
                     if photos:
-                        photo_ref = photos[0].get("name", "")
-                        if photo_ref:
-                            try:
-                                photo_url = f"https://google-map-places-new-v2.p.rapidapi.com/v1/{photo_ref}/media"
-                                photo_resp = await client.get(
-                                    photo_url,
-                                    headers={"x-rapidapi-key": rapidapi_key, "x-rapidapi-host": "google-map-places-new-v2.p.rapidapi.com"},
-                                    params={"maxWidthPx": "800", "skipHttpRedirect": "true"}
-                                )
-                                if photo_resp.status_code == 200:
-                                    image_url = photo_resp.json().get("photoUri")
-                            except Exception:
-                                pass
+                        photo_ref = _select_best_google_photo_ref(photos)
+                        if photo_ref and maps_url and maps_url not in photo_ref_by_link:
+                            photo_ref_by_link[maps_url] = photo_ref
 
                     results.append({
                         "name": name,
-                        "image": image_url,
+                        "image": None,
                         "link": maps_url,
                     })
 
             if results:
+                results, _ = _sanitize_attractions(results, limit)
+                results = _merge_attractions(results, curated_results, merge_limit)
+                results, _ = await _restore_localized_names_from_cache(
+                    db,
+                    city_name,
+                    results,
+                    lang,
+                )
+                results, _ = await _restore_google_images_from_cache(
+                    db,
+                    city_name,
+                    cache_key,
+                    results,
+                )
+                results = _finalize_attractions(results, limit)
+                async with httpx.AsyncClient(timeout=30) as client:
+                    results, _ = await _localize_attraction_names_with_google(results, city_name, lang, rapidapi_key, client)
+                    results, _ = await _localize_attraction_names_with_wikipedia(results, city_name, lang, client)
+                    results, _ = _apply_fallback_ru_name_translation(results, lang)
+                    results, _ = await _hydrate_google_photos_for_final_attractions(
+                        results,
+                        photo_ref_by_link,
+                        rapidapi_key,
+                        client,
+                    )
+                results = _finalize_attractions(results, limit)
                 await crud.save_city_attractions(db, cache_key, results)
                 return {"attractions": results}
                 
         except Exception as e:
             print(f"Attractions API V2 error: {e}")
             
-        return {"attractions": []}
+        return await return_fallback_results()
 
 
 # === Feature: Flight Search (Travelpayouts) ===
@@ -2384,7 +3617,21 @@ async def calculate_packing_data(
         "end_date": end_dt.date()
     }
 
-async def create_checklist_from_items(db, items, city, start_date, end_date, avg_temp, conditions, daily_forecast, user_id=None, language="ru", origin_city="", transports=None):
+async def create_checklist_from_items(
+    db,
+    items,
+    city,
+    start_date,
+    end_date,
+    avg_temp,
+    conditions,
+    daily_forecast,
+    user_id=None,
+    language="ru",
+    origin_city="",
+    transports=None,
+    participant_baggage_payloads: dict[int, list[str]] | None = None,
+):
     # Categorization logic
     mapping = get_category_map(language)
     categories = {k: [] for k in mapping.keys()}
@@ -2413,7 +3660,7 @@ async def create_checklist_from_items(db, items, city, start_date, end_date, avg
         city=city,
         start_date=start_date,
         end_date=end_date,
-        items=all_items,
+        items=[] if participant_baggage_payloads else all_items,
         avg_temp=avg_temp,
         conditions=sorted(list(conditions)),
         daily_forecast=[schemas.DailyForecast(**d) if isinstance(d, dict) else d for d in daily_forecast] if daily_forecast else None,
@@ -2422,6 +3669,16 @@ async def create_checklist_from_items(db, items, city, start_date, end_date, avg
         transports=transports,
     )
     checklist = await crud.create_checklist(db, checklist_data)
+
+    if participant_baggage_payloads:
+        for participant_user_id, participant_items in participant_baggage_payloads.items():
+            await crud.create_user_backpack(
+                db,
+                checklist.id,
+                participant_user_id,
+                items=participant_items,
+            )
+        checklist = await crud.get_checklist_by_slug(db, checklist.slug)
     
     # Return ChecklistResponse with daily_forecast
     return ChecklistResponse(
@@ -2429,7 +3686,7 @@ async def create_checklist_from_items(db, items, city, start_date, end_date, avg
         city=checklist.city,
         start_date=checklist.start_date,
         end_date=checklist.end_date,
-        items=all_items,
+        items=checklist.items or [],
         avg_temp=checklist.avg_temp,
         conditions=checklist.conditions,
         checked_items=checklist.checked_items,
@@ -2440,7 +3697,12 @@ async def create_checklist_from_items(db, items, city, start_date, end_date, avg
         is_public=getattr(checklist, 'is_public', True),
         origin_city=checklist.origin_city,
         transports=checklist.transports,
-        daily_forecast=daily_forecast
+        daily_forecast=daily_forecast,
+        hidden_sections=checklist.hidden_sections or [],
+        invite_token=checklist.invite_token,
+        backpacks=checklist.backpacks or [],
+        events=checklist.events or [],
+        reviews=[],
     )
 
 # ==================== AI ASSISTANT ====================
@@ -2477,9 +3739,28 @@ async def ai_suggestions(language: str = "ru"):
 
 @app.post("/generate-packing-list", response_model=ChecklistResponse)
 async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db), current_user=Depends(get_current_user)):
+    segments = [{
+        "city": req.city,
+        "start_date": req.start_date,
+        "end_date": req.end_date,
+        "trip_type": req.trip_type,
+        "transport": req.transport,
+    }]
     data = await calculate_packing_data(
         req.city, req.start_date, req.end_date, req.trip_type, req.transport,
         req.gender, req.traveling_with_pet, req.has_allergies, req.has_chronic_diseases, req.language
+    )
+    participant_baggage_payloads = await build_participant_baggage_payloads(
+        db=db,
+        current_user=current_user,
+        participant_user_ids=req.participant_user_ids,
+        segments=segments,
+        owner_overrides={
+            "gender": req.gender,
+            "traveling_with_pet": req.traveling_with_pet,
+            "has_allergies": req.has_allergies,
+        },
+        language=req.language,
     )
     return await create_checklist_from_items(
         db, data["items"], req.city, data["start_date"], data["end_date"],
@@ -2487,7 +3768,8 @@ async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db),
         current_user.id if current_user else None,
         language=req.language,
         origin_city=req.origin_city,
-        transports=[req.transport] if req.transport else None
+        transports=[req.transport] if req.transport else None,
+        participant_baggage_payloads=participant_baggage_payloads,
     )
 
 @app.post("/generate-multi-city", response_model=ChecklistResponse)
@@ -2521,9 +3803,31 @@ async def generate_multi_city(req: MultiCityPackingRequest, db: AsyncSession = D
     # Parse dates for main checklist
     min_date = datetime.strptime(req.segments[0].start_date, "%Y-%m-%d").date()
     max_date = datetime.strptime(req.segments[-1].end_date, "%Y-%m-%d").date()
-    
+
     # Append return transport as the last element
     transports.append(req.return_transport)
+
+    participant_baggage_payloads = await build_participant_baggage_payloads(
+        db=db,
+        current_user=current_user,
+        participant_user_ids=req.participant_user_ids,
+        segments=[
+            {
+                "city": segment.city,
+                "start_date": segment.start_date,
+                "end_date": segment.end_date,
+                "trip_type": segment.trip_type,
+                "transport": segment.transport,
+            }
+            for segment in req.segments
+        ],
+        owner_overrides={
+            "gender": req.gender,
+            "traveling_with_pet": req.traveling_with_pet,
+            "has_allergies": req.has_allergies,
+        },
+        language=req.language,
+    )
     
     return await create_checklist_from_items(
         db, all_items, display_city, min_date, max_date,
@@ -2531,7 +3835,8 @@ async def generate_multi_city(req: MultiCityPackingRequest, db: AsyncSession = D
         current_user.id if current_user else None,
         language=req.language,
         origin_city=req.origin_city,
-        transports=transports
+        transports=transports,
+        participant_baggage_payloads=participant_baggage_payloads,
     )
 
 @app.post("/save-tg-checklist", response_model=schemas.ChecklistOut)
@@ -2554,7 +3859,11 @@ async def get_tg_checklists(tg_user_id: str, db: AsyncSession = Depends(get_db))
     return checklists
 
 @app.get("/checklist/{slug}", response_model=ChecklistResponse)
-async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):
+async def get_checklist(
+    slug: str,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+):
     checklist = await crud.get_checklist_by_slug(db, slug)
     if not checklist:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
@@ -2568,6 +3877,25 @@ async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):
         except:
             forecast = []
     
+    viewer_id = user.id if user else None
+    visible_backpacks = [
+        backpack
+        for backpack in (checklist.backpacks or [])
+        if not is_backpack_hidden_for_viewer(backpack, checklist, viewer_id)
+    ]
+    visible_hidden_sections = []
+    for section in checklist.hidden_sections or []:
+        if not section.startswith("backpack:"):
+            visible_hidden_sections.append(section)
+            continue
+        try:
+            backpack_id = int(section.split(":", 1)[1])
+        except (TypeError, ValueError):
+            continue
+        backpack = next((item for item in (checklist.backpacks or []) if item.id == backpack_id), None)
+        if backpack and not is_backpack_hidden_for_viewer(backpack, checklist, viewer_id):
+            visible_hidden_sections.append(section)
+
     return ChecklistResponse(
         slug=checklist.slug,
         city=checklist.city,
@@ -2586,10 +3914,10 @@ async def get_checklist(slug: str, db: AsyncSession = Depends(get_db)):
         transports=getattr(checklist, 'transports', None),
         daily_forecast=forecast,
         events=checklist.events or [],
-        backpacks=checklist.backpacks or [],
+        backpacks=visible_backpacks,
         reviews=[build_trip_review_payload(review) for review in sorted(checklist.reviews or [], key=lambda item: item.created_at or datetime.min, reverse=True)],
-        invite_token=checklist.invite_token,
-        hidden_sections=checklist.hidden_sections or [],
+        invite_token=checklist.invite_token if viewer_id and is_checklist_participant(checklist, viewer_id) else None,
+        hidden_sections=visible_hidden_sections,
     )
 
     # Категории для чеклиста (для фронта)
@@ -2707,19 +4035,31 @@ async def run_ai_checklist_command(
 
 
 @app.patch("/checklist/{slug}/state", response_model=schemas.ChecklistOut)
-async def update_checklist_state(slug: str, state: ChecklistStateUpdate = Body(...), db: AsyncSession = Depends(get_db)):
-    checklist = await crud.update_checklist_state(
+async def update_checklist_state(
+    slug: str,
+    state: ChecklistStateUpdate = Body(...),
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    if not is_checklist_participant(checklist, user.id):
+        raise HTTPException(status_code=403, detail="Нет доступа к этому чеклисту")
+
+    updated = await crud.update_checklist_state(
         db,
         slug,
         checked_items=state.checked_items,
         removed_items=state.removed_items,
         added_items=state.added_items,
         item_quantities=state.item_quantities,
+        packed_quantities=state.packed_quantities,
         items=state.items,
     )
-    if not checklist:
+    if not updated:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
-    return checklist
+    return updated
 
 
 @app.patch("/checklist/{slug}/privacy", response_model=schemas.ChecklistOut)
@@ -2859,8 +4199,7 @@ async def create_baggage(
         raise HTTPException(status_code=404, detail="Чеклист не найден")
 
     target_user_id = payload.user_id or user.id
-    is_owner = checklist.user_id == user.id
-    if target_user_id != user.id and not is_owner:
+    if target_user_id != user.id:
         raise HTTPException(status_code=403, detail="Можно создавать багаж только себе")
 
     if not is_checklist_participant(checklist, target_user_id):
@@ -2891,7 +4230,7 @@ async def update_baggage(
     if not checklist:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
 
-    if backpack.user_id != user.id and checklist.user_id != user.id:
+    if not can_manage_baggage(backpack, user.id):
         raise HTTPException(status_code=403, detail="Нет прав редактировать этот багаж")
 
     updated = await crud.update_baggage_meta(db, backpack_id, payload)
@@ -2914,7 +4253,7 @@ async def delete_baggage(
     if not checklist:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
 
-    if backpack.user_id != user.id and checklist.user_id != user.id:
+    if not can_manage_baggage(backpack, user.id):
         raise HTTPException(status_code=403, detail="Нет прав удалять этот багаж")
 
     deleted_id, error_code = await crud.delete_baggage(db, backpack_id)
@@ -2945,8 +4284,12 @@ async def update_backpack_state(
     
     if not bp:
         raise HTTPException(status_code=404, detail="Рюкзак не найден")
-    if bp.user_id != user.id:
-        raise HTTPException(status_code=403, detail="Нет прав редактировать чужой рюкзак")
+
+    checklist = await crud.get_checklist_by_id(db, bp.checklist_id)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    if not can_edit_baggage(bp, checklist, user.id):
+        raise HTTPException(status_code=403, detail="Нет прав редактировать этот багаж")
         
     updated_bp = await crud.update_backpack_items(
         db, 
@@ -2956,10 +4299,98 @@ async def update_backpack_state(
             removed_items=state.removed_items,
             added_items=state.added_items,
             item_quantities=state.item_quantities,
+            packed_quantities=state.packed_quantities,
             items=state.items
         )
     )
     return updated_bp
+
+
+@app.post("/checklists/{slug}/transfer-item", response_model=ChecklistResponse)
+async def transfer_checklist_item(
+    slug: str,
+    payload: BaggageTransferRequest,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    if not is_checklist_participant(checklist, user.id):
+        raise HTTPException(status_code=403, detail="Нет доступа к чеклисту")
+
+    item = (payload.item or "").strip()
+    if not item:
+        raise HTTPException(status_code=400, detail="Не указана вещь")
+
+    target_backpack = await crud.get_backpack_by_id(db, payload.target_backpack_id)
+    if not target_backpack or target_backpack.checklist_id != checklist.id:
+        raise HTTPException(status_code=404, detail="Багаж назначения не найден")
+    if is_backpack_hidden_for_viewer(target_backpack, checklist, user.id):
+        raise HTTPException(status_code=403, detail="Этот багаж скрыт от вас")
+    if not can_edit_baggage(target_backpack, checklist, user.id):
+        raise HTTPException(status_code=403, detail="Нет прав переносить вещи в этот багаж")
+
+    source_backpack = None
+    if payload.source_backpack_id is not None:
+        source_backpack = await crud.get_backpack_by_id(db, payload.source_backpack_id)
+        if not source_backpack or source_backpack.checklist_id != checklist.id:
+            raise HTTPException(status_code=404, detail="Исходный багаж не найден")
+        if source_backpack.id == target_backpack.id:
+            raise HTTPException(status_code=400, detail="Нельзя переместить вещь в тот же багаж")
+        if not can_edit_baggage(source_backpack, checklist, user.id):
+            raise HTTPException(status_code=403, detail="Нет прав менять этот багаж")
+        if item not in (source_backpack.items or []):
+            raise HTTPException(status_code=404, detail="Вещь не найдена в исходном багаже")
+    else:
+        if not can_edit_shared_section(checklist, user.id):
+            raise HTTPException(status_code=403, detail="Нет прав менять этот раздел")
+        if item not in (checklist.items or []):
+            raise HTTPException(status_code=404, detail="Вещь не найдена в списке")
+
+    if payload.source_backpack_id is None:
+        moved_quantity = max(1, get_map_quantity(checklist.item_quantities or {}, item, 1))
+        moved_packed = max(0, get_map_quantity(checklist.packed_quantities or {}, item, 0))
+        checklist.items = [existing for existing in (checklist.items or []) if existing != item]
+        checklist.checked_items = [existing for existing in (checklist.checked_items or []) if existing != item]
+        checklist.removed_items = [existing for existing in (checklist.removed_items or []) if existing != item]
+        checklist.item_quantities = set_map_quantity(checklist.item_quantities or {}, item, 0)
+        checklist.packed_quantities = set_map_quantity(checklist.packed_quantities or {}, item, 0)
+    else:
+        moved_quantity = max(1, get_map_quantity(source_backpack.item_quantities or {}, item, 1))
+        moved_packed = max(0, get_map_quantity(source_backpack.packed_quantities or {}, item, 0))
+        source_backpack.items = [existing for existing in (source_backpack.items or []) if existing != item]
+        source_backpack.checked_items = [existing for existing in (source_backpack.checked_items or []) if existing != item]
+        source_backpack.removed_items = [existing for existing in (source_backpack.removed_items or []) if existing != item]
+        source_backpack.item_quantities = set_map_quantity(source_backpack.item_quantities or {}, item, 0)
+        source_backpack.packed_quantities = set_map_quantity(source_backpack.packed_quantities or {}, item, 0)
+        source_backpack.checked_items = rebuild_checked_items(
+            source_backpack.items or [],
+            source_backpack.item_quantities or {},
+            source_backpack.packed_quantities or {},
+        )
+
+    if item not in (target_backpack.items or []):
+        target_backpack.items = [*(target_backpack.items or []), item]
+    target_backpack.removed_items = [existing for existing in (target_backpack.removed_items or []) if existing != item]
+    target_backpack.item_quantities = set_map_quantity(
+        target_backpack.item_quantities or {},
+        item,
+        max(1, get_map_quantity(target_backpack.item_quantities or {}, item, 0) + moved_quantity),
+    )
+    target_backpack.packed_quantities = set_map_quantity(
+        target_backpack.packed_quantities or {},
+        item,
+        max(0, get_map_quantity(target_backpack.packed_quantities or {}, item, 0) + moved_packed),
+    )
+    target_backpack.checked_items = rebuild_checked_items(
+        target_backpack.items or [],
+        target_backpack.item_quantities or {},
+        target_backpack.packed_quantities or {},
+    )
+
+    await db.commit()
+    return await get_checklist(slug, db, user)
 
 # Toggle section visibility
 @app.patch("/checklists/{slug}/hidden-sections")
@@ -2972,11 +4403,33 @@ async def update_hidden_sections(
     checklist = await crud.get_checklist_by_slug(db, slug)
     if not checklist:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
-    if checklist.user_id != user.id:
-        raise HTTPException(status_code=403, detail="Только владелец может управлять видимостью разделов")
-    
-    hidden = payload.get("hidden_sections", [])
-    checklist.hidden_sections = hidden
+    if not is_checklist_participant(checklist, user.id):
+        raise HTTPException(status_code=403, detail="Нет доступа к чеклисту")
+
+    requested_hidden = list(dict.fromkeys(payload.get("hidden_sections", [])))
+    current_hidden = set(checklist.hidden_sections or [])
+    requested_set = set(requested_hidden)
+
+    changed_sections = current_hidden.symmetric_difference(requested_set)
+    for section in changed_sections:
+        if section == "shared" or section == "backpacks" or section == "itinerary":
+            if checklist.user_id != user.id:
+                raise HTTPException(status_code=403, detail="Только владелец чеклиста может менять видимость общего раздела")
+            continue
+        if section.startswith("backpack:"):
+            try:
+                backpack_id = int(section.split(":", 1)[1])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Некорректный раздел")
+            backpack = await crud.get_backpack_by_id(db, backpack_id)
+            if not backpack or backpack.checklist_id != checklist.id:
+                raise HTTPException(status_code=404, detail="Багаж не найден")
+            if not can_manage_baggage(backpack, user.id):
+                raise HTTPException(status_code=403, detail="Только владелец багажа может менять его видимость")
+            continue
+        raise HTTPException(status_code=400, detail="Некорректный раздел")
+
+    checklist.hidden_sections = requested_hidden
     await db.commit()
     await db.refresh(checklist)
     return {"hidden_sections": checklist.hidden_sections}
@@ -2996,15 +4449,15 @@ async def notify_invite(
     if checklist.user_id == target_user_id:
         raise HTTPException(status_code=409, detail="Этот пользователь — владелец чеклиста")
     
-    # Check if target user is already a collaborator (has a backpack)
+    # Ensure participant baggage exists for direct collaborative checklist flow
     existing_bp = await db.execute(
         select(models.UserBackpack).where(
             models.UserBackpack.checklist_id == checklist.id,
             models.UserBackpack.user_id == target_user_id
         )
     )
-    if existing_bp.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail="Пользователь уже в этом чеклисте")
+    if not existing_bp.scalar_one_or_none():
+        await crud.create_user_backpack(db, checklist.id, target_user_id)
     
     # Generate invite token if not exists
     if not checklist.invite_token:

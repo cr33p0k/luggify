@@ -1,6 +1,6 @@
-export const pluralize = (count, wordsRu, wordsEn, lang) => {
+export const pluralizeWord = (count, wordsRu, wordsEn, lang) => {
     if (lang === 'en') {
-        return count === 1 ? `${count} ${wordsEn[0]}` : `${count} ${wordsEn[1]}`;
+        return count === 1 ? wordsEn[0] : wordsEn[1];
     }
 
     // Russian declensions: 1 день, 2-4 дня, 5-0 дней.
@@ -9,7 +9,11 @@ export const pluralize = (count, wordsRu, wordsEn, lang) => {
         ? 2
         : cases[(count % 10 < 5) ? count % 10 : 5];
 
-    return `${count} ${wordsRu[idx]}`;
+    return wordsRu[idx];
+};
+
+export const pluralize = (count, wordsRu, wordsEn, lang) => {
+    return `${count} ${pluralizeWord(count, wordsRu, wordsEn, lang)}`;
 };
 
 export const formatDuration = (mins, lang) => {
@@ -149,6 +153,18 @@ export const TRANSLATIONS = {
         followBtn: "Подписаться",
         unfollowBtn: "Отписаться",
         followBackBtn: "Подписаться в ответ",
+        inviteBtn: "Пригласить",
+        removeFollowerBtn: "Убрать",
+        followsYou: "Подписан на вас",
+        mutualFollow: "Вы подписаны друг на друга",
+        youFollow: "Вы подписаны",
+        inviteHint: "Приглашение в совместный чеклист открывается из самого чеклиста.",
+        chooseChecklistTitle: "Куда пригласить",
+        chooseChecklistDesc: "Выберите чеклист для приглашения.",
+        noChecklistsToInvite: "У вас пока нет чеклистов для приглашения.",
+        alreadyInChecklist: "Уже в чеклисте",
+        inviteSent: "Приглашение отправлено",
+        inviteAction: "Пригласить",
         subsEmptyState: "Здесь пока пусто.",
         followersStat: "Подписчики",
         followingStat: "Подписки",
@@ -286,6 +302,18 @@ export const TRANSLATIONS = {
         followBtn: "Follow",
         unfollowBtn: "Unfollow",
         followBackBtn: "Follow Back",
+        inviteBtn: "Invite",
+        removeFollowerBtn: "Remove",
+        followsYou: "Follows you",
+        mutualFollow: "You follow each other",
+        youFollow: "You follow this account",
+        inviteHint: "Checklist invites are available from inside a checklist.",
+        chooseChecklistTitle: "Invite To Checklist",
+        chooseChecklistDesc: "Choose a checklist for the invite.",
+        noChecklistsToInvite: "You have no checklists to invite into yet.",
+        alreadyInChecklist: "Already in checklist",
+        inviteSent: "Invite sent",
+        inviteAction: "Invite",
         subsEmptyState: "It's empty here.",
         followersStat: "Followers",
         followingStat: "Following",

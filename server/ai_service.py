@@ -95,7 +95,7 @@ async def ask_travel_ai(
         async with httpx.AsyncClient(timeout=15.0) as client:
             for attempt in range(max_retries):
                 # Dynamically load base url to allow proxy services
-                gemini_url = os.getenv("GEMINI_BASE_URL", DEFAULT_URL)
+                gemini_url = os.getenv("GEMINI_BASE_URL", "").strip() or DEFAULT_URL
                 
                 resp = await client.post(
                     f"{gemini_url}?key={api_key}",
