@@ -3263,7 +3263,8 @@ const App = ({ page }) => {
       {/* Navbar */}
       <nav className="navbar">
         <div className="navbar-logo" onClick={() => navigate("/")}>
-          <span>🧳</span><span className="navbar-logo-text">Luggify</span>
+          <img src="/luggify-logo.svg" alt="" className="navbar-logo-mark" aria-hidden="true" />
+          <span className="navbar-logo-text">LUGGIFY</span>
         </div>
         <div className="navbar-center navbar-search-desktop">
           <NavbarUserSearch

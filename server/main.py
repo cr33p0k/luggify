@@ -875,6 +875,7 @@ async def get_public_profile(
     public_reviews = await crud.get_trip_reviews_by_user_id(db, user.id, public_only=True)
 
     return {
+        "id": user.id,
         "username": user.username,
         "created_at": user.created_at,
         "avatar": user.avatar,

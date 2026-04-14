@@ -6,6 +6,106 @@
     animation: fadeInUp 0.5s ease;
 }
 
+.public-profile-shell {
+    padding-top: 0;
+}
+
+.public-profile-page {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 1.5rem 1.25rem 2.25rem;
+    width: 100%;
+}
+
+.public-profile-page .profile-header {
+    margin-bottom: 1.5rem;
+    padding: 1.05rem;
+    background: var(--bg-card, #141414);
+    border: 1px solid var(--border-subtle, rgba(255, 165, 0, 0.12));
+    border-radius: 22px;
+    overflow: hidden;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
+}
+
+.public-profile-page .profile-action-mt-compact {
+    width: auto;
+    display: flex;
+    justify-content: flex-start;
+    align-self: flex-start;
+    margin-top: 0.85rem;
+}
+
+.public-profile-corner-actions {
+    display: inline-flex;
+}
+
+.public-profile-action-row {
+    gap: 0.55rem;
+    flex-wrap: nowrap;
+    transform: none;
+}
+
+.public-profile-action-row .profile-follow-btn-public {
+    margin-inline: 0;
+    align-self: center;
+    transform: none;
+}
+
+.public-profile-invite-btn {
+    min-width: 132px;
+    justify-content: center;
+}
+
+.public-profile-badge {
+    letter-spacing: 0.03em;
+    font-size: 0.68rem;
+    min-height: 28px;
+    padding: 0.42rem 0.72rem;
+}
+
+.public-profile-tabs {
+    margin-top: 0.4rem;
+}
+
+.public-profile-empty {
+    min-height: 200px;
+}
+
+.public-profile-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.8rem;
+}
+
+.public-profile-stat-card {
+    min-height: 96px;
+}
+
+.public-profile-about-card {
+    margin-top: 1rem;
+    padding: 1rem 1.05rem;
+    border-radius: 20px;
+    border: 1px solid rgba(255, 176, 59, 0.12);
+    background:
+        radial-gradient(circle at top left, rgba(255, 176, 59, 0.08), transparent 42%),
+        rgba(255, 255, 255, 0.03);
+}
+
+.public-profile-about-title {
+    margin-bottom: 0.8rem;
+}
+
+.public-profile-about-bio {
+    margin-bottom: 0;
+}
+
+.public-profile-socials {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.9rem;
+}
+
 .profile-header {
     display: flex;
     flex-direction: column;
@@ -42,6 +142,10 @@
 
 .profile-main-row.profile-main-row-compact {
     grid-template-columns: 148px minmax(0, 1fr) minmax(360px, 390px);
+}
+
+.profile-main-row.profile-main-row-compact.no-sidebar {
+    grid-template-columns: 148px minmax(0, 1fr);
 }
 
 .profile-avatar-rail {
@@ -308,9 +412,18 @@
     z-index: 1;
 }
 
+.profile-main-row.profile-main-row-compact.no-sidebar .profile-info-block {
+    grid-column: 2;
+    padding-right: 0.2rem;
+}
+
 .profile-main-row.profile-main-row-compact .profile-details-view {
     max-width: min(34ch, calc(100% - 14.5rem));
     align-items: flex-start;
+}
+
+.profile-main-row.profile-main-row-compact.no-sidebar .profile-details-view {
+    max-width: min(38rem, 100%);
 }
 
 .profile-main-row.profile-main-row-compact .profile-bio {
@@ -330,6 +443,10 @@
     grid-column: 3;
     grid-row: 1;
     z-index: 1;
+}
+
+.profile-main-row.profile-main-row-compact.no-sidebar .profile-stats-panel {
+    display: none;
 }
 
 .profile-info-block h2 {
@@ -680,6 +797,17 @@
     min-width: 176px;
     margin-top: 0;
     justify-content: center;
+}
+
+.profile-action-mt-compact {
+    margin-top: 0.4rem;
+}
+
+.profile-follow-btn-public {
+    min-width: 0;
+    padding-inline: 1rem;
+    min-height: 40px;
+    border-radius: 999px;
 }
 
 /* Tabs */
@@ -2353,6 +2481,19 @@
         padding: 1rem 0.45rem 2rem;
     }
 
+    .public-profile-shell {
+        padding-top: 0;
+    }
+
+    .public-profile-page {
+        padding: 1rem 0.45rem 2rem;
+    }
+
+    .public-profile-page .profile-header {
+        padding: 0.82rem;
+        border-radius: 18px;
+    }
+
     .profile-header {
         padding: 0.82rem;
         border-radius: 18px;
@@ -2402,6 +2543,10 @@
         gap: 0.42rem 1.08rem;
         text-align: left;
         align-items: start;
+    }
+
+    .profile-main-row.profile-main-row-compact.no-sidebar {
+        grid-template-areas: "avatar info";
     }
 
     .profile-corner-actions {
@@ -2899,6 +3044,72 @@
         min-width: 0;
     }
 
+    .profile-follow-btn-public {
+        width: fit-content;
+        max-width: 100%;
+        padding-inline: 0.92rem;
+        min-height: 36px;
+        font-size: 0.82rem;
+        align-self: flex-start;
+    }
+
+    .public-profile-page .profile-action-mt-compact {
+        justify-content: flex-start;
+        margin-top: 0.72rem;
+        gap: 0.45rem;
+        transform: translateX(-40px);
+    }
+
+    .public-profile-page .profile-action-mt-compact .profile-follow-btn-public {
+        width: auto;
+        align-self: center;
+        transform: none;
+    }
+
+    .public-profile-invite-btn {
+        min-width: 118px;
+    }
+
+    .public-profile-badge {
+        min-height: 24px;
+        padding: 0.3rem 0.55rem;
+        font-size: 0.56rem;
+        letter-spacing: 0.02em;
+    }
+
+    .public-profile-tabs {
+        gap: 0.45rem;
+        margin-top: 0.1rem;
+    }
+
+    .public-profile-tabs .profile-tab {
+        padding: 0.68rem 0.82rem;
+        font-size: 0.92rem;
+    }
+
+    .public-profile-stats-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.55rem;
+    }
+
+    .public-profile-stat-card {
+        min-height: 76px;
+    }
+
+    .public-profile-about-card {
+        margin-top: 0.8rem;
+        padding: 0.92rem;
+        border-radius: 18px;
+    }
+
+    .public-profile-about-title {
+        margin-bottom: 0.62rem;
+    }
+
+    .public-profile-empty {
+        min-height: 180px;
+    }
+
     .profile-hero-metric[data-metric-key="items"] {
         display: none;
     }
@@ -2930,6 +3141,19 @@
 }
 
 @media (max-width: 420px) {
+    .public-profile-shell {
+        padding-top: 0;
+    }
+
+    .public-profile-page .profile-header {
+        padding: 0.8rem;
+    }
+
+    .public-profile-tabs .profile-tab {
+        padding: 0.62rem 0.72rem;
+        font-size: 0.85rem;
+    }
+
     .achievements-grid {
         grid-template-columns: 1fr;
     }

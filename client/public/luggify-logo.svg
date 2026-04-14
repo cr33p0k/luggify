@@ -1,0 +1,37 @@
+<svg width="72" height="72" viewBox="0 0 72 72" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="luggifyStroke" x1="15" y1="10" x2="58" y2="61" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FF9400"/>
+      <stop offset="1" stop-color="#FFC05A"/>
+    </linearGradient>
+    <linearGradient id="luggifyAccent" x1="42" y1="37" x2="54" y2="51" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFF7E8"/>
+      <stop offset="1" stop-color="#FFD071"/>
+    </linearGradient>
+    <filter id="luggifyGlow" x="5" y="1" width="62" height="70" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
+      <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+      <feGaussianBlur stdDeviation="2" result="effect1_foregroundBlur"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#luggifyGlow)" opacity="0.32">
+    <path d="M28 16.5V12C28 9.79086 29.7909 8 32 8H40C42.2091 8 44 9.79086 44 12V16.5" stroke="#FFAF2F" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="19" y="16" width="34" height="42" rx="8.5" stroke="#FFAF2F" stroke-width="3.2"/>
+    <path d="M26.5 29.5V47.5C26.5 49.9853 28.5147 52 31 52V52" stroke="#FFAF2F" stroke-width="3.2" stroke-linecap="round"/>
+    <rect x="41" y="27" width="10" height="10" rx="3.2" stroke="#FFAF2F" stroke-width="3.2"/>
+    <rect x="41" y="40.5" width="10" height="10" rx="3.2" fill="#FFF4DD" stroke="#FFAF2F" stroke-width="3.2"/>
+    <path d="M25 58V60C25 61.6569 26.3431 63 28 63H29.5" stroke="#FFAF2F" stroke-width="3.2" stroke-linecap="round"/>
+    <path d="M47 58V60C47 61.6569 45.6569 63 44 63H42.5" stroke="#FFAF2F" stroke-width="3.2" stroke-linecap="round"/>
+  </g>
+
+  <path d="M28 16.5V12C28 9.79086 29.7909 8 32 8H40C42.2091 8 44 9.79086 44 12V16.5" stroke="url(#luggifyStroke)" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M32 16V12.8M40 16V12.8" stroke="url(#luggifyStroke)" stroke-width="2.3" stroke-linecap="round"/>
+  <rect x="19" y="16" width="34" height="42" rx="8.5" fill="#1B1A17" stroke="url(#luggifyStroke)" stroke-width="2.8"/>
+  <path d="M26.5 29.5V47.5C26.5 49.9853 28.5147 52 31 52V52" stroke="url(#luggifyStroke)" stroke-width="2.8" stroke-linecap="round"/>
+  <path d="M26.5 29.5C26.5 27.0147 28.5147 25 31 25V25" stroke="url(#luggifyStroke)" stroke-width="2.8" stroke-linecap="round"/>
+  <rect x="41" y="27" width="10" height="10" rx="3.2" stroke="url(#luggifyStroke)" stroke-width="2.8"/>
+  <rect x="41" y="40.5" width="10" height="10" rx="3.2" fill="url(#luggifyAccent)" stroke="url(#luggifyStroke)" stroke-width="2.8"/>
+  <path d="M25 58V60C25 61.6569 26.3431 63 28 63H29.5" stroke="url(#luggifyStroke)" stroke-width="2.8" stroke-linecap="round"/>
+  <path d="M47 58V60C47 61.6569 45.6569 63 44 63H42.5" stroke="url(#luggifyStroke)" stroke-width="2.8" stroke-linecap="round"/>
+</svg>

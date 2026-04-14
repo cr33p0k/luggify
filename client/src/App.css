@@ -82,24 +82,35 @@ svg {
 }
 
 .navbar-logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.58rem;
   font-size: 1.5rem;
   font-weight: 800;
-  background: linear-gradient(135deg, var(--orange), var(--orange-light));
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
   cursor: pointer;
   user-select: none;
   letter-spacing: -0.5px;
 }
 
-.navbar-logo span {
-  font-size: 1.3rem;
-  margin-right: 6px;
+.navbar-logo-mark {
+  width: 1.5em;
+  height: 1.5em;
+  display: block;
+  flex-shrink: 0;
+  filter: drop-shadow(0 0 10px rgba(255, 166, 0, 0.18));
 }
 
 .navbar-logo-text {
   font-size: inherit;
+  display: inline-block;
+  line-height: 1.08;
+  padding-block: 0.06em;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  background: linear-gradient(135deg, var(--orange), var(--orange-light));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
 .navbar-center {
@@ -5505,9 +5516,9 @@ input[type="date"]:focus,
     letter-spacing: -0.3px;
   }
 
-  .navbar-logo span {
-    font-size: 1.18rem;
-    margin-right: 0;
+  .navbar-logo-mark {
+    width: 1.6rem;
+    height: 1.6rem;
   }
 
   .navbar-logo-text {
@@ -6135,6 +6146,11 @@ input[type="date"]:focus,
 
   .navbar-logo {
     font-size: 1.35rem;
+  }
+
+  .navbar-logo-mark {
+    width: 1.45rem;
+    height: 1.45rem;
   }
 
   .navbar-search-input {
