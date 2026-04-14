@@ -39,8 +39,7 @@ MOVE_PATTERNS = [
 ]
 
 SHARED_SECTION_ALIASES = [
-    "общие вещи", "общий список", "общее", "общак", "shared", "common items", "shared items",
-    "обратно", "назад", "back", "shared list",
+    "список вещей", "список", "чеклист", "назад", "back",
 ]
 
 SELF_SECTION_ALIASES = [
@@ -200,7 +199,7 @@ INFO_PATTERNS = {
         r"show\s+removed\s+items",
     ],
     "items": [
-        r"что\s+в\s+(?:моем|моём|моей|моем|рюкзаке|сумке|общих\s+вещах|общем\s+списке)",
+        r"что\s+в\s+(?:моем|моём|моей|моем|рюкзаке|сумке|списке|чеклисте)",
         r"что\s+у\s+.+?\s+в\s+(?:рюкзаке|сумке)",
         r"что\s+лежит\s+в",
         r"покажи\s+(?:мне\s+)?(?:рюкзак|список|вещи)",
@@ -769,7 +768,7 @@ def _resolve_default_section_reference(checklist, actor_user_id: Optional[int] =
     actor_backpack = _pick_actor_backpack(checklist, actor_user_id)
     if actor_backpack:
         return _build_backpack_reference(actor_backpack)
-    return {"kind": "shared", "label": "общие вещи"}
+    return {"kind": "shared", "label": "список вещей"}
 
 
 def _guess_baggage_kind(name: str) -> str:
@@ -902,7 +901,7 @@ def _extract_move_actions(command: str, checklist, actor_user_id: Optional[int] 
                     "type": "move",
                     "items": items,
                     "source_hint": source_hint.strip(),
-                    "target_hint": (target_hint or "общие вещи").strip(),
+                    "target_hint": (target_hint or "список вещей").strip(),
                 }],
             }
 
@@ -947,7 +946,7 @@ def _extract_move_actions(command: str, checklist, actor_user_id: Optional[int] 
                     "type": "move",
                     "items": items,
                     "source_hint": None,
-                    "target_hint": (target_hint or "общие вещи").strip(),
+                    "target_hint": (target_hint or "список вещей").strip(),
                 }],
             }
 
@@ -1130,7 +1129,7 @@ def _infer_source_section(
         }
 
     if _resolve_requested_items([requested_item], snapshot["shared"]["items"]):
-        return {"kind": "shared", "label": "общие вещи"}
+        return {"kind": "shared", "label": "список вещей"}
 
     return None
 
@@ -1315,8 +1314,8 @@ def _personalize_section_label(
         return None
 
     normalized_label = _normalize_for_matching(label)
-    if normalized_label == "общие вещи":
-        return "общие вещи" if language == "ru" else "shared items"
+    if normalized_label == "список вещей":
+        return "список вещей" if language == "ru" else "packing list"
 
     if actor_user_id is None or section_user_id != actor_user_id:
         return label
@@ -1339,7 +1338,7 @@ def _format_section_location(label: Optional[str], language: str = "ru") -> Opti
         return f"in {label}"
 
     mapping = {
-        "общие вещи": "в общих вещах",
+        "список вещей": "в списке вещей",
         "твой рюкзак": "в твоем рюкзаке",
         "твой чемодан": "в твоем чемодане",
         "твой багаж": "в твоем багаже",
@@ -1965,7 +1964,7 @@ def _build_info_message(
             quantity_map,
             getattr(checklist, "packed_quantities", None),
         )
-        section_label = "общие вещи"
+        section_label = "список вещей"
 
     visible_items = [item for item in section_items if _normalize_item(item) not in {_normalize_item(x) for x in removed_items}]
     remaining_items = [
@@ -2072,7 +2071,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                 getattr(checklist, "item_quantities", None),
                 getattr(checklist, "packed_quantities", None),
             ),
-            "label": "общие вещи",
+            "label": "список вещей",
         },
         "backpacks": [
             {
@@ -2292,7 +2291,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                             "items": [existing_item],
                             "amount": spec["quantity"],
                             "total_quantity": next_quantity,
-                            **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
+                            **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
                     else:
@@ -2305,7 +2304,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                         action_results.append({
                             "type": "restore",
                             "items": [existing_item],
-                            **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
+                            **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
                     continue
@@ -2321,7 +2320,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                             "items": [existing_item],
                             "amount": spec["quantity"],
                             "total_quantity": next_quantity,
-                            **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
+                            **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
                     else:
@@ -2329,7 +2328,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                             "type": "exists",
                             "items": [existing_item],
                             "total_quantity": current_quantity,
-                            **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
+                            **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
                     continue
@@ -2347,7 +2346,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                     "type": "add",
                     "items": [cleaned_item],
                     "total_quantity": initial_quantity,
-                    **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
+                    **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                     **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                 })
 
@@ -2358,7 +2357,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                     action_results.append({
                         "type": "not_found",
                         "items": [spec["item"]],
-                        **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
+                        **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                         **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                     })
                     continue
@@ -2387,7 +2386,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                                 "items": [item],
                                 "amount": min(spec["quantity"], current_quantity),
                                 "total_quantity": next_quantity,
-                                **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
+                                **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                                 **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                             })
                             continue
@@ -2403,14 +2402,14 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                         action_results.append({
                             "type": "remove",
                             "items": [item],
-                            **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
+                            **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
                     else:
                         action_results.append({
                             "type": "already_removed",
                             "items": [item],
-                            **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
+                            **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
 
@@ -2421,7 +2420,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                     action_results.append({
                         "type": "not_found",
                         "items": [spec["item"]],
-                        **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
+                        **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                         **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                     })
                     continue
@@ -2445,7 +2444,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                             "items": [item],
                             "total_packed": next_packed,
                             "total_quantity": needed_quantity,
-                            **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
+                            **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
                     else:
@@ -2454,7 +2453,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                             "items": [item],
                             "total_packed": current_packed,
                             "total_quantity": needed_quantity,
-                            **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
+                            **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
 
@@ -2465,7 +2464,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                     action_results.append({
                         "type": "not_found",
                         "items": [spec["item"]],
-                        **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
+                        **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                         **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                     })
                     continue
@@ -2489,7 +2488,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                             "items": [item],
                             "total_packed": next_packed,
                             "total_quantity": needed_quantity,
-                            **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
+                            **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
                     else:
@@ -2498,7 +2497,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                             "items": [item],
                             "total_packed": current_packed,
                             "total_quantity": needed_quantity,
-                            **({"section_label": action_section["label"]} if action_section["label"] != "общие вещи" else {}),
+                            **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
 

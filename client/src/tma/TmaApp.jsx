@@ -250,6 +250,32 @@ const getChecklistProgress = (baggage = []) => {
   };
 };
 
+const TmaProgressRing = ({ percent = 0 }) => {
+  const safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
+  const radius = 28;
+  const circumference = 2 * Math.PI * radius;
+  const dashOffset = circumference * (1 - safePercent / 100);
+
+  return (
+    <div className="tma-progress-ring" aria-label={`Прогресс ${safePercent}%`}>
+      <svg className="tma-progress-ring-svg" viewBox="0 0 72 72" aria-hidden="true">
+        <circle className="tma-progress-ring-track" cx="36" cy="36" r={radius} />
+        <circle
+          className="tma-progress-ring-fill"
+          cx="36"
+          cy="36"
+          r={radius}
+          style={{
+            strokeDasharray: circumference,
+            strokeDashoffset: dashOffset,
+          }}
+        />
+      </svg>
+      <strong>{safePercent}%</strong>
+    </div>
+  );
+};
+
 const formatForecastDate = (value) =>
   new Date(`${value}T00:00:00`).toLocaleDateString("ru-RU", {
     weekday: "short",
@@ -1002,9 +1028,7 @@ function TmaApp() {
             {checklist ? formatDateRange(checklist) : "Выбери поездку"}
           </p>
         </div>
-        <div className="tma-progress-ring" style={{ "--progress": `${totalProgress.percent}%` }}>
-          <strong>{totalProgress.percent}%</strong>
-        </div>
+        <TmaProgressRing percent={totalProgress.percent} />
       </section>
 
       {toast && <div className="tma-toast">{toast}</div>}

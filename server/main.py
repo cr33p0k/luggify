@@ -612,9 +612,20 @@ async def login(data: schemas.UserLogin, response: Response, db: AsyncSession = 
             user.code_expires_at = datetime.now() + timedelta(minutes=10)
             await db.commit()
             
-            await send_verification_email(user.email, code, user.username)
+            email_sent = await send_verification_email(user.email, code, user.username)
             response.status_code = status.HTTP_202_ACCEPTED
-            return {"status": "verification_required", "message": "Новое устройство. Код подтверждения отправлен на почту."}
+            return {
+                "status": "verification_required",
+                "message": (
+                    "Новое устройство. Код подтверждения отправлен на почту."
+                    if email_sent
+                    else (
+                        f"Новое устройство, но письмо на {user.email} пока не отправлено. "
+                        "Проверьте SMTP-настройки сервера и попробуйте ещё раз."
+                    )
+                ),
+                "email_delivery_failed": not email_sent,
+            }
 
     # Generate token if trusted or no device tracking (legacy)
     access_token = create_access_token(data={"sub": str(user.id)})
@@ -712,6 +723,24 @@ async def create_telegram_link(user=Depends(require_current_user)):
         "link_command": f"/link {link_token}",
         "expires_at": expires_at,
     }
+
+
+@app.delete("/auth/telegram/link", response_model=schemas.UserOut)
+async def unlink_telegram(user=Depends(require_current_user), db: AsyncSession = Depends(get_db)):
+    updated_user = await crud.unlink_telegram_from_user(db, user.id)
+    if not updated_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Пользователь не найден",
+        )
+
+    followers = await crud.get_followers(db, user.id)
+    following = await crud.get_following(db, user.id)
+
+    user_out = schemas.UserOut.model_validate(updated_user)
+    user_out.followers_count = len(followers)
+    user_out.following_count = len(following)
+    return user_out
 
 
 @app.post("/auth/telegram", response_model=schemas.Token)
@@ -4003,6 +4032,25 @@ async def create_or_update_trip_review(
     return build_trip_review_payload(saved_review)
 
 
+@app.delete("/checklists/{slug}/review")
+async def delete_trip_review(
+    slug: str,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+
+    review = await crud.get_trip_review_by_user_and_checklist(db, user.id, checklist.id)
+    if not review:
+        raise HTTPException(status_code=404, detail="Отзыв не найден")
+
+    await db.delete(review)
+    await db.commit()
+    return {"ok": True}
+
+
 @app.post("/checklists/{slug}/ai-command", response_model=schemas.ChecklistAICommandResponse)
 async def run_ai_checklist_command(
     slug: str,
@@ -4444,10 +4492,16 @@ async def notify_invite(
     checklist = await crud.get_checklist_by_slug(db, slug)
     if not checklist:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
+
+    if checklist.user_id != user.id:
+        raise HTTPException(status_code=403, detail="Только владелец может приглашать в чеклист")
     
-    # Check if target user is already the owner
-    if checklist.user_id == target_user_id:
-        raise HTTPException(status_code=409, detail="Этот пользователь — владелец чеклиста")
+    target_user = await crud.get_user_by_id(db, target_user_id)
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    if is_checklist_participant(checklist, target_user_id):
+        raise HTTPException(status_code=409, detail="Пользователь уже в чеклисте")
     
     # Ensure participant baggage exists for direct collaborative checklist flow
     existing_bp = await db.execute(

@@ -5,11 +5,12 @@ import DateRangePicker from "./DateRangePicker";
 import AuthModal from "./AuthModal";
 import ProfilePage from "./ProfilePage";
 import NavbarUserSearch from "./NavbarUserSearch";
+import ConfirmDialog from "./ConfirmDialog";
 import {
   PlaneIcon, TrainIcon, CarIcon, BusIcon,
   VacationIcon, BusinessIcon, ActiveIcon, BeachIcon, WinterIcon,
-  CalendarIcon, SparkleIcon, WeatherIcon, UVIcon, LockIcon, UnlockIcon,
-  ClockIcon, DropletIcon, WindIcon, TentIcon, BackpackIcon, HotelIcon, MuseumIcon, SmartphoneIcon, GlobeIcon
+  CalendarIcon, SparkleIcon, WeatherIcon, LockIcon, UnlockIcon,
+  ClockIcon, DropletIcon, WindIcon, BackpackIcon, HotelIcon, MuseumIcon, SmartphoneIcon, GlobeIcon
 } from './Icons';
 import "./App.css";
 import "./AuthModal.css";
@@ -19,6 +20,39 @@ import "./AIChatWidget.css";
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 import { TRANSLATIONS, formatDuration, pluralize } from "./i18n";
 
+const FORECAST_DESKTOP_CARD_WIDTH = 146;
+const FORECAST_DESKTOP_GAP = 12;
+
+const getForecastRowLayout = (count) => {
+  const safeCount = Math.max(1, Number(count) || 1);
+  if (safeCount <= 7) return [safeCount];
+  if (safeCount === 8) return [4, 4];
+  if (safeCount === 9) return [5, 4];
+  if (safeCount === 10) return [5, 5];
+  if (safeCount <= 14) return [7, safeCount - 7];
+
+  const rows = Math.ceil(safeCount / 7);
+  const baseSize = Math.floor(safeCount / rows);
+  const remainder = safeCount % rows;
+
+  return Array.from({ length: rows }, (_, index) => baseSize + (index < remainder ? 1 : 0));
+};
+
+const getForecastRowWidth = (count) =>
+  (count * FORECAST_DESKTOP_CARD_WIDTH) + (Math.max(0, count - 1) * FORECAST_DESKTOP_GAP);
+
+const splitForecastDays = (days = []) => {
+  const rows = [];
+  let startIndex = 0;
+
+  getForecastRowLayout(days.length).forEach((rowSize) => {
+    rows.push(days.slice(startIndex, startIndex + rowSize));
+    startIndex += rowSize;
+  });
+
+  return rows;
+};
+
 const safeParseJson = (value, fallback = null) => {
   if (!value) return fallback;
   try {
@@ -26,6 +60,12 @@ const safeParseJson = (value, fallback = null) => {
   } catch {
     return fallback;
   }
+};
+
+const readJsonSafely = async (response) => {
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) return null;
+  return response.json().catch(() => null);
 };
 
 const DEFAULT_PACKING_PROFILE = {
@@ -226,6 +266,24 @@ const buildBaggageParticipants = (checklist, currentUser) => {
       if (a.isOwner !== b.isOwner) return a.isOwner ? -1 : 1;
       return a.username.localeCompare(b.username, "ru");
     });
+};
+
+const normalizeUserId = (value) => {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue : value;
+};
+
+const getChecklistParticipantIds = (checklist) => {
+  const ids = new Set();
+  if (checklist?.user_id) {
+    ids.add(normalizeUserId(checklist.user_id));
+  }
+  (checklist?.backpacks || []).forEach((backpack) => {
+    if (backpack.user_id) {
+      ids.add(normalizeUserId(backpack.user_id));
+    }
+  });
+  return ids;
 };
 
 const guessBaggageKind = (name) => {
@@ -574,6 +632,29 @@ const TelegramLinkButton = ({ user, token, onUserUpdate, lang }) => {
     await loadLinkInfo();
   };
 
+  const unlinkTelegram = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const res = await fetch(`${API_URL}/auth/telegram/link`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || (lang === "en" ? "Failed to unlink Telegram" : "Не удалось отвязать Telegram"));
+      }
+      onUserUpdate(data);
+      return true;
+    } catch (e) {
+      console.error(e);
+      setError(e.message || (lang === "en" ? "Failed to unlink Telegram" : "Не удалось отвязать Telegram"));
+      return false;
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const refreshStatus = React.useCallback(async () => {
     setLoading(true);
     setError("");
@@ -607,8 +688,8 @@ const TelegramLinkButton = ({ user, token, onUserUpdate, lang }) => {
     return () => window.removeEventListener("focus", handleFocus);
   }, [isOpen, refreshStatus, user?.tg_id]);
 
-  const openTelegramBot = async () => {
-    const data = linkInfo || await loadLinkInfo();
+  const openTelegramBot = async (forceRefresh = false) => {
+    const data = forceRefresh ? await loadLinkInfo() : (linkInfo || await loadLinkInfo());
     if (!data?.deep_link) {
       setError(lang === "en" ? "Telegram link is not ready yet" : "Ссылка на Telegram пока не готова");
       return;
@@ -641,6 +722,24 @@ const TelegramLinkButton = ({ user, token, onUserUpdate, lang }) => {
     );
   };
 
+  const handlePrimaryAction = async () => {
+    if (user?.tg_id) {
+      const unlinked = await unlinkTelegram();
+      if (!unlinked) {
+        return;
+      }
+      setHint(
+        lang === "en"
+          ? "Previous Telegram binding has been removed. Continue in Telegram to link again."
+          : "Старая привязка снята. Продолжи в Telegram, чтобы привязать аккаунт заново."
+      );
+      setCopied(false);
+      setLinkInfo(null);
+    }
+
+    await openTelegramBot(Boolean(user?.tg_id));
+  };
+
   const botHandle = `@${linkInfo?.bot_username || "luggify_bot"}`;
   const telegramUsername = user?.social_links?.telegram
     ? user.social_links.telegram.replace(/^@/, "")
@@ -667,7 +766,7 @@ const TelegramLinkButton = ({ user, token, onUserUpdate, lang }) => {
       </button>
 
       {isOpen && (
-        <div className="modal-overlay" onClick={() => setIsOpen(false)}>
+        <div className="modal-overlay modal-overlay-lifted telegram-modal-overlay" onClick={() => setIsOpen(false)}>
           <div className="modal-content telegram-modal" onClick={(e) => e.stopPropagation()}>
             <button className="modal-close" onClick={() => setIsOpen(false)}>×</button>
 
@@ -708,11 +807,11 @@ const TelegramLinkButton = ({ user, token, onUserUpdate, lang }) => {
             </div>
 
             <div className="telegram-modal-actions">
-              <button className="telegram-modal-btn primary" onClick={openTelegramBot} disabled={loading}>
+              <button className="telegram-modal-btn primary" onClick={handlePrimaryAction} disabled={loading}>
                 {loading
                   ? "..."
                   : user?.tg_id
-                    ? (lang === "en" ? "Open bot again" : "Открыть бота снова")
+                    ? (lang === "en" ? "Relink Telegram" : "Перепривязать")
                     : (lang === "en" ? "Open bot" : "Открыть бота")}
               </button>
               <button className="telegram-modal-btn secondary" onClick={refreshStatus} disabled={loading}>
@@ -745,6 +844,56 @@ const TelegramLinkButton = ({ user, token, onUserUpdate, lang }) => {
 };
 
 // === Sub-components for travel services ===
+
+const TravelSectionShell = React.memo(({
+  sectionKey,
+  title,
+  icon,
+  children,
+  defaultExpanded = true,
+  actions = null,
+  summary = "",
+}) => {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+
+  useEffect(() => {
+    setExpanded(defaultExpanded);
+  }, [defaultExpanded, sectionKey]);
+
+  return (
+    <div className={`travel-section travel-section-shell${expanded ? " expanded" : " collapsed"}`}>
+      <div className="travel-section-header">
+        <button
+          type="button"
+          className="travel-section-trigger"
+          onClick={() => setExpanded((prev) => !prev)}
+        >
+          <span className="travel-section-title-wrap">
+            <span className="travel-section-title-icon">{icon}</span>
+            <span className="travel-section-title-copy">
+              <span className="travel-section-title-text">{title}</span>
+              {!expanded && summary && (
+                <span className="travel-section-summary">{summary}</span>
+              )}
+            </span>
+          </span>
+        </button>
+        <div className="travel-section-header-actions">
+          {actions}
+          <button
+            type="button"
+            className="collapse-toggle"
+            onClick={() => setExpanded((prev) => !prev)}
+            aria-expanded={expanded}
+          >
+            <span className={`chevron ${expanded ? "up" : ""}`}>▾</span>
+          </button>
+        </div>
+      </div>
+      {expanded && <div className="travel-section-body">{children}</div>}
+    </div>
+  );
+});
 
 const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
   const [data, setData] = useState([]);
@@ -824,11 +973,14 @@ const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
   );
 });
 
-const AttractionsSection = React.memo(({ city, lang }) => {
+const AttractionsSection = React.memo(({ city, lang, compact = false }) => {
   const citiesList = city ? (city.includes(" + ") ? city.split(" + ").map(c => c.trim()) : [city]) : [];
   const primaryCity = citiesList[0] || "";
   const [activeCity, setActiveCity] = useState(primaryCity);
   const limit = citiesList.length > 1 ? 5 : 10;
+  const sectionSummary = compact
+    ? `${citiesList.length > 1 ? citiesList.length : limit} ${lang === "en" ? "spots" : "мест"}`
+    : "";
 
   useEffect(() => {
     setActiveCity(primaryCity);
@@ -837,8 +989,13 @@ const AttractionsSection = React.memo(({ city, lang }) => {
   if (!city) return null;
 
   return (
-    <div className="travel-section">
-      <h3 className="section-title" style={{ display: 'flex', alignItems: 'center' }}><MuseumIcon /> {TRANSLATIONS[lang].whatToSee}</h3>
+    <TravelSectionShell
+      sectionKey={`attractions-${city}-${lang}-${compact ? "compact" : "full"}`}
+      title={TRANSLATIONS[lang].whatToSee}
+      icon={<MuseumIcon />}
+      defaultExpanded={!compact}
+      summary={sectionSummary}
+    >
       {citiesList.length > 1 && (
         <div className="city-tabs">
           {citiesList.map((c, i) => (
@@ -866,11 +1023,11 @@ const AttractionsSection = React.memo(({ city, lang }) => {
           {TRANSLATIONS[lang].showMoreAttractions || "Показать больше"}
         </a>
       </div>
-    </div>
+    </TravelSectionShell>
   );
 });
 
-const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang }) => {
+const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang, compact = false }) => {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -899,8 +1056,13 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang }
   const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
 
   return (
-    <div className="travel-section">
-      <h3 className="section-title" style={{ display: 'flex', alignItems: 'center' }}><PlaneIcon /> {t.flightsTitle}</h3>
+    <TravelSectionShell
+      sectionKey={`flights-${city}-${startDate || ""}-${returnDate || ""}-${compact ? "compact" : "full"}`}
+      title={t.flightsTitle}
+      icon={<PlaneIcon />}
+      defaultExpanded={!compact}
+      summary={loading ? (lang === "en" ? "Loading" : "Загружается") : (lang === "en" ? "Flight ideas" : "Подборка билетов")}
+    >
       {loading ? (
         <div className="loading-spinner-wrap">
           <div className="loading-spinner" />
@@ -979,11 +1141,11 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang }
           )}
         </>
       )}
-    </div>
+    </TravelSectionShell>
   );
 });
 
-const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
+const HotelsSection = React.memo(({ city, startDate, endDate, lang, compact = false }) => {
   const citiesList = city ? city.split("+").map(c => c.trim()) : [];
   const primaryCity = citiesList[0] || "";
   const [activeCity, setActiveCity] = useState(primaryCity);
@@ -1052,8 +1214,24 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
   const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
 
   return (
-    <div className="travel-section">
-      <h3 className="section-title" style={{ display: 'flex', alignItems: 'center' }}><HotelIcon /> {t.hotelsTitle}</h3>
+    <TravelSectionShell
+      sectionKey={`hotels-${city}-${startDate || ""}-${endDate || ""}-${compact ? "compact" : "full"}`}
+      title={t.hotelsTitle}
+      icon={<HotelIcon />}
+      defaultExpanded={!compact}
+      summary={triggered
+        ? `${data.length || 0} ${lang === "en" ? "options" : "вариантов"}`
+        : (lang === "en" ? "Ready when needed" : "Под рукой, когда понадобится")}
+      actions={
+        loaded && data.length > 0 && provider !== "ru_widgets" && !isRussia ? (
+          <a href={bookingDirectLink} target="_blank" rel="noopener noreferrer" className="booking-corner-link" title={t.goToBooking}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="9 18 15 12 9 6" />
+            </svg>
+          </a>
+        ) : null
+      }
+    >
       {citiesList.length > 1 && (
         <div className="city-tabs">
           {citiesList.map((c, i) => (
@@ -1066,13 +1244,6 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
             </button>
           ))}
         </div>
-      )}
-      {loaded && data.length > 0 && provider !== "ru_widgets" && !isRussia && (
-        <a href={bookingDirectLink} target="_blank" rel="noopener noreferrer" className="booking-corner-link" title={t.goToBooking}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="9 18 15 12 9 6" />
-          </svg>
-        </a>
       )}
       <div className="hotels-filter-wrap">
         <div className="guest-selector-container">
@@ -1160,21 +1331,49 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
         </div>
       ) : provider === "ru_widgets" ? (
         <div className="ru-widgets-container">
-          <div className="ru-widgets-text" style={{ textAlign: "center", color: "#9ca3af", marginBottom: "1rem", fontSize: "0.9rem" }}>
+          <div className="ru-widgets-text">
             {t.ruWidgetsDisclaimer}
           </div>
-          <div className="ru-widgets-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
-            <a href={links.ostrovok} target="_blank" rel="noopener noreferrer" className="ru-widget-card" style={{ background: "#1a1a1a", border: "1px solid #333", borderRadius: "12px", padding: "1.5rem", display: "flex", flexDirection: "column", alignItems: "center", textDecoration: "none", transition: "transform 0.2s, border-color 0.2s" }}>
-              <div style={{ fontSize: "2rem", marginBottom: "0.5rem", display: "flex", justifyContent: "center" }}><HotelIcon style={{ width: '32px', height: '32px' }} /></div>
-              <h4 style={{ color: "white", margin: "0 0 0.5rem 0" }}>Ostrovok.ru</h4>
-              <p style={{ color: "#9ca3af", fontSize: "0.85rem", textAlign: "center", margin: 0 }}>Более миллиона отелей и апартаментов по всей России</p>
-              <div style={{ background: "var(--orange)", color: "white", padding: "0.5rem 1rem", borderRadius: "6px", fontSize: "0.85rem", fontWeight: "bold", marginTop: "1rem", width: "100%", textAlign: "center" }}>Поиск на Ostrovok</div>
+          <div className="ru-widgets-grid">
+            <a href={links.ostrovok} target="_blank" rel="noopener noreferrer" className="ru-widget-card">
+              <div className="ru-widget-icon">
+                <HotelIcon style={{ width: '28px', height: '28px' }} />
+              </div>
+              <h4 className="ru-widget-title">Ostrovok.ru</h4>
+              <p className="ru-widget-description">
+                <span className="ru-widget-copy-full">
+                  {lang === "en"
+                    ? "Hotels and apartments across Russia"
+                    : "Более миллиона отелей и апартаментов по всей России"}
+                </span>
+                <span className="ru-widget-copy-mobile">
+                  {lang === "en" ? "Hotels in Russia" : "Отели и апартаменты"}
+                </span>
+              </p>
+              <div className="ru-widget-cta">
+                <span className="ru-widget-cta-full">{lang === "en" ? "Search Ostrovok" : "Поиск на Ostrovok"}</span>
+                <span className="ru-widget-cta-mobile">{lang === "en" ? "Open" : "Открыть"}</span>
+              </div>
             </a>
-            <a href={links.sutochno} target="_blank" rel="noopener noreferrer" className="ru-widget-card" style={{ background: "#1a1a1a", border: "1px solid #333", borderRadius: "12px", padding: "1.5rem", display: "flex", flexDirection: "column", alignItems: "center", textDecoration: "none", transition: "transform 0.2s, border-color 0.2s" }}>
-              <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>🔑</div>
-              <h4 style={{ color: "white", margin: "0 0 0.5rem 0" }}>Суточно.ру</h4>
-              <p style={{ color: "#9ca3af", fontSize: "0.85rem", textAlign: "center", margin: 0 }}>Лучший сервис для аренды частного жилья и квартир</p>
-              <div style={{ background: "var(--orange)", color: "white", padding: "0.5rem 1rem", borderRadius: "6px", fontSize: "0.85rem", fontWeight: "bold", marginTop: "1rem", width: "100%", textAlign: "center" }}>Поиск на Суточно</div>
+            <a href={links.sutochno} target="_blank" rel="noopener noreferrer" className="ru-widget-card">
+              <div className="ru-widget-icon">
+                <GlobeIcon style={{ width: '28px', height: '28px' }} />
+              </div>
+              <h4 className="ru-widget-title">Суточно.ру</h4>
+              <p className="ru-widget-description">
+                <span className="ru-widget-copy-full">
+                  {lang === "en"
+                    ? "Private apartments and daily rentals"
+                    : "Лучший сервис для аренды частного жилья и квартир"}
+                </span>
+                <span className="ru-widget-copy-mobile">
+                  {lang === "en" ? "Daily rentals" : "Квартиры посуточно"}
+                </span>
+              </p>
+              <div className="ru-widget-cta">
+                <span className="ru-widget-cta-full">{lang === "en" ? "Search Sutochno" : "Поиск на Суточно"}</span>
+                <span className="ru-widget-cta-mobile">{lang === "en" ? "Open" : "Открыть"}</span>
+              </div>
             </a>
           </div>
         </div>
@@ -1217,11 +1416,11 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang }) => {
           ))}
         </div>
       )}
-    </div>
+    </TravelSectionShell>
   );
 });
 
-const EsimSection = React.memo(({ city, lang }) => {
+const EsimSection = React.memo(({ city, lang, compact = false }) => {
   const citiesList = city ? (city.includes(" + ") ? city.split(" + ").map(c => c.trim()) : [city]) : [];
   const [activeCity, setActiveCity] = useState(citiesList[0] || "");
 
@@ -1253,8 +1452,13 @@ const EsimSection = React.memo(({ city, lang }) => {
   const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
 
   return (
-    <div className="travel-section">
-      <h3 className="section-title" style={{ display: 'flex', alignItems: 'center' }}><SmartphoneIcon /> {t.esimTitle}</h3>
+    <TravelSectionShell
+      sectionKey={`esim-${city}-${lang}-${compact ? "compact" : "full"}`}
+      title={t.esimTitle}
+      icon={<SmartphoneIcon />}
+      defaultExpanded={!compact}
+      summary={lang === "en" ? "Connectivity" : "Связь в поездке"}
+    >
       {citiesList.length > 1 && (
         <div className="city-tabs">
           {citiesList.map((c, i) => (
@@ -1310,12 +1514,12 @@ const EsimSection = React.memo(({ city, lang }) => {
           )}
         </div>
       )}
-    </div>
+    </TravelSectionShell>
   );
 });
 
 // === Itinerary Section ===
-const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwnerId, currentUserId, hiddenSections, onToggleVisibility }) => {
+const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwnerId, currentUserId, hiddenSections, onToggleVisibility, requestConfirm }) => {
   const [events, setEvents] = useState(checklist?.events || []);
   const [addingDay, setAddingDay] = useState(null);
   const [newEvent, setNewEvent] = useState({ time: "", title: "", description: "", address: "" });
@@ -1403,7 +1607,14 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
   };
 
   const handleRemoveEvent = async (eventId) => {
-    if (!window.confirm("Удалить событие?")) return;
+    const confirmed = await requestConfirm({
+      title: lang === "en" ? "Delete event" : "Удалить событие",
+      message: lang === "en" ? "This action cannot be undone." : "Это действие нельзя отменить.",
+      confirmLabel: lang === "en" ? "Delete" : "Удалить",
+      cancelLabel: lang === "en" ? "Cancel" : "Отмена",
+      tone: "danger",
+    });
+    if (!confirmed) return;
     try {
       const resp = await fetch(`${API_URL}/events/${eventId}`, {
         method: "DELETE",
@@ -1574,11 +1785,12 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
   );
 });
 
-const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview, onReviewSaved }) => {
+const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview, onReviewSaved, requestConfirm }) => {
   const [rating, setRating] = useState(0);
   const [text, setText] = useState("");
   const [photo, setPhoto] = useState("");
   const [saving, setSaving] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const photoInputRef = React.useRef(null);
@@ -1594,6 +1806,7 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
     setRating(myReview?.rating || 0);
     setText(myReview?.text || "");
     setPhoto(myReview?.photo || "");
+    setIsEditing(false);
     setError("");
     setSuccess("");
   }, [checklist?.slug, myReview?.id, myReview?.photo, myReview?.rating, myReview?.text, user?.id]);
@@ -1672,6 +1885,7 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
       }
 
       onReviewSaved(data);
+      setIsEditing(false);
       setSuccess(lang === "en" ? "Review saved" : "Отзыв сохранён");
     } catch (submitError) {
       console.error(submitError);
@@ -1681,6 +1895,61 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
     }
   };
 
+  const handleStartEdit = () => {
+    if (!myReview) return;
+    setRating(myReview.rating || 0);
+    setText(myReview.text || "");
+    setPhoto(myReview.photo || "");
+    setError("");
+    setSuccess("");
+    setIsEditing(true);
+  };
+
+  const handleDelete = async () => {
+    if (!token || !checklist?.slug || !myReview || saving) return;
+    const confirmed = await requestConfirm({
+      title: lang === "en" ? "Delete review" : "Удалить отзыв",
+      message: lang === "en" ? "Your review will disappear from the trip page." : "Ваш отзыв исчезнет со страницы поездки.",
+      confirmLabel: lang === "en" ? "Delete" : "Удалить",
+      cancelLabel: lang === "en" ? "Cancel" : "Отмена",
+      tone: "danger",
+    });
+    if (!confirmed) {
+      return;
+    }
+
+    setSaving(true);
+    setError("");
+    setSuccess("");
+    try {
+      const response = await fetch(`${API_URL}/checklists/${checklist.slug}/review`, {
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      const data = await readJsonSafely(response);
+      if (!response.ok) {
+        setError(data?.detail || (lang === "en" ? "Failed to delete review" : "Не удалось удалить отзыв"));
+        return;
+      }
+
+      onReviewSaved(null, user?.id);
+      setRating(0);
+      setText("");
+      setPhoto("");
+      setIsEditing(false);
+      setSuccess(lang === "en" ? "Review deleted" : "Отзыв удалён");
+    } catch (deleteError) {
+      console.error(deleteError);
+      setError(lang === "en" ? "Network error while deleting review" : "Ошибка сети при удалении отзыва");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const shouldShowReviewForm = tripEnded && canReview && (!myReview || isEditing);
+
   return (
     <section className="trip-reviews-section">
       <div className="trip-reviews-header">
@@ -1689,8 +1958,8 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
           <p>
             {reviews.length > 0
               ? (lang === "en"
-                  ? `${reviews.length} review${reviews.length > 1 ? "s" : ""} • average ${averageRating}/5`
-                  : `${reviews.length} ${reviews.length === 1 ? "отзыв" : reviews.length < 5 ? "отзыва" : "отзывов"} • средняя оценка ${averageRating}/5`)
+                  ? `${reviews.length} review${reviews.length > 1 ? "s" : ""} • average ${averageRating}`
+                  : `${reviews.length} ${reviews.length === 1 ? "отзыв" : reviews.length < 5 ? "отзыва" : "отзывов"} • средняя оценка ${averageRating}`)
               : (lang === "en" ? "No reviews yet" : "Пока нет отзывов")}
           </p>
         </div>
@@ -1701,7 +1970,7 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
         )}
       </div>
 
-      {tripEnded && canReview && (
+      {shouldShowReviewForm && (
         <div className="trip-review-form-card">
           <div className="trip-review-form-head">
             <div>
@@ -1744,6 +2013,22 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
             {photo && (
               <button type="button" className="action-btn" onClick={() => setPhoto("")}>
                 {lang === "en" ? "Remove photo" : "Убрать фото"}
+              </button>
+            )}
+            {myReview && (
+              <button
+                type="button"
+                className="action-btn"
+                onClick={() => {
+                  setIsEditing(false);
+                  setRating(myReview.rating || 0);
+                  setText(myReview.text || "");
+                  setPhoto(myReview.photo || "");
+                  setError("");
+                  setSuccess("");
+                }}
+              >
+                {lang === "en" ? "Cancel" : "Отмена"}
               </button>
             )}
             <button type="button" className="action-btn primary" onClick={handleSubmit} disabled={saving}>
@@ -1795,10 +2080,30 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
                   </div>
                 </div>
                 <div className="trip-review-rating">
-                  <span>{review.rating.toFixed(1)}</span>
                   <span className="trip-review-rating-stars">{"★".repeat(review.rating)}{"☆".repeat(5 - review.rating)}</span>
                 </div>
               </div>
+
+              {review.user?.id === user?.id && (
+                <div className="trip-review-card-actions">
+                  <button
+                    type="button"
+                    className="trip-review-icon-btn"
+                    title={lang === "en" ? "Edit review" : "Редактировать отзыв"}
+                    onClick={handleStartEdit}
+                  >
+                    ✎
+                  </button>
+                  <button
+                    type="button"
+                    className="trip-review-icon-btn danger"
+                    title={lang === "en" ? "Delete review" : "Удалить отзыв"}
+                    onClick={handleDelete}
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
 
               <p className="trip-review-text">{review.text}</p>
 
@@ -1834,7 +2139,9 @@ const App = ({ page }) => {
   const [originCity, setOriginCity] = useState("");
   const [returnTransport, setReturnTransport] = useState("plane");
   const [showAuth, setShowAuth] = useState(false);
-  const [showForecast, setShowForecast] = useState(true); // Collapsible forecast state
+  const [showForecast, setShowForecast] = useState(() =>
+    typeof window === "undefined" ? true : window.innerWidth > 600
+  ); // Collapsible forecast state
   const [user, setUser] = useState(() => {
     const saved = localStorage.getItem("user");
     return safeParseJson(saved, null);
@@ -1865,8 +2172,12 @@ const App = ({ page }) => {
   const [moveItemDialog, setMoveItemDialog] = useState(null);
   const [moveItemBusy, setMoveItemBusy] = useState(false);
   const [showInviteModal, setShowInviteModal] = useState(false);
+  const [confirmDialog, setConfirmDialog] = useState(null);
   const [inviteToken, setInviteToken] = useState("");
   const [followers, setFollowers] = useState([]);
+  const [inviteBusyIds, setInviteBusyIds] = useState([]);
+  const [inviteSentIds, setInviteSentIds] = useState([]);
+  const [inviteAlreadyIds, setInviteAlreadyIds] = useState([]);
   const [collaboratorQuery, setCollaboratorQuery] = useState("");
   const [collaboratorResults, setCollaboratorResults] = useState([]);
   const [selectedCollaborators, setSelectedCollaborators] = useState([]);
@@ -1877,6 +2188,10 @@ const App = ({ page }) => {
   // Computed: can current user view/edit different sections of this checklist?
   const isChecklistParticipant = Boolean(user && result && (result.user_id === user.id || (result.backpacks && result.backpacks.some(b => b.user_id === user.id))));
   const baggageParticipants = buildBaggageParticipants(result, user);
+  const checklistParticipantIds = getChecklistParticipantIds(result);
+  const inviteBusyIdSet = new Set(inviteBusyIds);
+  const inviteSentIdSet = new Set(inviteSentIds);
+  const inviteAlreadyIdSet = new Set(inviteAlreadyIds);
   const activeParticipant = baggageParticipants.find((participant) => participant.userId === activeParticipantId) || null;
   const activeBaggage = activeTab !== "shared"
     ? (result?.backpacks || []).find((bag) => bag.id.toString() === activeTab)
@@ -1921,6 +2236,41 @@ const App = ({ page }) => {
   const ownMoveDestinations = moveDestinations.filter((destination) => destination.isMine);
   const otherMoveDestinations = moveDestinations.filter((destination) => !destination.isMine);
   const checklistColumns = viewportWidth <= 600 ? 1 : viewportWidth <= 900 ? 2 : 3;
+  const isMobileChecklistView = viewportWidth <= 600;
+	  const canMoveQuantityEditorItem = quantityEditor
+	    ? (quantityEditor.sectionKey === "shared"
+	        ? (result?.backpacks?.length || 0) > 0
+	        : (result?.backpacks?.length || 0) > 1)
+	    : false;
+
+  useEffect(() => {
+    setInviteBusyIds([]);
+    setInviteSentIds([]);
+    setInviteAlreadyIds([]);
+  }, [savedSlug]);
+
+  const confirmResolverRef = React.useRef(null);
+
+  const requestConfirm = React.useCallback(({ title, message, confirmLabel, cancelLabel, tone = "default" }) => (
+    new Promise((resolve) => {
+      confirmResolverRef.current = resolve;
+      setConfirmDialog({
+        title,
+        message,
+        confirmLabel,
+        cancelLabel,
+        tone,
+      });
+    })
+  ), []);
+
+  const closeConfirmDialog = React.useCallback((result) => {
+    if (confirmResolverRef.current) {
+      confirmResolverRef.current(result);
+      confirmResolverRef.current = null;
+    }
+    setConfirmDialog(null);
+  }, []);
 
   const handleAuth = (userData, accessToken) => {
     setUser(userData);
@@ -1959,7 +2309,7 @@ const App = ({ page }) => {
   }, [activeParticipantId, activeTab]);
 
   useEffect(() => {
-    if (!quantityEditor) return undefined;
+    if (!quantityEditor || isMobileChecklistView) return undefined;
 
     const handlePointerDown = (event) => {
       const target = event.target;
@@ -1978,7 +2328,7 @@ const App = ({ page }) => {
       document.removeEventListener("mousedown", handlePointerDown);
       document.removeEventListener("touchstart", handlePointerDown);
     };
-  }, [quantityEditor]);
+  }, [isMobileChecklistView, quantityEditor]);
 
   const handleLogout = React.useCallback(() => {
     setUser(null);
@@ -2002,13 +2352,7 @@ const App = ({ page }) => {
     ...(packingProfile.traveling_with_pet ? [lang === "en" ? "With pet" : "С питомцем"] : []),
     ...(packingProfile.has_allergies ? [lang === "en" ? "Allergies" : "Аллергии"] : []),
   ];
-  const hasVisibleSharedItems = Boolean(
-    (result?.items || []).some((item) => {
-      const removed = new Set(result?.removed_items || []);
-      if (removed.has(item)) return false;
-      return !(result?.backpacks || []).some((backpack) => (backpack.items || []).includes(item));
-    })
-  );
+  const hasVisibleSharedItems = false;
 
   useEffect(() => {
     if (!token || !collaboratorQuery.trim()) {
@@ -2392,6 +2736,23 @@ const App = ({ page }) => {
     setQuantityEditor(null);
   };
 
+  const handleQuickPackedChange = (item, delta) => {
+    if (!canEditCurrentSection) return;
+    const targetNeeded = activeTab === "shared"
+      ? getItemQuantity(result?.item_quantities || {}, item)
+      : getItemQuantity(
+          result?.backpacks?.find((bag) => bag.id.toString() === activeTab)?.item_quantities || {},
+          item
+        );
+    const targetPacked = activeTab === "shared"
+      ? getPackedQuantity(result?.packed_quantities || {}, item)
+      : getPackedQuantity(
+          result?.backpacks?.find((bag) => bag.id.toString() === activeTab)?.packed_quantities || {},
+          item
+        );
+    handleQuantityStateChange(item, targetNeeded, targetPacked + delta);
+  };
+
   const handleCheck = (item) => {
     if (!canEditCurrentSection) return;
     if (activeTab === "shared") {
@@ -2558,286 +2919,6 @@ const App = ({ page }) => {
     setAddItemMode(false);
   };
 
-  const handlePrintChecklist = () => {
-    if (!result) return;
-
-    const printWindow = window.open("", "_blank", "width=1180,height=860");
-    if (!printWindow) return;
-
-    const allBackpackItems = new Set();
-    (result.backpacks || []).forEach((bp) => {
-      (bp.items || [])
-        .filter((item) => !(bp.removed_items || []).includes(item))
-        .forEach((item) => allBackpackItems.add(item));
-    });
-
-    const buildItemsForSection = (items = [], removed = [], checkedMap = {}, quantityMap = {}, packedMap = {}, extraFilter = null) =>
-      items
-        .filter((item) => !removed.includes(item))
-        .filter((item) => (typeof extraFilter === "function" ? extraFilter(item) : true))
-        .map((item) => ({
-          name: item,
-          checked: Boolean(checkedMap[item]),
-          quantity: getItemQuantity(quantityMap, item),
-          packed: getPackedQuantity(packedMap, item),
-        }));
-
-    const sharedItems = buildItemsForSection(
-      result.items || [],
-      removedItems,
-      checkedItems,
-      result.item_quantities || {},
-      result.packed_quantities || {},
-      (item) => !allBackpackItems.has(item)
-    );
-
-    const participantLookup = new Map(
-      baggageParticipants.map((participant) => [participant.userId, participant])
-    );
-
-    const sections = [];
-
-    if (sharedItems.length > 0) {
-      sections.push({
-        title: "Общие вещи",
-        subtitle: `${sharedItems.length} позиций`,
-        items: sharedItems,
-      });
-    }
-
-    sortAllBackpacks(
-      (result.backpacks || []).filter((baggage) => (
-        !result.hidden_sections?.includes(`backpack:${baggage.id}`) || baggage.user_id === user?.id
-      ))
-    ).forEach((baggage) => {
-      const visibleItems = buildItemsForSection(
-        baggage.items || [],
-        baggage.removed_items || [],
-        buildCheckedItemsMap(
-          baggage.items || [],
-          baggage.checked_items || [],
-          baggage.item_quantities || {},
-          baggage.packed_quantities || {}
-        ),
-        baggage.item_quantities || {},
-        baggage.packed_quantities || {}
-      );
-
-      if (!visibleItems.length) return;
-
-      const participant = participantLookup.get(baggage.user_id);
-      const ownerLabel = participant?.isCurrentUser
-        ? "Твой багаж"
-        : participant?.username || baggage.user?.username || "Багаж участника";
-
-      const subtitleParts = [ownerLabel];
-      if (baggage.is_default) subtitleParts.push("основной");
-      subtitleParts.push(`${visibleItems.length} позиций`);
-
-      sections.push({
-        title: baggage.name || getBaggageKindLabel(baggage),
-        subtitle: subtitleParts.join(" • "),
-        items: visibleItems,
-      });
-    });
-
-    const dateRange = formatChecklistDateRange(result.start_date, result.end_date);
-    const cityLabel = escapeHtml(result.city || "Чеклист");
-    const sectionsHtml = sections
-      .map((section) => `
-        <section class="print-section">
-          <div class="print-section-head">
-            <div>
-              <h2>${escapeHtml(section.title)}</h2>
-              <p>${escapeHtml(section.subtitle)}</p>
-            </div>
-          </div>
-          <div class="print-items">
-            ${section.items
-              .map(
-                (item) => `
-                  <div class="print-item${item.checked ? " checked" : ""}">
-                    <span class="print-check">${item.checked ? "✓" : ""}</span>
-                    <span class="print-name">${escapeHtml(item.name)}</span>
-                    <span class="print-qty">${item.packed}/${item.quantity}</span>
-                  </div>
-                `
-              )
-              .join("")}
-          </div>
-        </section>
-      `)
-      .join("");
-
-    printWindow.document.write(`
-      <!doctype html>
-      <html lang="ru">
-        <head>
-          <meta charset="utf-8" />
-          <title>${cityLabel} — печать</title>
-          <style>
-            @page { margin: 16mm; }
-            * { box-sizing: border-box; }
-            body {
-              margin: 0;
-              font-family: Inter, -apple-system, BlinkMacSystemFont, sans-serif;
-              color: #161616;
-              background: #ffffff;
-            }
-            .print-shell {
-              max-width: 1100px;
-              margin: 0 auto;
-            }
-            .print-header {
-              display: flex;
-              justify-content: space-between;
-              align-items: flex-end;
-              gap: 24px;
-              padding-bottom: 20px;
-              border-bottom: 2px solid #f0d3a3;
-              margin-bottom: 22px;
-            }
-            .print-brand {
-              font-size: 13px;
-              letter-spacing: 0.16em;
-              text-transform: uppercase;
-              color: #c27a10;
-              margin-bottom: 8px;
-            }
-            .print-title {
-              font-size: 34px;
-              line-height: 1.05;
-              font-weight: 800;
-              margin: 0;
-            }
-            .print-meta {
-              margin: 10px 0 0;
-              color: #6f6f6f;
-              font-size: 15px;
-            }
-            .print-summary {
-              min-width: 220px;
-              padding: 16px 18px;
-              border: 1px solid #ead8bb;
-              border-radius: 18px;
-              background: #fffaf2;
-            }
-            .print-summary-label {
-              font-size: 12px;
-              letter-spacing: 0.14em;
-              text-transform: uppercase;
-              color: #8e6a33;
-              margin-bottom: 8px;
-            }
-            .print-summary-value {
-              font-size: 28px;
-              font-weight: 800;
-              color: #bb7410;
-            }
-            .print-grid {
-              display: grid;
-              grid-template-columns: repeat(2, minmax(0, 1fr));
-              gap: 16px;
-            }
-            .print-section {
-              border: 1px solid #ece5d8;
-              border-radius: 20px;
-              padding: 18px 18px 14px;
-              break-inside: avoid;
-              page-break-inside: avoid;
-            }
-            .print-section h2 {
-              margin: 0;
-              font-size: 20px;
-              line-height: 1.15;
-            }
-            .print-section p {
-              margin: 6px 0 0;
-              color: #7d7d7d;
-              font-size: 13px;
-            }
-            .print-items {
-              margin-top: 14px;
-              display: grid;
-              gap: 9px;
-            }
-            .print-item {
-              display: grid;
-              grid-template-columns: 22px minmax(0, 1fr) auto;
-              align-items: start;
-              gap: 10px;
-              padding: 7px 0;
-              border-bottom: 1px solid #f3eee5;
-            }
-            .print-item:last-child {
-              border-bottom: none;
-              padding-bottom: 0;
-            }
-            .print-check {
-              width: 22px;
-              height: 22px;
-              border: 1.5px solid #d1b48a;
-              border-radius: 6px;
-              display: inline-flex;
-              align-items: center;
-              justify-content: center;
-              font-size: 13px;
-              font-weight: 800;
-              color: #c07910;
-            }
-            .print-item.checked .print-check {
-              background: #ffefcf;
-            }
-            .print-name {
-              font-size: 15px;
-              line-height: 1.35;
-              word-break: break-word;
-            }
-            .print-item.checked .print-name {
-              color: #8a8a8a;
-              text-decoration: line-through;
-            }
-            .print-qty {
-              padding: 2px 8px;
-              border-radius: 999px;
-              border: 1px solid #e6d2b2;
-              font-size: 12px;
-              font-weight: 700;
-              color: #8d641c;
-              white-space: nowrap;
-            }
-            @media print {
-              .print-shell { max-width: none; }
-            }
-          </style>
-        </head>
-        <body>
-          <div class="print-shell">
-            <header class="print-header">
-              <div>
-                <div class="print-brand">Luggify</div>
-                <h1 class="print-title">${cityLabel}</h1>
-                <p class="print-meta">${escapeHtml(dateRange)}</p>
-              </div>
-              <div class="print-summary">
-                <div class="print-summary-label">Разделов</div>
-                <div class="print-summary-value">${sections.length}</div>
-              </div>
-            </header>
-            <main class="print-grid">
-              ${sectionsHtml}
-            </main>
-          </div>
-        </body>
-      </html>
-    `);
-    printWindow.document.close();
-    printWindow.focus();
-    printWindow.onload = () => {
-      printWindow.print();
-    };
-  };
-
   const openMoveItemDialog = (item, sourceBackpackId = null) => {
     setMoveItemDialog({
       item,
@@ -2922,7 +3003,16 @@ const App = ({ page }) => {
 
   const handleDeleteBaggage = async (baggage) => {
     if (!savedSlug || !authHeaders.Authorization) return;
-    if (!window.confirm(`Удалить багаж «${baggage.name || "Багаж"}»?`)) return;
+    const confirmed = await requestConfirm({
+      title: lang === "en" ? "Delete baggage" : "Удалить багаж",
+      message: lang === "en"
+        ? `"${baggage.name || "Baggage"}" will be removed from this trip.`
+        : `«${baggage.name || "Багаж"}» будет удалён из этой поездки.`,
+      confirmLabel: lang === "en" ? "Delete" : "Удалить",
+      cancelLabel: lang === "en" ? "Cancel" : "Отмена",
+      tone: "danger",
+    });
+    if (!confirmed) return;
 
     setBaggageBusy(true);
     try {
@@ -3120,12 +3210,18 @@ const App = ({ page }) => {
     }
   };
 
-  const handleReviewSaved = (savedReview) => {
+  const handleReviewSaved = (savedReview, removedUserId = null) => {
     setResult((prev) => {
       if (!prev) return prev;
       const remainingReviews = (prev.reviews || []).filter(
-        (review) => review.user?.id !== savedReview.user?.id
+        (review) => review.user?.id !== (removedUserId ?? savedReview?.user?.id)
       );
+      if (!savedReview) {
+        return {
+          ...prev,
+          reviews: remainingReviews,
+        };
+      }
       return {
         ...prev,
         reviews: [savedReview, ...remainingReviews].sort(
@@ -3554,9 +3650,10 @@ const App = ({ page }) => {
                   </div>
                   {result.user_id === user?.id && (
                     <button
-                      className="invite-action-btn"
-                      onClick={async () => {
-                        setShowInviteModal(true);
+	                      className="invite-action-btn"
+	                      onClick={async () => {
+	                        setInviteBusyIds([]);
+	                        setShowInviteModal(true);
                         if (user?.username) {
                           fetch(`${API_URL}/users/${user.username}/followers`, { headers: authHeaders })
                             .then(r => r.ok ? r.json() : [])
@@ -3585,37 +3682,6 @@ const App = ({ page }) => {
                 {(savedSlug || id) && (result.user_id === user?.id || (result.backpacks && result.backpacks.length > 0)) && (
                   <div className="baggage-panel">
                     <div className="baggage-panel-primary">
-                      {hasVisibleSharedItems && (
-                        <button
-                          className={`scope-chip ${activeTab === "shared" ? "active" : ""}`}
-                          onClick={() => {
-                            setActiveTab("shared");
-                            setShowBaggageCreator(false);
-                            setNewBaggageName("");
-                          }}
-                        >
-                          <span className="scope-chip-avatar">
-                            <TentIcon style={{ marginRight: 0 }} />
-                          </span>
-                          <span className="scope-chip-body">
-                            <span className="scope-chip-name">Неразобранные вещи</span>
-                            <span className="scope-chip-meta">Можно сразу разложить по багажам</span>
-                          </span>
-                          {result.user_id === user?.id && (
-                            <span
-                              className={`scope-chip-action ${result.hidden_sections?.includes("shared") ? "hidden" : "visible"}`}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleToggleSectionVisibility("shared");
-                              }}
-                              title={result.hidden_sections?.includes("shared") ? "Скрыто от других" : "Видно всем"}
-                            >
-                              {result.hidden_sections?.includes("shared") ? <LockIcon style={{ marginRight: 0 }} /> : <UnlockIcon style={{ marginRight: 0 }} />}
-                            </span>
-                          )}
-                        </button>
-                      )}
-
                       {baggageParticipants.length > 0 && (
                         <div className="participant-switcher">
                           {baggageParticipants.map((participant) => (
@@ -3857,7 +3923,7 @@ const App = ({ page }) => {
                     const isBackpacksHidden = result.hidden_sections?.includes('backpacks');
 
                     if (activeTab === 'shared' && isSharedHidden) {
-                      return <div className="section-restricted-msg"><LockIcon /> {result.user?.username || 'Владелец'} ограничил просмотр общего списка</div>;
+                      return <div className="section-restricted-msg"><LockIcon /> {result.user?.username || 'Владелец'} ограничил просмотр этого раздела</div>;
                     }
                     if (activeTab !== 'shared') {
                       const bp = result.backpacks?.find((entry) => entry.id.toString() === activeTab);
@@ -3920,10 +3986,13 @@ const App = ({ page }) => {
                                   const quantity = getItemQuantity(targetQuantities, item);
                                   const packedQuantity = getPackedQuantity(targetPackedQuantities, item);
                                   const packedState = `${packedQuantity}/${quantity}`;
+                                  const canMoveItem = activeTab === "shared"
+                                    ? result?.backpacks?.length > 0
+                                    : result?.backpacks?.length > 1;
                                   return (
                                 <label
                                   key={item}
-                                  className={`checklist-label${targetChecked[item] ? " checked" : ""}`}
+                                  className={`checklist-label${targetChecked[item] ? " checked" : ""}${quantityEditor?.item === item && quantityEditor?.sectionKey === activeTab ? " quantity-editor-open" : ""}`}
                                 >
                                   <input
                                     type="checkbox"
@@ -3932,52 +4001,102 @@ const App = ({ page }) => {
                                     onChange={() => handleCheck(item)}
                                     disabled={!canEditCurrentSection}
                                   />
-                                  <span className="checklist-item-text">{item}</span>
-                                  <span className="item-right-controls">
-                                    {canEditCurrentSection ? (
-                                      <button
-                                        type="button"
-                                        className={`item-progress-badge item-progress-trigger${packedQuantity >= quantity ? " complete" : packedQuantity > 0 ? " partial" : ""}`}
-                                        onClick={(e) => {
-                                          e.preventDefault();
-                                          e.stopPropagation();
-                                          toggleQuantityEditor(item, quantity, packedQuantity);
-                                        }}
-                                      >
+                                    <span className="checklist-item-copy">
+                                    <span className="checklist-item-text">{item}</span>
+                                    {isMobileChecklistView && (
+                                      <span className={`checklist-item-meta${packedQuantity >= quantity ? " complete" : packedQuantity > 0 ? " partial" : ""}`}>
                                         {packedState}
-                                      </button>
-                                    ) : (
-                                      <span className={`item-progress-badge${packedQuantity >= quantity ? " complete" : packedQuantity > 0 ? " partial" : ""}`}>
-                                        {packedState}
-                                      </span>
-                                    )}
-                                    {canEditCurrentSection && (
-                                      <span className="item-action-group">
-                                        {(activeTab === "shared"
-                                          ? result?.backpacks?.length > 0
-                                          : result?.backpacks?.length > 1) && (
-                                          <button
-                                            className="checklist-action-btn"
-                                            title={activeTab === "shared" ? "Разложить по багажу" : "Переложить в другой багаж"}
-                                            onClick={e => {
-                                              e.preventDefault();
-                                              openMoveItemDialog(item, activeTab === "shared" ? null : Number(activeTab));
-                                            }}
-                                            tabIndex={-1}
-                                          >
-                                            <BackpackIcon style={{ width: '16px', height: '16px', marginRight: 0 }} />
-                                          </button>
-                                        )}
-                                        <button
-                                          className="checklist-remove-btn"
-                                          title="Удалить"
-                                          onClick={e => { e.preventDefault(); handleRemoveItem(item); }}
-                                          tabIndex={-1}
-                                        >×</button>
                                       </span>
                                     )}
                                   </span>
-                                  {canEditCurrentSection && quantityEditor?.item === item && quantityEditor?.sectionKey === activeTab && (
+                                  <span className="item-right-controls">
+                                    {!isMobileChecklistView && (
+                                      canEditCurrentSection ? (
+                                        <button
+                                          type="button"
+                                          className={`item-progress-badge item-progress-trigger${packedQuantity >= quantity ? " complete" : packedQuantity > 0 ? " partial" : ""}`}
+                                          onClick={(e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            toggleQuantityEditor(item, quantity, packedQuantity);
+                                          }}
+                                        >
+                                          {packedState}
+                                        </button>
+                                      ) : (
+                                        <span className={`item-progress-badge${packedQuantity >= quantity ? " complete" : packedQuantity > 0 ? " partial" : ""}`}>
+                                          {packedState}
+                                        </span>
+                                      )
+                                    )}
+                                    {canEditCurrentSection && (
+                                      isMobileChecklistView ? (
+                                        <span className="mobile-item-menu-wrap">
+                                          <button
+                                            type="button"
+                                            className="mobile-item-stepper-btn"
+                                            title={lang === "en" ? "Pack one less" : "Убрать одну"}
+                                            onClick={(e) => {
+                                              e.preventDefault();
+                                              e.stopPropagation();
+                                              handleQuickPackedChange(item, -1);
+                                            }}
+                                            disabled={packedQuantity <= 0}
+                                          >
+                                            -1
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="mobile-item-stepper-btn accent"
+                                            title={lang === "en" ? "Pack one more" : "Добавить одну"}
+                                            onClick={(e) => {
+                                              e.preventDefault();
+                                              e.stopPropagation();
+                                              handleQuickPackedChange(item, 1);
+                                            }}
+                                            disabled={packedQuantity >= quantity}
+                                          >
+                                            +1
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className={`mobile-item-menu-trigger${quantityEditor?.item === item && quantityEditor?.sectionKey === activeTab ? " active" : ""}`}
+                                            title={lang === "en" ? "Open item settings" : "Открыть настройки вещи"}
+                                            onClick={(e) => {
+                                              e.preventDefault();
+                                              e.stopPropagation();
+                                              toggleQuantityEditor(item, quantity, packedQuantity);
+                                            }}
+                                          >
+                                            •••
+                                          </button>
+                                        </span>
+                                      ) : (
+                                        <span className="item-action-group">
+                                          {canMoveItem && (
+                                            <button
+                                              className="checklist-action-btn"
+                                              title={activeTab === "shared" ? "Разложить по багажу" : "Переложить в другой багаж"}
+                                              onClick={e => {
+                                                e.preventDefault();
+                                                openMoveItemDialog(item, activeTab === "shared" ? null : Number(activeTab));
+                                              }}
+                                              tabIndex={-1}
+                                            >
+                                              <BackpackIcon style={{ width: '16px', height: '16px', marginRight: 0 }} />
+                                            </button>
+                                          )}
+                                          <button
+                                            className="checklist-remove-btn"
+                                            title="Удалить"
+                                            onClick={e => { e.preventDefault(); handleRemoveItem(item); }}
+                                            tabIndex={-1}
+                                          >×</button>
+                                        </span>
+                                      )
+                                    )}
+                                  </span>
+                                  {!isMobileChecklistView && canEditCurrentSection && quantityEditor?.item === item && quantityEditor?.sectionKey === activeTab && (
                                     <div
                                       className="quantity-editor-popover"
                                       onClick={(e) => {
@@ -3989,7 +4108,44 @@ const App = ({ page }) => {
                                         e.stopPropagation();
                                       }}
                                     >
+                                      {isMobileChecklistView && <div className="mobile-sheet-handle" />}
                                       <div className="quantity-editor-title">{item}</div>
+                                      <div className="quantity-editor-summary">
+                                        <div>
+                                          <span className="quantity-editor-summary-label">{lang === "en" ? "Packed" : "Собрано"}</span>
+                                          <strong>{quantityEditor.packed}/{quantityEditor.needed}</strong>
+                                        </div>
+                                        <div>
+                                          <span className="quantity-editor-summary-label">{lang === "en" ? "Needed" : "Нужно"}</span>
+                                          <strong>{quantityEditor.needed}</strong>
+                                        </div>
+                                      </div>
+                                      <div className="quantity-editor-shortcuts">
+                                        <button
+                                          type="button"
+                                          className="quantity-editor-shortcut"
+                                          onClick={() => updateQuantityEditorDraft("packed", Math.max(0, quantityEditor.packed - 1))}
+                                          disabled={quantityEditor.packed <= 0}
+                                        >
+                                          -1 {lang === "en" ? "packed" : "собрано"}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="quantity-editor-shortcut"
+                                          onClick={() => updateQuantityEditorDraft("packed", Math.min(quantityEditor.needed, quantityEditor.packed + 1))}
+                                          disabled={quantityEditor.packed >= quantityEditor.needed}
+                                        >
+                                          +1 {lang === "en" ? "packed" : "собрано"}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="quantity-editor-shortcut accent"
+                                          onClick={() => updateQuantityEditorDraft("packed", quantityEditor.needed)}
+                                          disabled={quantityEditor.packed >= quantityEditor.needed}
+                                        >
+                                          {lang === "en" ? "Pack all" : "Собрать всё"}
+                                        </button>
+                                      </div>
                                       <div className="quantity-editor-row">
                                         <span className="quantity-editor-label">Нужно</span>
                                         <div className="item-quantity-control quantity-editor-control">
@@ -4049,17 +4205,20 @@ const App = ({ page }) => {
                                       <div className="quantity-editor-actions">
                                         <button
                                           type="button"
+                                          className="quantity-editor-btn danger"
+                                          onClick={() => {
+                                            handleRemoveItem(item);
+                                            setQuantityEditor(null);
+                                          }}
+                                        >
+                                          {lang === "en" ? "Remove" : "Удалить"}
+                                        </button>
+                                        <button
+                                          type="button"
                                           className="quantity-editor-btn"
                                           onClick={applyQuantityEditor}
                                         >
                                           Применить
-                                        </button>
-                                        <button
-                                          type="button"
-                                          className="quantity-editor-btn subtle"
-                                          onClick={() => setQuantityEditor(null)}
-                                        >
-                                          Закрыть
                                         </button>
                                       </div>
                                     </div>
@@ -4071,9 +4230,126 @@ const App = ({ page }) => {
                             </div>
                           </div>
                         ))}
-                      </div>
-                    );
-                  })()}
+                </div>
+              );
+            })()}
+            {isMobileChecklistView && canEditCurrentSection && quantityEditor?.sectionKey === activeTab && (
+              <div
+                className="mobile-quantity-sheet-backdrop"
+                onClick={() => setQuantityEditor(null)}
+              >
+                <section
+                  className="mobile-quantity-sheet"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                  }}
+                >
+                  <div className="mobile-sheet-handle" />
+                  <header className="mobile-quantity-sheet-header">
+                    <span>{lang === "en" ? "Item settings" : "Настройка вещи"}</span>
+                    <h2>{quantityEditor.item}</h2>
+                  </header>
+                  <div className="mobile-quantity-sheet-grid">
+                    <div>
+                      <span>{lang === "en" ? "Packed" : "Собрано"}</span>
+                      <strong>{quantityEditor.packed}/{quantityEditor.needed}</strong>
+                    </div>
+                    <div>
+                      <span>{lang === "en" ? "Needed" : "Нужно"}</span>
+                      <strong>{quantityEditor.needed}</strong>
+                    </div>
+                  </div>
+                  <div className="mobile-quantity-sheet-actions">
+                    <button
+                      type="button"
+                      onClick={() => updateQuantityEditorDraft("packed", Math.max(0, quantityEditor.packed - 1))}
+                      disabled={quantityEditor.packed <= 0}
+                    >
+                      -1 {lang === "en" ? "packed" : "собрано"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => updateQuantityEditorDraft("packed", Math.min(quantityEditor.needed, quantityEditor.packed + 1))}
+                      disabled={quantityEditor.packed >= quantityEditor.needed}
+                    >
+                      +1 {lang === "en" ? "packed" : "собрано"}
+                    </button>
+                    <button
+                      type="button"
+                      className="accent"
+                      onClick={() => updateQuantityEditorDraft("packed", quantityEditor.needed)}
+                      disabled={quantityEditor.packed >= quantityEditor.needed}
+                    >
+                      {lang === "en" ? "Pack all" : "Собрать всё"}
+                    </button>
+                  </div>
+                  <div className="mobile-quantity-row">
+                    <span>{lang === "en" ? "Quantity in list" : "Количество в списке"}</span>
+                    <div>
+                      <button
+                        type="button"
+                        onClick={() => updateQuantityEditorDraft("needed", Math.max(1, quantityEditor.needed - 1))}
+                        disabled={quantityEditor.needed <= 1}
+                      >
+                        -
+                      </button>
+                      <strong>{quantityEditor.needed}</strong>
+                      <button
+                        type="button"
+                        onClick={() => updateQuantityEditorDraft("needed", quantityEditor.needed + 1)}
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                  <div className="mobile-quantity-sheet-secondary">
+                    {canMoveQuantityEditorItem && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const sourceBackpackId = quantityEditor.sectionKey === "shared"
+                            ? null
+                            : Number(quantityEditor.sectionKey);
+                          setQuantityEditor(null);
+                          openMoveItemDialog(quantityEditor.item, sourceBackpackId);
+                        }}
+                      >
+                        {quantityEditor.sectionKey === "shared"
+                          ? (lang === "en" ? "Sort into baggage" : "Разложить")
+                          : (lang === "en" ? "Move item" : "Переложить")}
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="danger"
+                      onClick={() => {
+                        handleRemoveItem(quantityEditor.item);
+                        setQuantityEditor(null);
+                      }}
+                    >
+                      {lang === "en" ? "Remove" : "Удалить"}
+                    </button>
+                  </div>
+                  <div className="mobile-quantity-sheet-footer">
+                    <button
+                      type="button"
+                      className="quantity-editor-btn subtle"
+                      onClick={() => setQuantityEditor(null)}
+                    >
+                      {lang === "en" ? "Close" : "Закрыть"}
+                    </button>
+                    <button
+                      type="button"
+                      className="quantity-editor-btn"
+                      onClick={applyQuantityEditor}
+                    >
+                      {lang === "en" ? "Apply" : "Применить"}
+                    </button>
+                  </div>
+                </section>
+              </div>
+            )}
 
                   <div className="checklist-actions">
                     {canEditCurrentSection && (
@@ -4098,11 +4374,6 @@ const App = ({ page }) => {
                         )}
                       </>
                     )}
-                    {isChecklistParticipant && (
-                      <button className="action-btn" onClick={handlePrintChecklist}>
-                        {t.print || "Печать"}
-                      </button>
-                    )}
                   </div>
                 </div>
 
@@ -4125,39 +4396,49 @@ const App = ({ page }) => {
                             acc[cityName].push(day);
                             return acc;
                           }, {})
-                        ).map(([cityName, days]) => (
-                          <div key={cityName} className="city-forecast-group">
-                            {Object.keys(result.daily_forecast.reduce((acc, day) => {
-                              const name = day.city || result.city || "";
-                              acc[name] = true;
-                              return acc;
-                            }, {})).length > 1 && (
-                                <h4 className="city-forecast-title">📍 {cityName}</h4>
-                              )}
-                            <div className="forecast-grid">
-                              {days.map((day) => (
-                                <div key={day.date} className={`forecast-card${day.source === "historical" ? " forecast-historical" : ""}`}>
-                                  <div className="forecast-date">{formatDate(day.date)}</div>
+                        ).map(([cityName, days]) => {
+                          const forecastRows = viewportWidth >= 1024 ? splitForecastDays(days) : [days];
+                          return (
+                            <div key={cityName} className="city-forecast-group">
+                              {Object.keys(result.daily_forecast.reduce((acc, day) => {
+                                const name = day.city || result.city || "";
+                                acc[name] = true;
+                                return acc;
+                              }, {})).length > 1 && (
+                                  <h4 className="city-forecast-title">📍 {cityName}</h4>
+                                )}
+                              <div className={`forecast-grid forecast-grid-count-${days.length}`}>
+                                {forecastRows.map((row, rowIndex) => (
+                                  <div
+                                    key={`${cityName}-${rowIndex}`}
+                                    className="forecast-grid-row"
+                                    style={viewportWidth >= 1024 ? { "--forecast-grid-row-width": `${getForecastRowWidth(row.length)}px` } : undefined}
+                                  >
+                                    {row.map((day) => (
+                                      <div key={day.date} className={`forecast-card${day.source === "historical" ? " forecast-historical" : ""}`}>
+                                        <div className="forecast-date">{formatDate(day.date)}</div>
 
-                                  <img
-                                    src={`https://openweathermap.org/img/wn/${day.icon}@2x.png`}
-                                    alt={day.condition}
-                                    className="forecast-icon"
-                                  />
-                                  <div className="forecast-conditions">{day.condition}</div>
-                                  <div className="forecast-temp">
-                                    {day.temp_min.toFixed(1)}° / {day.temp_max.toFixed(1)}°C
+                                        <img
+                                          src={`https://openweathermap.org/img/wn/${day.icon}@2x.png`}
+                                          alt={day.condition}
+                                          className="forecast-icon"
+                                        />
+                                        <div className="forecast-conditions">{day.condition}</div>
+                                        <div className="forecast-temp">
+                                          {day.temp_min.toFixed(1)}° / {day.temp_max.toFixed(1)}°C
+                                        </div>
+                                        <div className="forecast-details">
+                                          {day.humidity != null && <span title="Влажность" style={{ display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap' }}><DropletIcon style={{ width: '14px', height: '14px', marginRight: '3px' }} /> {day.humidity}%</span>}
+                                          {day.wind_speed != null && <span title="Ветер" style={{ display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap' }}><WindIcon style={{ width: '14px', height: '14px', marginRight: '3px' }} /> {day.wind_speed.toFixed(0)} {t.kmh}</span>}
+                                        </div>
+                                      </div>
+                                    ))}
                                   </div>
-                                  <div className="forecast-details">
-                                    {day.humidity != null && <span title="Влажность" style={{ display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap' }}><DropletIcon style={{ width: '14px', height: '14px', marginRight: '3px' }} /> {day.humidity}%</span>}
-                                    {day.uv_index != null && <span title="УФ-индекс" style={{ display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap' }}><UVIcon style={{ width: '14px', height: '14px', marginRight: '3px' }} /> {day.uv_index.toFixed(0)}</span>}
-                                    {day.wind_speed != null && <span title="Ветер" style={{ display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap' }}><WindIcon style={{ width: '14px', height: '14px', marginRight: '3px' }} /> {day.wind_speed.toFixed(0)} {t.kmh}</span>}
-                                  </div>
-                                </div>
-                              ))}
+                                ))}
+                              </div>
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -4205,6 +4486,7 @@ const App = ({ page }) => {
                         currentUserId={user?.id}
                         hiddenSections={result.hidden_sections}
                         onToggleVisibility={handleToggleSectionVisibility}
+                        requestConfirm={requestConfirm}
                       />
                     )}
                   </div>
@@ -4218,12 +4500,13 @@ const App = ({ page }) => {
                     lang={lang}
                     canReview={canReviewTrip}
                     onReviewSaved={handleReviewSaved}
+                    requestConfirm={requestConfirm}
                   />
                 )}
 
                 {/* Attractions */}
                 {result?.city && (
-                  <AttractionsSection city={result.city} lang={lang} />
+                  <AttractionsSection city={result.city} lang={lang} compact={isMobileChecklistView} />
                 )}
 
                 {/* Flights — only for cities with plane transport */}
@@ -4254,18 +4537,19 @@ const App = ({ page }) => {
                       returnCity={showReturn ? lastCity : null}
                       origin={originCity?.fullName || originCity || result.origin_city || ""}
                       lang={lang}
+                      compact={isMobileChecklistView}
                     />
                   );
                 })()}
 
                 {/* Hotels */}
                 {result && result.city && (
-                  <HotelsSection key={"ht-" + result.city} city={result.city} startDate={result.start_date || destinations[0]?.dates?.start} endDate={result.end_date || destinations[destinations.length - 1]?.dates?.end} lang={lang} />
+                  <HotelsSection key={"ht-" + result.city} city={result.city} startDate={result.start_date || destinations[0]?.dates?.start} endDate={result.end_date || destinations[destinations.length - 1]?.dates?.end} lang={lang} compact={isMobileChecklistView} />
                 )}
 
                 {/* eSIM */}
                 {result && result.city && (
-                  <EsimSection key={"esim-" + result.city} city={result.city} lang={lang} />
+                  <EsimSection key={"esim-" + result.city} city={result.city} lang={lang} compact={isMobileChecklistView} />
                 )}
 
               </div>
@@ -4406,7 +4690,7 @@ const App = ({ page }) => {
       )}
 
       {moveItemDialog && (
-        <div className="modal-overlay" onClick={() => !moveItemBusy && setMoveItemDialog(null)}>
+        <div className="modal-overlay modal-overlay-lifted" onClick={() => !moveItemBusy && setMoveItemDialog(null)}>
           <div className="modal-content baggage-access-modal item-move-modal" onClick={(e) => e.stopPropagation()}>
             <button className="modal-close" onClick={() => !moveItemBusy && setMoveItemDialog(null)}>&times;</button>
             <h3>{lang === "en" ? "Move item" : "Переложить вещь"}</h3>
@@ -4500,7 +4784,7 @@ const App = ({ page }) => {
 
       {/* Модальное окно приглашения */}
       {accessOwner && (
-        <div className="modal-overlay" onClick={() => setAccessOwner(null)}>
+        <div className="modal-overlay modal-overlay-lifted" onClick={() => setAccessOwner(null)}>
           <div className="modal-content baggage-access-modal" onClick={(e) => e.stopPropagation()}>
             <button className="modal-close" onClick={() => setAccessOwner(null)}>&times;</button>
             <h3>Доступ к багажу</h3>
@@ -4538,49 +4822,69 @@ const App = ({ page }) => {
       )}
 
       {showInviteModal && (
-        <div className="modal-overlay" onClick={() => setShowInviteModal(false)}>
+        <div className="modal-overlay modal-overlay-lifted" onClick={() => setShowInviteModal(false)}>
           <div className="modal-content" onClick={e => e.stopPropagation()}>
             <button className="modal-close" onClick={() => setShowInviteModal(false)}>&times;</button>
             <h3 style={{ marginTop: 0 }}>🔗 Пригласить в путешествие</h3>
 
             <p className="invite-modal-desc">Ваши подписчики:</p>
             <div className="invite-followers-list">
-              {followers.length > 0 ? followers.map(f => (
-                <div key={f.id} className="invite-follower-item">
-                  <div className="follower-avatar-small">
-                    {f.avatar && (f.avatar.startsWith("data:image") || f.avatar.startsWith("http")) ? (
-                      <img src={f.avatar} alt="Avatar" />
-                    ) : (
-                      f.avatar ? f.avatar : f.username.charAt(0).toUpperCase()
-                    )}
+              {followers.length > 0 ? followers.map(f => {
+                const followerId = normalizeUserId(f.id);
+                const isAlreadyInChecklist = checklistParticipantIds.has(followerId) || inviteAlreadyIdSet.has(followerId);
+                const isInviteBusy = inviteBusyIdSet.has(followerId);
+                const isInviteSent = inviteSentIdSet.has(followerId);
+                const isInviteDisabled = isAlreadyInChecklist || isInviteBusy || isInviteSent;
+                const inviteButtonLabel = isAlreadyInChecklist
+                  ? (lang === "en" ? "Already in list" : "Уже в чеклисте")
+                  : isInviteSent
+                    ? (lang === "en" ? "Sent" : "Отправлено")
+                    : isInviteBusy
+                      ? (lang === "en" ? "Sending..." : "Отправляем...")
+                      : (lang === "en" ? "Invite" : "Пригласить");
+
+                return (
+                  <div key={f.id} className="invite-follower-item">
+                    <div className="follower-avatar-small">
+                      {f.avatar && (f.avatar.startsWith("data:image") || f.avatar.startsWith("http")) ? (
+                        <img src={f.avatar} alt="Avatar" />
+                      ) : (
+                        f.avatar ? f.avatar : f.username.charAt(0).toUpperCase()
+                      )}
+                    </div>
+                    <span className="follower-name">{f.username}</span>
+                    <button
+                      className="follower-invite-btn"
+                      disabled={isInviteDisabled}
+	                      onClick={async () => {
+	                        if (isInviteDisabled) return;
+	                        setInviteBusyIds((prev) => (prev.includes(followerId) ? prev : [...prev, followerId]));
+	                        try {
+	                          const res = await fetch(`${API_URL}/checklists/${savedSlug || id}/invite/${f.id}`, {
+                            method: "POST",
+                            headers: authHeaders
+	                          });
+	                          if (res.status === 409) {
+	                            setInviteAlreadyIds((prev) => (prev.includes(followerId) ? prev : [...prev, followerId]));
+	                            return;
+	                          }
+                          if (!res.ok) {
+                            const data = await readJsonSafely(res);
+                            throw new Error(data?.detail || "Invite failed");
+                          }
+	                          setInviteSentIds((prev) => (prev.includes(followerId) ? prev : [...prev, followerId]));
+	                        } catch (err) {
+	                          console.error(err);
+	                        } finally {
+	                          setInviteBusyIds((prev) => prev.filter((id) => id !== followerId));
+	                        }
+                      }}
+                    >
+                      {inviteButtonLabel}
+                    </button>
                   </div>
-                  <span className="follower-name">{f.username}</span>
-                  <button
-                    className="follower-invite-btn"
-                    onClick={async (e) => {
-                      const btn = e.currentTarget;
-                      btn.disabled = true;
-                      btn.innerText = "Отправлено";
-                      try {
-                        const res = await fetch(`${API_URL}/checklists/${savedSlug || id}/invite/${f.id}`, {
-                          method: "POST",
-                          headers: authHeaders
-                        });
-                        if (res.status === 409) {
-                          btn.innerText = lang === 'ru' ? "Уже в чеклисте" : "Already in list";
-                          btn.style.opacity = "0.5";
-                        }
-                      } catch (err) {
-                        console.error(err);
-                        btn.disabled = false;
-                        btn.innerText = lang === 'ru' ? "Пригласить" : "Invite";
-                      }
-                    }}
-                  >
-                    Пригласить
-                  </button>
-                </div>
-              )) : (
+                );
+              }) : (
                 <div className="empty-subscribers" style={{ textAlign: "center", color: "#666", padding: "20px" }}>У вас пока нет подписчиков</div>
               )}
             </div>
@@ -4623,6 +4927,17 @@ const App = ({ page }) => {
           language={lang}
         />
       )}
+
+      <ConfirmDialog
+        open={Boolean(confirmDialog)}
+        title={confirmDialog?.title || ""}
+        message={confirmDialog?.message || ""}
+        confirmLabel={confirmDialog?.confirmLabel || (lang === "en" ? "Confirm" : "Подтвердить")}
+        cancelLabel={confirmDialog?.cancelLabel || (lang === "en" ? "Cancel" : "Отмена")}
+        tone={confirmDialog?.tone || "default"}
+        onConfirm={() => closeConfirmDialog(true)}
+        onCancel={() => closeConfirmDialog(false)}
+      />
     </>
   );
 };

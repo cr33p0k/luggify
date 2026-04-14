@@ -172,7 +172,6 @@ body:has(.tma-shell) {
 }
 
 .tma-progress-ring {
-  --progress: 0%;
   position: relative;
   width: 4rem;
   height: 4rem;
@@ -180,11 +179,35 @@ body:has(.tma-shell) {
   display: grid;
   place-items: center;
   border-radius: 50%;
-  background:
-    conic-gradient(var(--tma-accent) var(--progress), rgba(255, 255, 255, 0.08) 0),
-    linear-gradient(145deg, rgba(255, 173, 61, 0.18), rgba(255, 255, 255, 0.04));
+  background: linear-gradient(145deg, rgba(255, 173, 61, 0.16), rgba(255, 255, 255, 0.04));
   border: 1px solid rgba(255, 173, 61, 0.18);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03), 0 0.8rem 2rem rgba(0, 0, 0, 0.24);
+  overflow: hidden;
+}
+
+.tma-progress-ring-svg {
+  position: absolute;
+  inset: 0.22rem;
+  width: calc(100% - 0.44rem);
+  height: calc(100% - 0.44rem);
+  transform: rotate(-90deg);
+}
+
+.tma-progress-ring-track,
+.tma-progress-ring-fill {
+  fill: none;
+  stroke-width: 7;
+}
+
+.tma-progress-ring-track {
+  stroke: rgba(255, 255, 255, 0.1);
+}
+
+.tma-progress-ring-fill {
+  stroke: var(--tma-accent);
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.24s ease;
+  filter: drop-shadow(0 0 0.45rem rgba(255, 173, 61, 0.32));
 }
 
 .tma-progress-ring::before {

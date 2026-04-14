@@ -160,6 +160,22 @@ async def bind_telegram_to_user(
     return user
 
 
+async def unlink_telegram_from_user(db: AsyncSession, user_id: int):
+    user = await get_user_by_id(db, user_id)
+    if not user:
+        return None
+
+    user.tg_id = None
+
+    social_links = dict(user.social_links or {})
+    social_links.pop("telegram", None)
+    user.social_links = social_links or None
+
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
 async def create_user_from_telegram(db: AsyncSession, tg_id: str, username: str, first_name: str = None):
     """Создание пользователя из Telegram данных"""
     display_name = username or first_name or f"tg_{tg_id}"
@@ -459,6 +475,7 @@ async def get_shared_checklists_by_user_id(db: AsyncSession, user_id: int):
         )
         .join(models.UserBackpack, models.UserBackpack.checklist_id == models.Checklist.id)
         .where(models.UserBackpack.user_id == user_id)
+        .where(models.Checklist.user_id != user_id)
         .distinct(models.Checklist.id)
         .order_by(models.Checklist.id.desc())
     )

@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import "./ProfilePage.css";
 import { TRANSLATIONS, pluralize, pluralizeWord } from "./i18n";
 import { EyeIcon, LockIcon, UnlockIcon, ListIcon, TrophyIcon, BarChartIcon, CheckCircleIcon, XCricleIcon, SparkleIcon, EditIcon } from "./Icons";
+import ConfirmDialog from "./ConfirmDialog";
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 const RANK_TIERS = [
@@ -22,6 +23,28 @@ const safeParseJson = (value, fallback = null) => {
     } catch {
         return fallback;
     }
+};
+
+const normalizeUserId = (value) => {
+    const numericValue = Number(value);
+    return Number.isFinite(numericValue) ? numericValue : value;
+};
+
+const isChecklistShared = (checklist, viewerUserId) => {
+    if (!checklist) return false;
+    const ownerId = normalizeUserId(checklist.user_id);
+    const viewerId = normalizeUserId(viewerUserId);
+    if (ownerId !== viewerId) return true;
+    return (checklist.backpacks || []).some((backpack) => normalizeUserId(backpack.user_id) !== ownerId);
+};
+
+const getChecklistItemCount = (checklist) => {
+    const checklistItemsCount = Array.isArray(checklist?.items) ? checklist.items.length : 0;
+    const baggageCount = (checklist?.backpacks || []).reduce(
+        (sum, backpack) => sum + (Array.isArray(backpack.items) ? backpack.items.length : 0),
+        0
+    );
+    return checklistItemsCount + baggageCount;
 };
 
 const PROFILE_BUNDLE_CACHE_TTL_MS = 2000;
@@ -175,6 +198,7 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
     const [saving, setSaving] = useState(false);
     const [isAvatarModalOpen, setIsAvatarModalOpen] = useState(false);
     const [showRankModal, setShowRankModal] = useState(false);
+    const [confirmDialog, setConfirmDialog] = useState(null);
     const [isSocialMenuOpen, setIsSocialMenuOpen] = useState(false);
     const [profileInviteTarget, setProfileInviteTarget] = useState(null);
     const [profileInviteBusySlug, setProfileInviteBusySlug] = useState("");
@@ -182,6 +206,28 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
     const [profileInviteError, setProfileInviteError] = useState("");
     const socialMenuRef = React.useRef(null);
     const bioInputRef = React.useRef(null);
+    const confirmResolverRef = React.useRef(null);
+
+    const requestConfirm = React.useCallback(({ title, message, confirmLabel, cancelLabel, tone = "default" }) => (
+        new Promise((resolve) => {
+            confirmResolverRef.current = resolve;
+            setConfirmDialog({
+                title,
+                message,
+                confirmLabel,
+                cancelLabel,
+                tone,
+            });
+        })
+    ), []);
+
+    const closeConfirmDialog = React.useCallback((result) => {
+        if (confirmResolverRef.current) {
+            confirmResolverRef.current(result);
+            confirmResolverRef.current = null;
+        }
+        setConfirmDialog(null);
+    }, []);
     
     // Check if the current viewer is the owner of this profile
     const currentUserStr = window.localStorage.getItem('user');
@@ -316,7 +362,14 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
 
     const deleteChecklist = async (e, slug) => {
         e.stopPropagation();
-        if (!window.confirm(t.deleteChecklistPrompt)) return;
+        const confirmed = await requestConfirm({
+            title: lang === "en" ? "Delete checklist" : "Удалить чеклист",
+            message: t.deleteChecklistPrompt,
+            confirmLabel: lang === "en" ? "Delete" : "Удалить",
+            cancelLabel: lang === "en" ? "Cancel" : "Отмена",
+            tone: "danger",
+        });
+        if (!confirmed) return;
         try {
             const res = await fetch(`${API_URL}/checklist/${slug}`, {
                 method: "DELETE",
@@ -628,7 +681,7 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
 
     const followerCount = followers.length;
     const publicChecklistCount = checklists.filter((item) => item.is_public).length;
-    const collaborativeChecklistCount = checklists.filter((item) => (item.backpacks || []).length > 0).length;
+    const collaborativeChecklistCount = checklists.filter((item) => isChecklistShared(item, user?.id)).length;
     const reviewWithPhotoCount = reviews.filter((item) => item.photo).length;
 
     const pointsBreakdown = [
@@ -1215,7 +1268,7 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                     <div className="checklists-grid">
                         {checklists.map((cl) => {
                             const isOwner = cl.user_id === user?.id;
-                            const isShared = !isOwner || (cl.backpacks && cl.backpacks.length > 0);
+                            const isShared = isChecklistShared(cl, user?.id);
                             return (
                             <div
                                 key={cl.slug}
@@ -1249,7 +1302,7 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                                     {formatDate(cl.start_date)} — {formatDate(cl.end_date)}
                                 </div>
                                 <div className="preview-items">
-                                    {pluralize(cl.items.length, ['вещь', 'вещи', 'вещей'], ['item', 'items'], lang)}
+                                    {pluralize(getChecklistItemCount(cl), ['вещь', 'вещи', 'вещей'], ['item', 'items'], lang)}
                                 </div>
                                 <div className="preview-temp-row">
                                     <div className="preview-temp">
@@ -1523,6 +1576,17 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                     </div>
                 </div>
             )}
+
+            <ConfirmDialog
+                open={Boolean(confirmDialog)}
+                title={confirmDialog?.title || ""}
+                message={confirmDialog?.message || ""}
+                confirmLabel={confirmDialog?.confirmLabel || (lang === "en" ? "Confirm" : "Подтвердить")}
+                cancelLabel={confirmDialog?.cancelLabel || (lang === "en" ? "Cancel" : "Отмена")}
+                tone={confirmDialog?.tone || "default"}
+                onConfirm={() => closeConfirmDialog(true)}
+                onCancel={() => closeConfirmDialog(false)}
+            />
 
             {isAvatarModalOpen && (
                 <div className="avatar-modal-overlay" onClick={() => setIsAvatarModalOpen(false)}>

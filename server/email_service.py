@@ -1,9 +1,14 @@
 import os
 import random
 import string
+import socket
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
+
+from env_utils import load_app_env
+
+load_app_env()
 
 # Try aiosmtplib if available, otherwise use smtplib with asyncio
 try:
@@ -20,6 +25,7 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
+SMTP_TIMEOUT = float(os.getenv("SMTP_TIMEOUT", "8"))
 
 
 def generate_verification_code(length: int = 6) -> str:
@@ -105,31 +111,67 @@ async def send_verification_email(to_email: str, code: str, username: str) -> bo
     """Send verification email. Returns True on success."""
     if not SMTP_USER or not SMTP_PASSWORD:
         print(f"[EMAIL] SMTP not configured. Code for {to_email}: {code}")
-        return True  # Return True in dev mode so registration works
+        return False
 
     msg = _build_verification_email(to_email, code, username)
 
+    def _resolve_smtp_targets():
+        targets = []
+        seen = set()
+
+        try:
+            for family, socktype, proto, _, sockaddr in socket.getaddrinfo(
+                SMTP_HOST,
+                SMTP_PORT,
+                0,
+                socket.SOCK_STREAM,
+            ):
+                target = (family, socktype, proto, sockaddr)
+                if target in seen:
+                    continue
+                seen.add(target)
+                targets.append(target)
+        except Exception as resolve_error:
+            print(f"[EMAIL] Failed to resolve SMTP host {SMTP_HOST}: {resolve_error}")
+
+        return targets
+
+    def _send_sync():
+        last_error = None
+        targets = _resolve_smtp_targets()
+        if not targets:
+            raise RuntimeError(f"No SMTP targets resolved for {SMTP_HOST}:{SMTP_PORT}")
+
+        for family, socktype, proto, sockaddr in targets:
+            try:
+                with socket.socket(family, socktype, proto) as raw_sock:
+                    raw_sock.settimeout(SMTP_TIMEOUT)
+                    raw_sock.connect(sockaddr)
+                    with smtplib.SMTP(timeout=SMTP_TIMEOUT) as server:
+                        server.sock = raw_sock
+                        server.file = raw_sock.makefile("rb")
+                        server.helo_resp = None
+                        server.ehlo_resp = None
+                        server.esmtp_features = {}
+                        server.does_esmtp = False
+                        server.default_port = SMTP_PORT
+                        server._host = SMTP_HOST
+                        server.getreply()
+                        server.ehlo()
+                        server.starttls()
+                        server.ehlo()
+                        server.login(SMTP_USER, SMTP_PASSWORD)
+                        server.send_message(msg)
+                        print(f"[EMAIL] Verification email sent to {to_email} via {sockaddr[0]}:{sockaddr[1]}")
+                        return
+            except Exception as send_error:
+                last_error = send_error
+                print(f"[EMAIL] SMTP candidate {sockaddr[0]}:{sockaddr[1]} failed: {send_error}")
+
+        raise last_error or RuntimeError("SMTP send failed without a specific error")
+
     try:
-        if HAS_AIOSMTPLIB:
-            await aiosmtplib.send(
-                msg,
-                hostname=SMTP_HOST,
-                port=SMTP_PORT,
-                start_tls=True,
-                username=SMTP_USER,
-                password=SMTP_PASSWORD,
-            )
-        else:
-            # Fallback to sync smtplib in a thread
-            def _send_sync():
-                with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-                    server.starttls()
-                    server.login(SMTP_USER, SMTP_PASSWORD)
-                    server.send_message(msg)
-
-            await asyncio.get_event_loop().run_in_executor(None, _send_sync)
-
-        print(f"[EMAIL] Verification email sent to {to_email}")
+        await asyncio.get_event_loop().run_in_executor(None, _send_sync)
         return True
     except Exception as e:
         print(f"[EMAIL] Failed to send email to {to_email}: {e}")

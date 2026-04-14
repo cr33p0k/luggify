@@ -79,7 +79,14 @@ export default function AuthModal({ onClose, onAuth }) {
 
             if (res.status === 202 && data.status === "verification_required") {
                 setShowDeviceVerification(true);
-                setSuccess(data.message);
+                if (data.email_delivery_failed) {
+                    setError(
+                        data.message ||
+                        "Код для нового устройства пока не отправлен. Проверьте настройки почты сервера и попробуйте ещё раз."
+                    );
+                } else {
+                    setSuccess(data.message);
+                }
                 setLoading(false);
                 return;
             }

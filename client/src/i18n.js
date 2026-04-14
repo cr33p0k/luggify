@@ -56,7 +56,6 @@ export const TRANSLATIONS = {
         cancel: "Отмена",
         newItem: "Новая вещь",
         exportCalendar: " В календарь",
-        print: " Печать",
         routeTitle: "Маршрут",
 
         // Options
@@ -208,7 +207,6 @@ export const TRANSLATIONS = {
         cancel: "Cancel",
         newItem: "New item",
         exportCalendar: " Add to Calendar",
-        print: " Print",
         routeTitle: "Route",
 
         // Options
