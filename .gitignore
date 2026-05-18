@@ -34,3 +34,15 @@ android-app/.gradle/
 android-app/build/
 *.apk
 local.properties
+
+# Личные файлы, документы и старые заметки
+docs/
+пример вкр/
+RAILWAY_STAGING.md
+RENDER_MIGRATIONS.md
+RENDER_STAGING.md
+TELEGRAM_BOT.md
+VPS_DEPLOY.md
+Procfile
+test_ai.py
+server/test2.py
