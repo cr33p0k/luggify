@@ -211,7 +211,7 @@ ITEMS_DB = {
     "map_compass": {"ru": "Карта/компас", "en": "Map/Compass"},
     "meds_regular": {"ru": "Запас регулярных лекарств", "en": "Regular Medication"},
     "hygiene_fem": {"ru": "Средства гигиены (женские)", "en": "Feminine Hygiene"},
-    "powerbank_hand": {"ru": "Power bank (в ручную кладь)", "en": "Power Bank (Carry-on)"},
+    "powerbank_hand": {"ru": "Power bank", "en": "Power Bank"},
     "clothes_train": {"ru": "Удобная одежда для поезда", "en": "Comfy Train Clothes"},
     "snacks_water": {"ru": "Снеки и вода", "en": "Snacks & Water"},
     "playlist": {"ru": "Плейлист/аудиокниги", "en": "Playlist/Audiobooks"},
@@ -229,6 +229,20 @@ ITEMS_DB = {
 
 def get_item(key, lang="ru"):
     return ITEMS_DB.get(key, {}).get(lang, ITEMS_DB.get(key, {}).get("ru", key))
+
+
+def translate_known_item_label(label: str | None, target_lang: str = "ru") -> str | None:
+    normalized = str(label or "").strip().casefold()
+    if not normalized:
+        return None
+
+    safe_lang = target_lang if target_lang in {"ru", "en"} else "ru"
+    for item in ITEMS_DB.values():
+        ru_value = str(item.get("ru") or "").strip()
+        en_value = str(item.get("en") or "").strip()
+        if normalized in {ru_value.casefold(), en_value.casefold()}:
+            return item.get(safe_lang) or ru_value or en_value or None
+    return None
 
 def get_category_map(lang="ru"):
     if lang == "en":
@@ -255,4 +269,3 @@ def get_category_map(lang="ru"):
             "Кемпинг": ["Палатка", "Спальный мешок", "Каримат", "надувной коврик", "Горелка", "газ", "Посуда для кемпинга", "Мультитул", "нож", "Спички", "зажигалка", "Москитная сетка", "Мусорные пакеты", "Верёвка", "паракорд", "Гермомешок"],
             "Прочее": ["Бутылка", "Термос", "рюкзак", "Сумка", "Крем", "Снеки", "Плейлист", "Подушка", "Беруши", "маска", "Жидкости", "Тапочки", "Кружка", "Миска", "Поводок", "переноска", "Пелёнки", "пакеты", "Игрушка", "Визитки", "Зонт", "Замок для чемодана", "Путеводитель", "Органайзеры", "Мешок для грязного", "Маска для сна", "Карта", "компас"]
         }
-

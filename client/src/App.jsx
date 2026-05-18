@@ -1,27 +1,69 @@
-import React, { useState, useEffect } from "react";
+import React, { Suspense, useState, useEffect, useRef, useMemo } from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
+import "maplibre-gl/dist/maplibre-gl.css";
 import CitySelect from "./CitySelect";
 import DateRangePicker from "./DateRangePicker";
 import AuthModal from "./AuthModal";
-import ProfilePage from "./ProfilePage";
 import NavbarUserSearch from "./NavbarUserSearch";
 import ConfirmDialog from "./ConfirmDialog";
 import {
   PlaneIcon, TrainIcon, CarIcon, BusIcon,
-  VacationIcon, BusinessIcon, ActiveIcon, BeachIcon, WinterIcon,
   CalendarIcon, SparkleIcon, WeatherIcon, LockIcon, UnlockIcon,
-  ClockIcon, DropletIcon, WindIcon, BackpackIcon, HotelIcon, MuseumIcon, SmartphoneIcon, GlobeIcon
+  ClockIcon, DropletIcon, WindIcon, BackpackIcon, HotelIcon, MuseumIcon, SmartphoneIcon, GlobeIcon,
+  SunIcon, MoonIcon, ListIcon, MapIcon, WalletIcon
 } from './Icons';
+import { TRANSLATIONS, formatDuration, pluralize } from "./i18n";
+import {
+  API_URL,
+  normalizeUserId,
+  readJsonSafely,
+  resolveInitialTheme,
+  safeParseJson,
+} from "./appUtils";
+import {
+  clearOfflineChecklistSnapshots,
+  clearPendingChecklistSnapshot,
+  isOfflineChecklistEditable,
+  loadLastChecklistSnapshot,
+  loadPendingChecklistSnapshot,
+  saveLastChecklistSnapshot,
+  savePendingChecklistSnapshot,
+} from "./offlineChecklist";
+import {
+  getItemQuantity,
+  getNormalizedPackedQuantityMap,
+  getNormalizedQuantityMap,
+  getPackedQuantity,
+  normalizeItemKey,
+  normalizePackedQuantityMap,
+  normalizeQuantityMap,
+  setItemQuantityInMap,
+  setPackedQuantityInMap,
+} from "./packingState";
+import {
+  buildChecklistItemTranslationEntry,
+  cacheChecklistItemTranslation,
+  detectItemTextLanguage,
+  normalizeChecklistItemTranslations,
+  requestChecklistItemTranslation,
+  translateAirlineLabel,
+  translateChecklistCategoryLabel,
+  translateChecklistItemLabel,
+  translateFlightTagLabel,
+  translateKnownBaggageName,
+  translatePlaceLabel,
+  translateWeatherConditionLabel,
+} from "./checklistLocalization";
 import "./App.css";
 import "./AuthModal.css";
-import AIChatWidget from "./AIChatWidget";
 import "./AIChatWidget.css";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
-import { TRANSLATIONS, formatDuration, pluralize } from "./i18n";
+const ProfilePage = React.lazy(() => import("./ProfilePage"));
+const AIChatWidget = React.lazy(() => import("./AIChatWidget"));
 
 const FORECAST_DESKTOP_CARD_WIDTH = 146;
 const FORECAST_DESKTOP_GAP = 12;
+const MAX_REVIEW_PHOTOS = 8;
 
 const getForecastRowLayout = (count) => {
   const safeCount = Math.max(1, Number(count) || 1);
@@ -53,28 +95,532 @@ const splitForecastDays = (days = []) => {
   return rows;
 };
 
-const safeParseJson = (value, fallback = null) => {
-  if (!value) return fallback;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return fallback;
-  }
-};
-
-const readJsonSafely = async (response) => {
-  const contentType = response.headers.get("content-type") || "";
-  if (!contentType.includes("application/json")) return null;
-  return response.json().catch(() => null);
+const resizeTextareaToContent = (element) => {
+  if (!element) return;
+  element.style.height = "auto";
+  element.style.height = `${element.scrollHeight}px`;
 };
 
 const DEFAULT_PACKING_PROFILE = {
   gender: "unspecified",
   traveling_with_pet: false,
   has_allergies: false,
+  traveling_with_children: false,
   always_include_items: [],
 };
+const DEFAULT_TRIP_OPTIONS = {
+  trip_type: "city_break",
+  trip_activities: [],
+  baggage_format: "suitcase",
+  accommodation_type: "hotel",
+  laundry_access: "limited",
+  packing_style: "balanced",
+  adults: 2,
+  children_ages: [],
+  child_profiles: [],
+  trip_note: "",
+};
+const INITIAL_TRIP_OPTIONS = {
+  ...DEFAULT_TRIP_OPTIONS,
+  baggage_format: "",
+  accommodation_type: "",
+  laundry_access: "",
+  packing_style: "",
+};
+const LEGACY_TRIP_TYPE_MAP = {
+  vacation: "city_break",
+  city_break: "city_break",
+  city: "city_break",
+  business: "business_trip",
+  business_trip: "business_trip",
+  active: "outdoor_adventure",
+  beach: "beach_escape",
+  beach_escape: "beach_escape",
+  winter: "winter_trip",
+  winter_trip: "winter_trip",
+  family: "family_trip",
+  family_trip: "family_trip",
+  romantic: "romantic_getaway",
+  romantic_getaway: "romantic_getaway",
+  camping: "outdoor_adventure",
+  outdoor_adventure: "outdoor_adventure",
+};
 
+const normalizeTripType = (value) => LEGACY_TRIP_TYPE_MAP[(value || "").toString().trim().toLowerCase()] || DEFAULT_TRIP_OPTIONS.trip_type;
+const normalizeTripActivities = (values = []) => {
+  const normalized = [];
+  (Array.isArray(values) ? values : []).forEach((rawValue) => {
+    const value = (rawValue || "").toString().trim();
+    if (!value || normalized.includes(value)) return;
+    normalized.push(value);
+  });
+  return normalized;
+};
+
+const normalizeAdultsCount = (value, fallback = 2) => {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? Math.max(1, parsed) : fallback;
+};
+
+const normalizeChildrenAges = (values = []) => (
+  (Array.isArray(values) ? values : [])
+    .map((value) => Number.parseInt(value, 10))
+    .filter((value) => Number.isFinite(value) && value >= 0 && value <= 17)
+    .slice(0, 8)
+);
+
+const resizeChildrenAges = (values = [], count = 0, fallbackAge = 7) => {
+  const normalizedValues = normalizeChildrenAges(values);
+  const nextCount = Math.max(0, Number.parseInt(count, 10) || 0);
+  if (normalizedValues.length >= nextCount) {
+    return normalizedValues.slice(0, nextCount);
+  }
+  return [...normalizedValues, ...Array.from({ length: nextCount - normalizedValues.length }, () => fallbackAge)];
+};
+
+const normalizeChildProfiles = (profiles = [], childrenAges = []) => {
+  const rawProfiles = Array.isArray(profiles) ? profiles : [];
+  return childrenAges.map((age, index) => {
+    const rawProfile = rawProfiles[index] || {};
+    const fallbackId = `child_${index + 1}`;
+    const rawId = (rawProfile.id || "").toString().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 48);
+    return {
+      id: rawId || fallbackId,
+      name: (rawProfile.name || "").toString().trim().slice(0, 40),
+      age,
+      linked_user_id: normalizeUserId(rawProfile.linked_user_id) || null,
+    };
+  });
+};
+
+const normalizeTripParty = (value = {}) => {
+  const adults = normalizeAdultsCount(value?.adults, DEFAULT_TRIP_OPTIONS.adults);
+  const childrenAges = resizeChildrenAges(value?.children_ages, normalizeChildrenAges(value?.children_ages).length);
+  return {
+    adults,
+    children_ages: childrenAges,
+    child_profiles: normalizeChildProfiles(value?.child_profiles, childrenAges),
+  };
+};
+
+const getTripPartyCounts = (value = {}) => {
+  const normalized = normalizeTripParty(value);
+  return {
+    adults: normalized.adults,
+    childrenCount: normalized.children_ages.length,
+  };
+};
+
+const buildHotelChildrenAges = (value = {}) => {
+  const normalized = normalizeTripParty(value);
+  return normalized.children_ages;
+};
+
+const normalizeHotelRoomsCount = (value, travelersCount = 1) => {
+  const parsed = Number.parseInt(value, 10);
+  const maxRooms = Math.max(1, Math.min(Number.parseInt(travelersCount, 10) || 1, 8));
+  if (!Number.isFinite(parsed)) return 1;
+  return Math.min(Math.max(parsed, 1), maxRooms);
+};
+
+const buildAccommodationUnitPlan = ({ adults = 1, childrenAges = [], units = 1 }) => {
+  const normalizedAdults = Math.max(Number.parseInt(adults, 10) || 1, 1);
+  const normalizedChildrenAges = normalizeChildrenAges(childrenAges);
+  const totalGuests = Math.max(normalizedAdults + normalizedChildrenAges.length, 1);
+  const unitCount = normalizeHotelRoomsCount(units, totalGuests);
+  const groups = Array.from({ length: unitCount }, () => ({ adults: 0, children_ages: [] }));
+
+  const pickTargetIndex = (preferAdultHost = false) => (
+    groups.reduce((bestIndex, group, index) => {
+      const bestGroup = groups[bestIndex];
+      const groupGuests = group.adults + group.children_ages.length;
+      const bestGuests = bestGroup.adults + bestGroup.children_ages.length;
+      if (groupGuests !== bestGuests) {
+        return groupGuests < bestGuests ? index : bestIndex;
+      }
+      if (preferAdultHost && group.adults !== bestGroup.adults) {
+        return group.adults > bestGroup.adults ? index : bestIndex;
+      }
+      if (group.children_ages.length !== bestGroup.children_ages.length) {
+        return group.children_ages.length < bestGroup.children_ages.length ? index : bestIndex;
+      }
+      return index < bestIndex ? index : bestIndex;
+    }, 0)
+  );
+
+  for (let index = 0; index < normalizedAdults; index += 1) {
+    groups[pickTargetIndex(false)].adults += 1;
+  }
+
+  normalizedChildrenAges.forEach((age) => {
+    groups[pickTargetIndex(true)].children_ages.push(age);
+  });
+
+  groups.forEach((group) => {
+    if (group.adults > 0 || group.children_ages.length === 0) return;
+    const donorIndex = groups.findIndex((candidate) => candidate.adults > 1);
+    if (donorIndex >= 0) {
+      groups[donorIndex].adults -= 1;
+      group.adults += 1;
+    }
+  });
+
+  const normalizedGroups = groups.map((group) => ({
+    adults: group.adults,
+    children_ages: [...group.children_ages].sort((left, right) => left - right),
+    total_guests: group.adults + group.children_ages.length,
+  }));
+
+  const representativeGroup = normalizedGroups.reduce((best, group) => {
+    if (!best) return group;
+    if (group.total_guests !== best.total_guests) {
+      return group.total_guests > best.total_guests ? group : best;
+    }
+    if (group.adults !== best.adults) {
+      return group.adults > best.adults ? group : best;
+    }
+    return group.children_ages.length > best.children_ages.length ? group : best;
+  }, null) || { adults: normalizedAdults, children_ages: normalizedChildrenAges, total_guests: totalGuests };
+
+  return {
+    unit_count: unitCount,
+    total_guests: totalGuests,
+    groups: normalizedGroups,
+    representative_group: representativeGroup,
+  };
+};
+
+const formatRuProviderHint = (providerName, plan, lang = "ru") => {
+  if (!plan) return "";
+  if (plan.unit_count <= 1) {
+    return providerName === "sutochno"
+      ? (lang === "en" ? "Whole apartment or house for the group" : "Целое жильё для всей компании")
+      : (lang === "en" ? "Hotels and apartments for the whole group" : "Отели и апартаменты для всей компании");
+  }
+  return providerName === "sutochno"
+    ? (lang === "en" ? "Split across several apartments or homes" : "Делим поездку на несколько квартир или домов")
+    : (lang === "en" ? "Split search across several stays" : "Делим поиск на несколько вариантов");
+};
+
+const normalizeHotelRating = (value) => {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return 0;
+  return Math.min(parsed, 10);
+};
+
+const normalizeHotelPriceValue = (value) => {
+  const digits = String(value ?? "").replace(/[^\d]/g, "");
+  if (!digits) return "";
+  const parsed = Number.parseInt(digits, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? String(parsed) : "";
+};
+
+const normalizeHotelBedroomsValue = (value) => {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return 0;
+  return Math.min(parsed, 6);
+};
+
+const getFlightPassengerCounts = (value = {}) => {
+  const normalized = normalizeTripParty(value);
+  const flightAdults = normalized.adults + normalized.children_ages.filter((age) => age >= 12).length;
+  const flightChildren = normalized.children_ages.filter((age) => age >= 2 && age <= 11).length;
+  const infants = normalized.children_ages.filter((age) => age < 2).length;
+  return {
+    adults: Math.max(1, flightAdults),
+    children: flightChildren,
+    infants,
+  };
+};
+
+const formatTripPartySummary = (value = {}, lang = "ru") => {
+  const { adults, childrenCount } = getTripPartyCounts(value);
+  const segments = [
+    `${adults} ${lang === "en" ? (adults === 1 ? "adult" : "adults") : adults === 1 ? "взрослый" : "взрослых"}`,
+  ];
+  if (childrenCount > 0) {
+    segments.push(`${childrenCount} ${lang === "en" ? (childrenCount === 1 ? "child" : "children") : childrenCount === 1 ? "ребенок" : "детей"}`);
+  }
+  return segments.join(" · ");
+};
+
+const formatHotelCurrencyPrice = (currency = "RUB", value, lang = "ru") => {
+  if (!Number.isFinite(Number(value))) return "";
+  const amount = Math.round(Number(value)).toLocaleString(lang === "en" ? "en-US" : "ru-RU");
+  if (currency === "RUB") return `${amount} ₽`;
+  if (currency === "USD") return `$${amount}`;
+  if (currency === "EUR") return `€${amount}`;
+  return `${currency} ${amount}`;
+};
+
+const EXPENSE_BASE_CURRENCIES = ["RUB", "USD", "EUR"];
+const EXPENSE_COMMON_CURRENCIES = [
+  "RUB", "USD", "EUR", "GBP", "CHF",
+  "TRY", "AED", "GEL", "AMD", "AZN", "KZT",
+  "THB", "VND", "IDR", "CNY", "JPY", "KRW", "INR",
+  "CZK", "HUF", "PLN", "NOK", "SEK", "DKK",
+  "EGP", "MAD", "ILS", "MXN", "BRL", "CAD", "AUD",
+];
+const EXPENSE_CATEGORIES = [
+  "food",
+  "transport",
+  "tickets",
+  "hotel",
+  "entertainment",
+  "shopping",
+  "other",
+];
+
+const COUNTRY_CURRENCY_BY_NAME = {
+  russia: "RUB",
+  россия: "RUB",
+  "united states": "USD",
+  usa: "USD",
+  сша: "USD",
+  "united arab emirates": "AED",
+  uae: "AED",
+  оаэ: "AED",
+  moldova: "MDL",
+  молдова: "MDL",
+  turkey: "TRY",
+  turkiye: "TRY",
+  türkiye: "TRY",
+  турция: "TRY",
+  georgia: "GEL",
+  грузия: "GEL",
+  armenia: "AMD",
+  армения: "AMD",
+  azerbaijan: "AZN",
+  азербайджан: "AZN",
+  kazakhstan: "KZT",
+  казахстан: "KZT",
+  thailand: "THB",
+  таиланд: "THB",
+  vietnam: "VND",
+  вьетнам: "VND",
+  indonesia: "IDR",
+  индонезия: "IDR",
+  china: "CNY",
+  китай: "CNY",
+  japan: "JPY",
+  япония: "JPY",
+  "south korea": "KRW",
+  korea: "KRW",
+  "южная корея": "KRW",
+  india: "INR",
+  индия: "INR",
+  "united kingdom": "GBP",
+  uk: "GBP",
+  "great britain": "GBP",
+  великобритания: "GBP",
+  switzerland: "CHF",
+  швейцария: "CHF",
+  czechia: "CZK",
+  "czech republic": "CZK",
+  чехия: "CZK",
+  hungary: "HUF",
+  венгрия: "HUF",
+  poland: "PLN",
+  польша: "PLN",
+  norway: "NOK",
+  норвегия: "NOK",
+  sweden: "SEK",
+  швеция: "SEK",
+  denmark: "DKK",
+  дания: "DKK",
+  egypt: "EGP",
+  египет: "EGP",
+  morocco: "MAD",
+  марокко: "MAD",
+  israel: "ILS",
+  израиль: "ILS",
+  mexico: "MXN",
+  мексика: "MXN",
+  brazil: "BRL",
+  бразилия: "BRL",
+  canada: "CAD",
+  канада: "CAD",
+  australia: "AUD",
+  австралия: "AUD",
+  france: "EUR",
+  франция: "EUR",
+  italy: "EUR",
+  италия: "EUR",
+  spain: "EUR",
+  испания: "EUR",
+  germany: "EUR",
+  германия: "EUR",
+  austria: "EUR",
+  австрия: "EUR",
+  greece: "EUR",
+  греция: "EUR",
+  netherlands: "EUR",
+  нидерланды: "EUR",
+  portugal: "EUR",
+  португалия: "EUR",
+  finland: "EUR",
+  финляндия: "EUR",
+};
+
+const CITY_CURRENCY_BY_NAME = {
+  dubai: "AED",
+  дубай: "AED",
+  istanbul: "TRY",
+  стамбул: "TRY",
+  antalya: "TRY",
+  анталия: "TRY",
+  tbilisi: "GEL",
+  тбилиси: "GEL",
+  yerevan: "AMD",
+  ереван: "AMD",
+  baku: "AZN",
+  баку: "AZN",
+  chisinau: "MDL",
+  chișinău: "MDL",
+  кишинев: "MDL",
+  кишинёв: "MDL",
+  almaty: "KZT",
+  алматы: "KZT",
+  bangkok: "THB",
+  бангкок: "THB",
+  phuket: "THB",
+  пхукет: "THB",
+  budapest: "HUF",
+  будапешт: "HUF",
+  prague: "CZK",
+  прага: "CZK",
+  warsaw: "PLN",
+  варшава: "PLN",
+  london: "GBP",
+  лондон: "GBP",
+  tokyo: "JPY",
+  токио: "JPY",
+  seoul: "KRW",
+  сеул: "KRW",
+};
+
+const normalizeExpenseCurrency = (value = "RUB") => {
+  const normalized = String(value || "RUB").trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(normalized) ? normalized : "RUB";
+};
+
+const getPrimaryExpenseDestination = (checklist = {}) => {
+  const rawCity = String(checklist?.destinations?.[0]?.city || checklist?.city || "").trim();
+  return rawCity.split(" + ")[0]?.trim() || rawCity;
+};
+
+const getExpenseLocalCurrency = (checklist = {}) => {
+  const destination = getPrimaryExpenseDestination(checklist);
+  if (!destination) return normalizeExpenseCurrency(checklist?.expense_base_currency || "RUB");
+  const parts = destination.split(",").map((part) => part.trim()).filter(Boolean);
+  const country = parts.length > 1 ? parts[parts.length - 1].toLowerCase() : "";
+  const city = (parts[0] || destination).toLowerCase();
+  return normalizeExpenseCurrency(
+    COUNTRY_CURRENCY_BY_NAME[country]
+    || CITY_CURRENCY_BY_NAME[city]
+    || checklist?.expense_base_currency
+    || "RUB"
+  );
+};
+
+const buildExpenseCurrencyOptions = (...currencies) => {
+  const normalizedCurrencies = currencies
+    .flat()
+    .filter(Boolean)
+    .map((currency) => normalizeExpenseCurrency(currency));
+  return Array.from(new Set(normalizedCurrencies)).map((currency) => ({
+    id: currency,
+    label: currency,
+  }));
+};
+
+const normalizeExpenseAmountInput = (value) => {
+  const normalized = String(value ?? "").replace(",", ".").replace(/[^\d.]/g, "");
+  const firstDot = normalized.indexOf(".");
+  if (firstDot === -1) return normalized;
+  return normalized.slice(0, firstDot + 1) + normalized.slice(firstDot + 1).replace(/\./g, "");
+};
+
+const formatMoney = (value, currency = "RUB", lang = "ru") => {
+  if (!Number.isFinite(Number(value))) return "";
+  const amount = Number(value);
+  const locale = lang === "en" ? "en-US" : "ru-RU";
+  try {
+    return new Intl.NumberFormat(locale, {
+      style: "currency",
+      currency: normalizeExpenseCurrency(currency),
+      maximumFractionDigits: amount % 1 === 0 ? 0 : 2,
+    }).format(amount);
+  } catch {
+    return `${amount.toLocaleString(locale)} ${currency}`;
+  }
+};
+
+const getExpenseCategoryLabel = (category = "other", lang = "ru") => {
+  const labels = {
+    food: { ru: "Еда", en: "Food" },
+    transport: { ru: "Транспорт", en: "Transport" },
+    tickets: { ru: "Билеты", en: "Tickets" },
+    hotel: { ru: "Жильё", en: "Accommodation" },
+    entertainment: { ru: "Развлечения", en: "Entertainment" },
+    shopping: { ru: "Покупки", en: "Shopping" },
+    other: { ru: "Другое", en: "Other" },
+  };
+  return labels[category]?.[lang] || labels.other[lang] || labels.other.ru;
+};
+
+const getEventCoordinates = (event) => {
+  if (event?.lat === null || event?.lat === undefined || event?.lat === "") return null;
+  if (event?.lng === null || event?.lng === undefined || event?.lng === "") return null;
+  const lat = Number(event?.lat);
+  const lng = Number(event?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  return [lat, lng];
+};
+
+const getFlightClassOptions = (lang = "ru") => [
+  { value: "0", label: lang === "en" ? "Economy" : "Эконом" },
+  { value: "1", label: lang === "en" ? "Business" : "Бизнес" },
+  { value: "2", label: lang === "en" ? "First" : "Первый" },
+];
+
+const normalizeSelectableOption = (value, allowedValues, fallback, preserveEmptySelections = false) => {
+  const normalizedValue = (value ?? "").toString().trim();
+  if (preserveEmptySelections && !normalizedValue) return "";
+  return allowedValues.includes(normalizedValue) ? normalizedValue : fallback;
+};
+
+const normalizeTripOptions = (value = {}, { preserveEmptySelections = false } = {}) => ({
+  trip_type: normalizeTripType(value?.trip_type),
+  trip_activities: normalizeTripActivities(value?.trip_activities),
+  baggage_format: normalizeSelectableOption(
+    value?.baggage_format,
+    ["carry_on", "suitcase", "suitcase_plus_carry_on", "hiking_backpack"],
+    DEFAULT_TRIP_OPTIONS.baggage_format,
+    preserveEmptySelections
+  ),
+  accommodation_type: normalizeSelectableOption(
+    value?.accommodation_type,
+    ["hotel", "apartment", "hostel", "camping"],
+    DEFAULT_TRIP_OPTIONS.accommodation_type,
+    preserveEmptySelections
+  ),
+  laundry_access: normalizeSelectableOption(
+    value?.laundry_access,
+    ["none", "limited", "easy"],
+    DEFAULT_TRIP_OPTIONS.laundry_access,
+    preserveEmptySelections
+  ),
+  packing_style: normalizeSelectableOption(
+    value?.packing_style,
+    ["light", "balanced", "prepared"],
+    DEFAULT_TRIP_OPTIONS.packing_style,
+    preserveEmptySelections
+  ),
+  ...normalizeTripParty(value),
+  trip_note: (value?.trip_note || "").toString(),
+});
 const normalizePackingProfileItems = (items = []) => {
   const normalized = [];
   (Array.isArray(items) ? items : []).forEach((rawValue) => {
@@ -92,84 +638,203 @@ const normalizePackingProfile = (value = {}) => {
     gender,
     traveling_with_pet: Boolean(value?.traveling_with_pet),
     has_allergies: Boolean(value?.has_allergies),
+    traveling_with_children: Boolean(value?.traveling_with_children),
     always_include_items: normalizePackingProfileItems(value?.always_include_items),
   };
 };
 
 const buildCheckedItemsMap = (items = [], checkedItems = [], quantityMap = {}, packedMap = {}) => {
   const checkedSet = new Set(checkedItems || []);
+  const normalizedQuantities = getNormalizedQuantityMap(quantityMap);
+  const normalizedPacked = getNormalizedPackedQuantityMap(packedMap);
   return items.reduce((acc, item) => {
-    const needed = getItemQuantity(quantityMap, item);
-    const packed = getPackedQuantity(packedMap, item);
+    const normalizedKey = normalizeItemKey(item);
+    const needed = normalizedKey ? (normalizedQuantities[normalizedKey] || 1) : 1;
+    const packed = normalizedKey ? (normalizedPacked[normalizedKey] || 0) : 0;
     acc[item] = packed >= needed || checkedSet.has(item);
     return acc;
   }, {});
 };
 
-const normalizeItemKey = (value) => (value || "").trim().toLowerCase().replaceAll("ё", "е");
+const CHECKLIST_CATEGORY_OPTIONS = {
+  ru: ["Важное", "Документы", "Одежда", "Гигиена", "Техника", "Аптечка", "Для детей", "Кемпинг", "Прочее"],
+  en: ["Essentials", "Documents", "Clothes", "Hygiene", "Electronics", "Pharmacy", "Kids", "Camping", "Misc"],
+};
 
-const normalizeQuantityMap = (value = {}) =>
+const formatBaggageCount = (count, lang = "ru") =>
+  pluralize(count, ["багаж", "багажа", "багажа"], ["bag", "bags"], lang);
+
+const formatItemCount = (count, lang = "ru") =>
+  pluralize(count, ["вещь", "вещи", "вещей"], ["item", "items"], lang);
+
+const formatBaggageSummary = (baggageCount, itemCount, lang = "ru") =>
+  `${formatBaggageCount(baggageCount, lang)} • ${formatItemCount(itemCount, lang)}`;
+
+const formatChecklistLocale = (lang = "ru") => (lang === "en" ? "en-US" : "ru-RU");
+
+const renderChecklistHeaderDate = (dateStr, lang = "ru") => {
+  if (!dateStr) return null;
+  const date = new Date(dateStr);
+  const formatter = new Intl.DateTimeFormat(formatChecklistLocale(lang), { day: "numeric", month: "long" });
+  const parts = formatter.formatToParts(date);
+  const day = parts.find((part) => part.type === "day")?.value || "";
+  const month = parts.find((part) => part.type === "month")?.value || formatter.format(date);
+
+  if (lang === "en") {
+    return <>{month} <span className="date-num">{day}</span></>;
+  }
+
+  return <><span className="date-num">{day}</span> {month}</>;
+};
+
+const CHECKLIST_CATEGORY_KEYWORDS = {
+  ru: {
+    "Важное": ["паспорт", "страхов", "деньги", "карта", "виза", "билет", "бронь", "удостоверение", "документ"],
+    "Документы": ["рецепт", "заключение", "аллерген", "разговорник"],
+    "Одежда": ["курт", "футбол", "джинс", "шорт", "свит", "брюк", "кроссов", "обув", "пижам", "купаль", "плавк", "шап", "шарф", "перчат", "носк", "бель", "рубаш", "худи", "ботин", "плать", "юбк", "полотен"],
+    "Гигиена": ["щетк", "паста", "дезодорант", "мыло", "шампун", "расчес", "космет", "салфет", "крем", "антисеп", "бритв", "ватн"],
+    "Техника": ["телефон", "заряд", "power bank", "пауэр", "науш", "ноутбук", "кабель", "адаптер", "переходник", "камера", "фотоаппарат"],
+    "Аптечка": ["лекар", "обезбол", "пластыр", "антигист", "уголь", "сорб", "аптеч", "репелл", "диаре", "укач", "горла"],
+    "Для детей": ["дет", "ребен", "ребён", "пампер", "подгуз", "коляск", "поиль", "бутылоч", "игруш"],
+    "Кемпинг": ["палат", "спальн", "карим", "коврик", "горелк", "мультитул", "паракорд", "гермом", "фонар"],
+  },
+  en: {
+    "Essentials": ["passport", "insurance", "cash", "card", "visa", "ticket", "booking", "license", "document"],
+    "Documents": ["prescription", "medical report", "allerg", "phrasebook"],
+    "Clothes": ["jacket", "t-shirt", "jeans", "shorts", "sweater", "pants", "shoes", "sneakers", "pajamas", "swimsuit", "hat", "scarf", "gloves", "socks", "underwear", "shirt", "hoodie", "boots", "dress", "towel"],
+    "Hygiene": ["tooth", "deodor", "soap", "shampoo", "hairbrush", "makeup", "wipes", "cream", "sanitizer", "shaving", "cotton"],
+    "Electronics": ["phone", "charger", "power bank", "headphones", "laptop", "cable", "adapter", "camera"],
+    "Pharmacy": ["med", "pain", "plaster", "antihist", "charcoal", "first aid", "repellent", "diarrhea", "motion sickness", "throat"],
+    "Kids": ["baby", "kids", "diaper", "stroller", "sippy", "toy"],
+    "Camping": ["tent", "sleep", "camp", "multitool", "rope", "dry bag", "flashlight"],
+  },
+};
+
+const normalizeItemCategoryMap = (value = {}) =>
   Object.entries(value || {}).reduce((acc, [key, rawValue]) => {
     const normalizedKey = normalizeItemKey(key);
-    const numericValue = Number(rawValue);
-    if (!normalizedKey || !Number.isFinite(numericValue) || numericValue < 1) {
-      return acc;
-    }
-    acc[normalizedKey] = Math.max(1, Math.round(numericValue));
+    const category = String(rawValue || "").trim();
+    if (!normalizedKey || !category) return acc;
+    acc[normalizedKey] = category;
     return acc;
   }, {});
 
-const normalizePackedQuantityMap = (value = {}) =>
-  Object.entries(value || {}).reduce((acc, [key, rawValue]) => {
-    const normalizedKey = normalizeItemKey(key);
-    const numericValue = Number(rawValue);
-    if (!normalizedKey || !Number.isFinite(numericValue)) {
-      return acc;
-    }
-    const safeValue = Math.max(0, Math.round(numericValue));
-    if (safeValue === 0) {
-      return acc;
-    }
-    acc[normalizedKey] = safeValue;
-    return acc;
-  }, {});
+const normalizeItemTranslationMap = (value = {}) => normalizeChecklistItemTranslations(value);
 
-const getItemQuantity = (quantityMap = {}, item) => {
-  const normalizedKey = normalizeItemKey(item);
-  if (!normalizedKey) return 1;
-  return normalizeQuantityMap(quantityMap)[normalizedKey] || 1;
-};
-
-const getPackedQuantity = (quantityMap = {}, item) => {
-  const normalizedKey = normalizeItemKey(item);
-  if (!normalizedKey) return 0;
-  return normalizePackedQuantityMap(quantityMap)[normalizedKey] || 0;
-};
-
-const setItemQuantityInMap = (quantityMap = {}, item, nextQuantity) => {
-  const normalizedKey = normalizeItemKey(item);
-  if (!normalizedKey) return normalizeQuantityMap(quantityMap);
-  const nextMap = normalizeQuantityMap(quantityMap);
-  const parsedQuantity = Number(nextQuantity);
-  if (!Number.isFinite(parsedQuantity) || parsedQuantity < 1) {
-    delete nextMap[normalizedKey];
-    return nextMap;
+const mergeItemTranslationEntry = (translationMap = {}, item, entry) => {
+  const itemLabel = String(item || "").trim();
+  if (!itemLabel || !entry || typeof entry !== "object") {
+    return normalizeItemTranslationMap(translationMap);
   }
-  nextMap[normalizedKey] = Math.max(1, Math.round(parsedQuantity));
+  const nextMap = normalizeItemTranslationMap(translationMap);
+  nextMap[itemLabel] = {
+    ...(nextMap[itemLabel] || {}),
+    ...entry,
+  };
   return nextMap;
 };
 
-const setPackedQuantityInMap = (quantityMap = {}, item, nextQuantity) => {
+const getItemCategory = (categoryMap = {}, item) => {
   const normalizedKey = normalizeItemKey(item);
-  if (!normalizedKey) return normalizePackedQuantityMap(quantityMap);
-  const nextMap = normalizePackedQuantityMap(quantityMap);
-  const parsedQuantity = Number(nextQuantity);
-  if (!Number.isFinite(parsedQuantity) || parsedQuantity <= 0) {
+  if (!normalizedKey) return "";
+  return normalizeItemCategoryMap(categoryMap)[normalizedKey] || "";
+};
+
+const setItemCategoryInMap = (categoryMap = {}, item, nextCategory) => {
+  const normalizedKey = normalizeItemKey(item);
+  if (!normalizedKey) return normalizeItemCategoryMap(categoryMap);
+  const nextMap = normalizeItemCategoryMap(categoryMap);
+  const category = String(nextCategory || "").trim();
+  if (!category) {
     delete nextMap[normalizedKey];
     return nextMap;
   }
-  nextMap[normalizedKey] = Math.max(0, Math.round(parsedQuantity));
+  nextMap[normalizedKey] = category;
   return nextMap;
+};
+
+const inferItemCategory = (item, lang = "ru", categoryMap = {}) => {
+  const explicit = getItemCategory(categoryMap, item);
+  if (explicit) return translateChecklistCategoryLabel(explicit, lang);
+  const normalized = normalizeItemKey(item);
+  const keywords = CHECKLIST_CATEGORY_KEYWORDS[lang] || CHECKLIST_CATEGORY_KEYWORDS.ru;
+  const matched = Object.entries(keywords).find(([, values]) => values.some((value) => normalized.includes(normalizeItemKey(value))));
+  if (matched) return matched[0];
+  const fallback = CHECKLIST_CATEGORY_OPTIONS[lang] || CHECKLIST_CATEGORY_OPTIONS.ru;
+  return fallback[fallback.length - 1];
+};
+
+const buildChecklistCategorySections = (items = [], categoryMap = {}, lang = "ru") => {
+  const grouped = new Map();
+  items.forEach((item) => {
+    const category = inferItemCategory(item, lang, categoryMap);
+    if (!grouped.has(category)) grouped.set(category, []);
+    grouped.get(category).push(item);
+  });
+
+  const preferredOrder = CHECKLIST_CATEGORY_OPTIONS[lang] || CHECKLIST_CATEGORY_OPTIONS.ru;
+  const orderedCategories = [
+    ...preferredOrder.filter((category) => grouped.has(category)),
+    ...Array.from(grouped.keys()).filter((category) => !preferredOrder.includes(category)).sort((a, b) => a.localeCompare(b, lang)),
+  ];
+
+  return orderedCategories.map((category) => ({
+    category,
+    items: grouped.get(category) || [],
+  }));
+};
+
+const buildChecklistColumns = (sections = [], columnCount = 3) => {
+  const requestedColumnCount = Math.max(1, Number(columnCount) || 1);
+  const totalItems = sections.reduce((sum, section) => sum + (section.items?.length || 0), 0);
+  const safeColumnCount = Math.min(requestedColumnCount, Math.max(1, totalItems || 1));
+
+  if (safeColumnCount === 1) return [sections];
+  if (totalItems === 0) return Array.from({ length: safeColumnCount }, () => []);
+
+  const baseTarget = Math.floor(totalItems / safeColumnCount);
+  const remainder = totalItems % safeColumnCount;
+  const columnTargets = Array.from({ length: safeColumnCount }, (_, index) => baseTarget + (index < remainder ? 1 : 0));
+  const columns = Array.from({ length: safeColumnCount }, () => []);
+
+  let columnIndex = 0;
+  let filledInColumn = 0;
+
+  sections.forEach((section) => {
+    const items = Array.isArray(section.items) ? section.items : [];
+    let offset = 0;
+
+    while (offset < items.length && columnIndex < safeColumnCount) {
+      const isLastColumn = columnIndex === safeColumnCount - 1;
+      const remainingInColumn = Math.max(columnTargets[columnIndex] - filledInColumn, 0);
+      const remainingItems = items.length - offset;
+      let takeCount = isLastColumn
+        ? remainingItems
+        : Math.min(remainingItems, Math.max(1, remainingInColumn));
+      const wouldMoveToNextColumn = !isLastColumn && takeCount < remainingItems;
+      const movedItemCount = remainingItems - takeCount;
+      if (wouldMoveToNextColumn && movedItemCount < 3) {
+        takeCount = remainingItems;
+      }
+
+      columns[columnIndex].push({
+        ...section,
+        key: `${section.category}-${offset}-${columnIndex}`,
+        isContinuation: offset > 0,
+        items: items.slice(offset, offset + takeCount),
+      });
+
+      offset += takeCount;
+      filledInColumn += takeCount;
+
+      if (!isLastColumn && filledInColumn >= columnTargets[columnIndex]) {
+        columnIndex += 1;
+        filledInColumn = 0;
+      }
+    }
+  });
+
+  return columns;
 };
 
 const getBaggageEditorIds = (baggage) =>
@@ -179,8 +844,10 @@ const getBaggageEditorIds = (baggage) =>
 
 const getOwnerBaggageEditorIds = (backpacks = [], ownerUserId, fallbackBaggage = null) => {
   const uniqueIds = [];
+  const scopedChildProfileId = fallbackBaggage?.child_profile_id || null;
   (backpacks || []).forEach((baggage) => {
     if (baggage.user_id !== ownerUserId) return;
+    if ((baggage.child_profile_id || null) !== scopedChildProfileId) return;
     getBaggageEditorIds(baggage).forEach((editorId) => {
       if (!uniqueIds.includes(editorId)) {
         uniqueIds.push(editorId);
@@ -193,10 +860,17 @@ const getOwnerBaggageEditorIds = (backpacks = [], ownerUserId, fallbackBaggage =
   return fallbackBaggage ? getBaggageEditorIds(fallbackBaggage) : [];
 };
 
-const canUserEditBaggage = (baggage, userId, allBackpacks = []) => {
+const canUserEditBaggage = (baggage, userId, allBackpacks = [], checklist = null) => {
   if (!baggage || !userId) return false;
   if (baggage.user_id === userId) return true;
+  if (baggage.child_profile_id && checklist?.user_id === userId) return true;
   return getOwnerBaggageEditorIds(allBackpacks, baggage.user_id, baggage).includes(userId);
+};
+
+const getChildProfileDisplayName = (profile, lang = "ru", index = 0) => {
+  const name = (profile?.name || "").trim();
+  if (name) return name;
+  return lang === "en" ? `Child ${index + 1}` : `Ребенок ${index + 1}`;
 };
 
 const sortBaggageList = (items = []) =>
@@ -222,10 +896,95 @@ const sortAllBackpacks = (items = []) =>
     return (a.id || 0) - (b.id || 0);
   });
 
-const buildBaggageParticipants = (checklist, currentUser) => {
-  const groups = new Map();
+const getItineraryEventSortTime = (event) => {
+  const explicitTime = String(event?.time || "").trim();
+  if (explicitTime) return explicitTime;
+  const meta = event?.meta && typeof event.meta === "object" ? event.meta : {};
+  const dayPart = String(meta.day_part || event?.day_part || "").toLowerCase();
+  if (dayPart.includes("morning") || dayPart.includes("breakfast") || dayPart.includes("утро") || dayPart.includes("завтрак")) return "09:00";
+  if (dayPart.includes("evening") || dayPart.includes("dinner") || dayPart.includes("вечер") || dayPart.includes("ужин")) return "19:00";
+  if (dayPart.includes("day") || dayPart.includes("afternoon") || dayPart.includes("lunch") || dayPart.includes("день") || dayPart.includes("обед")) return "13:00";
+  const eventType = String(event?.event_type || "").toLowerCase();
+  if (["food", "restaurant", "cafe"].includes(eventType)) return "13:00";
+  return "99:99";
+};
 
-  const ensureGroup = (userId, username) => {
+const compareItineraryEvents = (a, b) => (
+  String(a?.event_date || "").localeCompare(String(b?.event_date || ""))
+  || getItineraryEventSortTime(a).localeCompare(getItineraryEventSortTime(b))
+  || String(a?.title || "").localeCompare(String(b?.title || ""))
+);
+
+const parseItineraryTimeToMinutes = (value) => {
+  const match = /^(\d{2}):(\d{2})$/.exec(String(value || "").trim());
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes) || hours > 23 || minutes > 59) return null;
+  return hours * 60 + minutes;
+};
+
+const formatItineraryMinutes = (value) => {
+  const minutes = Math.max(6 * 60, Math.min(value, 23 * 60 + 30));
+  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+};
+
+const getItineraryEventDuration = (event) => {
+  const explicitDuration = Number(event?.duration_minutes);
+  if (Number.isFinite(explicitDuration) && explicitDuration > 0) return explicitDuration;
+  const eventType = String(event?.event_type || "").toLowerCase();
+  if (["food", "restaurant"].includes(eventType)) return 75;
+  if (eventType === "cafe") return 60;
+  if (eventType === "walk") return 50;
+  if (eventType === "shopping") return 75;
+  if (["museum", "sight", "attraction"].includes(eventType)) return eventType === "museum" ? 105 : 90;
+  return 75;
+};
+
+const getItineraryEventGap = (event) => {
+  const explicitGap = Number(event?.travel_buffer_minutes);
+  if (Number.isFinite(explicitGap) && explicitGap >= 0) return Math.min(explicitGap, 90);
+  return 15;
+};
+
+const buildCascadedEventTimeUpdates = (events, updatedEvent) => {
+  const updatedMinutes = parseItineraryTimeToMinutes(updatedEvent?.time);
+  if (updatedMinutes === null || !updatedEvent?.event_date) return [];
+  const sameDayEvents = (events || [])
+    .filter((event) => event.id !== updatedEvent.id && event.event_date === updatedEvent.event_date)
+    .filter((event) => parseItineraryTimeToMinutes(event.time) !== null)
+    .sort(compareItineraryEvents);
+
+  let cursor = updatedMinutes + getItineraryEventDuration(updatedEvent) + getItineraryEventGap(updatedEvent);
+  const updates = [];
+  sameDayEvents
+    .filter((event) => parseItineraryTimeToMinutes(event.time) >= updatedMinutes)
+    .forEach((event) => {
+      const eventMinutes = parseItineraryTimeToMinutes(event.time);
+      if (eventMinutes < cursor) {
+        const nextTime = formatItineraryMinutes(cursor);
+        updates.push({ ...event, time: nextTime });
+        cursor += getItineraryEventDuration(event) + getItineraryEventGap(event);
+      } else {
+        cursor = eventMinutes + getItineraryEventDuration(event) + getItineraryEventGap(event);
+      }
+    });
+  return updates;
+};
+
+const buildBaggageParticipants = (checklist, currentUser, lang = "ru") => {
+  const groups = new Map();
+  const childProfiles = normalizeTripParty(checklist?.trip_profile || {}).child_profiles;
+  const childProfileMap = new Map(childProfiles.map((profile, index) => [
+    profile.id,
+    {
+      ...profile,
+      index,
+      linked_user_id: normalizeUserId(profile.linked_user_id) || null,
+    },
+  ]));
+
+  const ensureGroup = (userId, username, extra = {}) => {
     if (!userId) return null;
     if (!groups.has(userId)) {
       groups.set(userId, {
@@ -233,24 +992,64 @@ const buildBaggageParticipants = (checklist, currentUser) => {
         username: username || `id:${userId}`,
         isCurrentUser: currentUser?.id === userId,
         isOwner: checklist?.user_id === userId,
+        isChild: false,
+        childProfileId: null,
+        ownerUserId: null,
+        age: null,
+        linkedUserId: null,
         baggage: [],
+        ...extra,
       });
     }
     const group = groups.get(userId);
     if (username) {
       group.username = username;
     }
-    group.isCurrentUser = currentUser?.id === userId;
-    group.isOwner = checklist?.user_id === userId;
+    if (!group.isChild) {
+      group.isCurrentUser = currentUser?.id === userId;
+      group.isOwner = checklist?.user_id === userId;
+    }
     return group;
   };
 
   (checklist?.backpacks || []).forEach((bp) => {
-    const group = ensureGroup(bp.user_id, bp.user?.username || (currentUser?.id === bp.user_id ? currentUser.username : ""));
+    const childProfileId = (bp.child_profile_id || "").trim();
+    const childProfile = childProfileId ? childProfileMap.get(childProfileId) : null;
+    const linkedUserId = normalizeUserId(childProfile?.linked_user_id);
+    const group = childProfileId
+      ? ensureGroup(
+        linkedUserId || `child:${childProfileId}`,
+        getChildProfileDisplayName(childProfile, lang, childProfile?.index || 0),
+        {
+          isChild: true,
+          childProfileId,
+          ownerUserId: checklist?.user_id || bp.user_id,
+          age: childProfile?.age ?? null,
+          linkedUserId: linkedUserId || null,
+          isCurrentUser: Boolean(linkedUserId && currentUser?.id === linkedUserId),
+          isOwner: false,
+        },
+      )
+      : ensureGroup(bp.user_id, bp.user?.username || (currentUser?.id === bp.user_id ? currentUser.username : ""));
     if (group) {
       group.baggage.push(bp);
     }
   });
+
+  if (currentUser && checklist?.user_id === currentUser.id) {
+    childProfiles.forEach((profile, index) => {
+      if (normalizeUserId(profile.linked_user_id)) return;
+      ensureGroup(`child:${profile.id}`, getChildProfileDisplayName(profile, lang, index), {
+        isChild: true,
+        childProfileId: profile.id,
+        ownerUserId: currentUser.id,
+        age: profile.age ?? null,
+        linkedUserId: null,
+        isCurrentUser: false,
+        isOwner: false,
+      });
+    });
+  }
 
   if (currentUser && checklist?.user_id === currentUser.id) {
     ensureGroup(currentUser.id, currentUser.username);
@@ -264,13 +1063,9 @@ const buildBaggageParticipants = (checklist, currentUser) => {
     .sort((a, b) => {
       if (a.isCurrentUser !== b.isCurrentUser) return a.isCurrentUser ? -1 : 1;
       if (a.isOwner !== b.isOwner) return a.isOwner ? -1 : 1;
-      return a.username.localeCompare(b.username, "ru");
+      if (a.isChild !== b.isChild) return a.isChild ? 1 : -1;
+      return a.username.localeCompare(b.username, formatChecklistLocale(lang));
     });
-};
-
-const normalizeUserId = (value) => {
-  const numericValue = Number(value);
-  return Number.isFinite(numericValue) ? numericValue : value;
 };
 
 const getChecklistParticipantIds = (checklist) => {
@@ -289,20 +1084,20 @@ const getChecklistParticipantIds = (checklist) => {
 const guessBaggageKind = (name) => {
   const normalized = (name || "").trim().toLowerCase();
   if (!normalized) return "custom";
-  if (normalized.includes("чемод")) return "suitcase";
-  if (normalized.includes("ручн") && normalized.includes("клад")) return "carry_on";
-  if (normalized.includes("рюкзак")) return "backpack";
-  if (normalized.includes("сумк")) return "bag";
+  if (normalized.includes("чемод") || normalized.includes("suitcase")) return "suitcase";
+  if ((normalized.includes("ручн") && normalized.includes("клад")) || normalized.includes("carry-on") || normalized.includes("carry on")) return "carry_on";
+  if (normalized.includes("рюкзак") || normalized.includes("backpack")) return "backpack";
+  if (normalized.includes("сумк") || normalized.includes("bag")) return "bag";
   return "custom";
 };
 
-const getBaggageKindLabel = (baggage) => {
+const getBaggageKindLabel = (baggage, lang = "ru") => {
   const kind = baggage?.kind || guessBaggageKind(baggage?.name || "");
-  if (kind === "suitcase") return "Чемодан";
-  if (kind === "carry_on") return "Ручная кладь";
-  if (kind === "bag") return "Сумка";
-  if (kind === "custom") return "Багаж";
-  return "Рюкзак";
+  if (kind === "suitcase") return lang === "en" ? "Suitcase" : "Чемодан";
+  if (kind === "carry_on") return lang === "en" ? "Carry-on" : "Ручная кладь";
+  if (kind === "bag") return lang === "en" ? "Bag" : "Сумка";
+  if (kind === "custom") return lang === "en" ? "Baggage" : "Багаж";
+  return lang === "en" ? "Backpack" : "Рюкзак";
 };
 
 const getBaggageVisibleItemCount = (baggage) => {
@@ -316,39 +1111,125 @@ const getParticipantVisibleItemCount = (participant) =>
 
 const getInitial = (value = "") => (value.trim().charAt(0) || "?").toUpperCase();
 
-const getBaggageMetaLine = (baggage) => {
+const getBaggageMetaLine = (baggage, lang = "ru") => {
   const name = (baggage?.name || "").trim().toLowerCase();
-  const kindLabel = getBaggageKindLabel(baggage);
+  const kindLabel = getBaggageKindLabel(baggage, lang);
   const count = getBaggageVisibleItemCount(baggage);
   const parts = [];
 
   if (kindLabel.trim().toLowerCase() !== name) {
     parts.push(kindLabel);
   }
-  parts.push(`${count} вещей`);
+  parts.push(formatItemCount(count, lang));
   return parts.join(" • ");
 };
 
-const escapeHtml = (value = "") =>
-  String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-
-const formatChecklistDateRange = (start, end) => {
-  if (!start || !end) return "";
-  const startDate = new Date(start);
-  const endDate = new Date(end);
-  if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) return "";
-  const startLabel = startDate.toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
-  const endLabel = endDate.toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
-  return `${startLabel} — ${endLabel}`;
-};
+const clearBaggageStatePayload = () => ({
+  items: [],
+  checked_items: [],
+  added_items: [],
+  removed_items: [],
+  item_quantities: {},
+  packed_quantities: {},
+  item_categories: {},
+  item_translations: {},
+});
 
 const NOTIFICATION_CACHE_TTL_MS = 2000;
 const notificationRequestCache = new Map();
+const CHECKLIST_CACHE_TTL_MS = 12000;
+const checklistRequestCache = new Map();
+
+const getChecklistCacheKey = (checklistId, authHeaders = {}) =>
+  `${authHeaders.Authorization || "__guest__"}:${checklistId}`;
+
+const getCachedChecklistSnapshot = (checklistId, authHeaders = {}) => {
+  const cached = checklistRequestCache.get(getChecklistCacheKey(checklistId, authHeaders));
+  if (!cached?.data) return null;
+  if (Date.now() - cached.timestamp > CHECKLIST_CACHE_TTL_MS) return null;
+  return cached.data;
+};
+
+const writeChecklistCache = (checklistId, authHeaders = {}, data) => {
+  if (!checklistId || !data) return;
+  checklistRequestCache.set(getChecklistCacheKey(checklistId, authHeaders), {
+    data,
+    timestamp: Date.now(),
+    promise: null,
+  });
+};
+
+const readApiErrorMessage = async (response, fallbackMessage) => {
+  try {
+    const payload = await response.json();
+    return payload?.detail || payload?.message || fallbackMessage;
+  } catch {
+    return fallbackMessage;
+  }
+};
+
+const fetchChecklistCached = async ({ checklistId, authHeaders = {} }) => {
+  const cacheKey = getChecklistCacheKey(checklistId, authHeaders);
+  const now = Date.now();
+  const cached = checklistRequestCache.get(cacheKey);
+
+  if (cached?.promise) {
+    return cached.promise;
+  }
+
+  if (cached?.data && now - cached.timestamp < CHECKLIST_CACHE_TTL_MS) {
+    return cached.data;
+  }
+
+  const promise = (async () => {
+    const requestOptions = authHeaders.Authorization ? { headers: authHeaders } : undefined;
+    let response = await fetch(`${API_URL}/checklist/${checklistId}`, requestOptions);
+    if (response.status === 401 && authHeaders.Authorization) {
+      response = await fetch(`${API_URL}/checklist/${checklistId}`);
+    }
+    if (!response.ok) {
+      const fallbackMessage = response.status >= 500 ? "Сервер временно недоступен" : "Чеклист не найден";
+      throw new Error(await readApiErrorMessage(response, fallbackMessage));
+    }
+    const data = await response.json();
+    writeChecklistCache(checklistId, authHeaders, data);
+    return data;
+  })().catch((error) => {
+    checklistRequestCache.delete(cacheKey);
+    throw error;
+  });
+
+  checklistRequestCache.set(cacheKey, {
+    data: cached?.data || null,
+    timestamp: cached?.timestamp || 0,
+    promise,
+  });
+
+  return promise;
+};
+
+const buildChecklistStatePayload = (checklist) => ({
+  checked_items: checklist?.checked_items || [],
+  removed_items: checklist?.removed_items || [],
+  added_items: checklist?.added_items || [],
+  items: checklist?.items || [],
+  item_quantities: checklist?.item_quantities || {},
+  packed_quantities: checklist?.packed_quantities || {},
+  item_categories: checklist?.item_categories || {},
+  item_translations: checklist?.item_translations || {},
+  trip_profile: checklist?.trip_profile || undefined,
+});
+
+const buildBackpackStatePayload = (backpack) => ({
+  checked_items: backpack?.checked_items || [],
+  removed_items: backpack?.removed_items || [],
+  added_items: backpack?.added_items || [],
+  items: backpack?.items || [],
+  item_quantities: backpack?.item_quantities || {},
+  packed_quantities: backpack?.packed_quantities || {},
+  item_categories: backpack?.item_categories || {},
+  item_translations: backpack?.item_translations || {},
+});
 
 const fetchNotificationsCached = async (authHeaders = {}) => {
   const cacheKey = authHeaders.Authorization || "__guest__";
@@ -390,6 +1271,7 @@ const fetchNotificationsCached = async (authHeaders = {}) => {
 const NotificationBell = ({ authHeaders, lang, navigate }) => {
   const [notifications, setNotifications] = useState([]);
   const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = useRef(null);
   const unreadCount = notifications.filter(n => !n.is_read).length;
   const refreshNotifications = React.useCallback(() => {
     fetchNotificationsCached(authHeaders)
@@ -402,6 +1284,21 @@ const NotificationBell = ({ authHeaders, lang, navigate }) => {
     const timer = setInterval(refreshNotifications, 30000);
     return () => clearInterval(timer);
   }, [refreshNotifications]);
+
+  useEffect(() => {
+    if (!isOpen) return undefined;
+
+    const handlePointerDown = (event) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+        setIsOpen(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [isOpen]);
 
   const markRead = async (id, link) => {
     try {
@@ -426,7 +1323,12 @@ const NotificationBell = ({ authHeaders, lang, navigate }) => {
 
     try {
       if (action === 'accept') {
-        const res = await fetch(`${API_URL}/join/${token}`, {
+        const childProfileId = notif.extra_data?.child_profile_id;
+        const joinUrl = new URL(`${API_URL}/join/${token}`, window.location.origin);
+        if (childProfileId) {
+          joinUrl.searchParams.set("child_profile_id", childProfileId);
+        }
+        const res = await fetch(joinUrl.toString(), {
           method: "POST",
           headers: authHeaders
         });
@@ -493,7 +1395,7 @@ const NotificationBell = ({ authHeaders, lang, navigate }) => {
   };
 
   return (
-    <div className="notification-bell-container">
+    <div className="notification-bell-container" ref={dropdownRef}>
       <button className="bell-btn" onClick={() => setIsOpen(!isOpen)}>
         <svg
           width="20"
@@ -594,7 +1496,62 @@ const NotificationBell = ({ authHeaders, lang, navigate }) => {
   );
 };
 
-const TelegramLinkButton = ({ user, token, onUserUpdate, lang }) => {
+const ChecklistRouteSkeleton = () => (
+  <div className="results-section checklist-skeleton-shell" aria-hidden="true">
+    <div className="checklist-skeleton-header">
+      <div className="skeleton-block skeleton-text-xl checklist-skeleton-title" />
+      <div className="skeleton-block skeleton-pill checklist-skeleton-action" />
+    </div>
+
+    <div className="checklist-skeleton-subtitle">
+      <div className="skeleton-block skeleton-text-md" />
+    </div>
+
+    <div className="checklist-skeleton-summary">
+      {Array.from({ length: 3 }, (_, index) => (
+        <div key={index} className="skeleton-block skeleton-pill checklist-skeleton-chip" />
+      ))}
+    </div>
+
+    <div className="checklist-skeleton-body">
+      <div className="checklist-skeleton-sidebar">
+        {Array.from({ length: 3 }, (_, index) => (
+          <div key={index} className="checklist-skeleton-participant">
+            <div className="skeleton-block checklist-skeleton-avatar" />
+            <div className="checklist-skeleton-copy">
+              <div className="skeleton-block skeleton-text-sm" />
+              <div className="skeleton-block skeleton-text-xs" />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="checklist-skeleton-items">
+        {Array.from({ length: 7 }, (_, index) => (
+          <div key={index} className="checklist-skeleton-item">
+            <div className="skeleton-block checklist-skeleton-checkbox" />
+            <div className="checklist-skeleton-copy">
+              <div className="skeleton-block skeleton-text-sm" />
+              <div className="skeleton-block skeleton-text-xs" />
+            </div>
+            <div className="skeleton-block skeleton-pill checklist-skeleton-chip compact" />
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>
+);
+
+const TelegramLinkButton = ({
+  user,
+  token,
+  onUserUpdate,
+  lang,
+  buttonClassName = "",
+  hideLabel = false,
+  onButtonClick = null,
+  menuMode = false,
+}) => {
   const [isOpen, setIsOpen] = useState(false);
   const [linkInfo, setLinkInfo] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -628,6 +1585,7 @@ const TelegramLinkButton = ({ user, token, onUserUpdate, lang }) => {
   };
 
   const openModal = async () => {
+    onButtonClick?.();
     setIsOpen(true);
     await loadLinkInfo();
   };
@@ -744,6 +1702,11 @@ const TelegramLinkButton = ({ user, token, onUserUpdate, lang }) => {
   const telegramUsername = user?.social_links?.telegram
     ? user.social_links.telegram.replace(/^@/, "")
     : "";
+  const telegramStatus = user?.tg_id
+    ? (telegramUsername
+        ? `@${telegramUsername}`
+        : (lang === "en" ? "Connected" : "Подключен"))
+    : (lang === "en" ? "Connect bot" : "Подключить бота");
 
   if (!user || !token) {
     return null;
@@ -752,17 +1715,26 @@ const TelegramLinkButton = ({ user, token, onUserUpdate, lang }) => {
   return (
     <>
       <button
-        className={`navbar-telegram-btn ${user?.tg_id ? "linked" : ""}`}
+        className={`navbar-telegram-btn ${user?.tg_id ? "linked" : ""} ${buttonClassName}`.trim()}
         onClick={openModal}
         title={user?.tg_id
           ? (lang === "en" ? "Telegram connected" : "Telegram подключен")
           : (lang === "en" ? "Link Telegram" : "Привязать Telegram")}
-      >
+        >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <line x1="22" y1="2" x2="11" y2="13"></line>
           <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
         </svg>
-        <span className="navbar-telegram-label">Telegram</span>
+        {!hideLabel && (
+          menuMode ? (
+            <span className="navbar-mobile-menu-copy">
+              <strong>Telegram</strong>
+              <span>{telegramStatus}</span>
+            </span>
+          ) : (
+            <span className="navbar-telegram-label">Telegram</span>
+          )
+        )}
       </button>
 
       {isOpen && (
@@ -855,13 +1827,14 @@ const TravelSectionShell = React.memo(({
   summary = "",
 }) => {
   const [expanded, setExpanded] = useState(defaultExpanded);
+  const sectionClass = sectionKey ? ` travel-section-${String(sectionKey).split("-")[0]}` : "";
 
   useEffect(() => {
     setExpanded(defaultExpanded);
   }, [defaultExpanded, sectionKey]);
 
   return (
-    <div className={`travel-section travel-section-shell${expanded ? " expanded" : " collapsed"}`}>
+    <div className={`travel-section travel-section-shell${sectionClass}${expanded ? " expanded" : " collapsed"}`}>
       <div className="travel-section-header">
         <button
           type="button"
@@ -895,11 +1868,113 @@ const TravelSectionShell = React.memo(({
   );
 });
 
-const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
+const ATTRACTION_CROP_ASPECT = 4 / 5;
+const ATTRACTION_CROP_OUTPUT_WIDTH = 960;
+const ATTRACTION_CROP_OUTPUT_HEIGHT = Math.round(ATTRACTION_CROP_OUTPUT_WIDTH / ATTRACTION_CROP_ASPECT);
+const clampAttractionValue = (value, min, max) => Math.min(Math.max(value, min), max);
+
+const getAttractionDisplayLayout = (stageSize, imageMeta, cropScale = 0.6) => {
+  if (!stageSize?.width || !stageSize?.height || !imageMeta?.width || !imageMeta?.height) {
+    return null;
+  }
+
+  const baseScale = Math.min(
+    stageSize.width / imageMeta.width,
+    stageSize.height / imageMeta.height
+  );
+  const scale = baseScale || 1;
+  const displayWidth = imageMeta.width * scale;
+  const displayHeight = imageMeta.height * scale;
+  const offsetX = (stageSize.width - displayWidth) / 2;
+  const offsetY = (stageSize.height - displayHeight) / 2;
+
+  let maxCropWidth = displayWidth;
+  let maxCropHeight = maxCropWidth / ATTRACTION_CROP_ASPECT;
+  if (maxCropHeight > displayHeight) {
+    maxCropHeight = displayHeight;
+    maxCropWidth = maxCropHeight * ATTRACTION_CROP_ASPECT;
+  }
+
+  const safeCropScale = clampAttractionValue(cropScale || 0.6, 0.2, 1);
+  const cropWidth = maxCropWidth * safeCropScale;
+  const cropHeight = maxCropHeight * safeCropScale;
+
+  return {
+    displayWidth,
+    displayHeight,
+    offsetX,
+    offsetY,
+    cropWidth,
+    cropHeight,
+    stageWidth: stageSize.width,
+    stageHeight: stageSize.height,
+  };
+};
+
+const getAttractionClampedCropCenter = (center, layout) => {
+  if (!layout) return { x: 0.5, y: 0.5 };
+
+  const halfWidthRatio = (layout.cropWidth / 2) / layout.displayWidth;
+  const halfHeightRatio = (layout.cropHeight / 2) / layout.displayHeight;
+
+  return {
+    x: clampAttractionValue(center?.x ?? 0.5, halfWidthRatio, 1 - halfWidthRatio),
+    y: clampAttractionValue(center?.y ?? 0.5, halfHeightRatio, 1 - halfHeightRatio),
+  };
+};
+
+const getAttractionCropRect = (layout, center) => {
+  if (!layout) return null;
+  const safeCenter = getAttractionClampedCropCenter(center, layout);
+  return {
+    left: layout.offsetX + (safeCenter.x * layout.displayWidth) - (layout.cropWidth / 2),
+    top: layout.offsetY + (safeCenter.y * layout.displayHeight) - (layout.cropHeight / 2),
+    width: layout.cropWidth,
+    height: layout.cropHeight,
+    center: safeCenter,
+  };
+};
+
+const buildAttractionProxyUrl = (imageUrl) => `${API_URL}/attractions/image-proxy?url=${encodeURIComponent(imageUrl)}`;
+
+const buildMapsPlaceUrl = ({ lang = "ru", query = "", lat = null, lng = null } = {}) => {
+  const normalizedLat = Number(lat);
+  const normalizedLng = Number(lng);
+  const hasCoords = Number.isFinite(normalizedLat) && Number.isFinite(normalizedLng);
+  const safeQuery = String(query || "").trim();
+  const fallbackQuery = hasCoords ? `${normalizedLat},${normalizedLng}` : safeQuery;
+
+  if (lang === "en") {
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(safeQuery || fallbackQuery)}`;
+  }
+
+  const text = encodeURIComponent(safeQuery || fallbackQuery);
+  if (hasCoords) {
+    return `https://yandex.ru/maps/?text=${text}&ll=${normalizedLng},${normalizedLat}&z=16`;
+  }
+  return `https://yandex.ru/maps/?text=${text}`;
+};
+
+const getMapsPlaceLabel = (lang = "ru") => (lang === "en" ? "Open map" : "На карте");
+
+const AttractionsCityBlock = React.memo(({ city, lang, limit, user, token }) => {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  const [expandedMap, setExpandedMap] = useState(null);
+  const [savingImageIndex, setSavingImageIndex] = useState(null);
+  const [adminImageModal, setAdminImageModal] = useState(null);
+  const [adminImageUrlInput, setAdminImageUrlInput] = useState("");
+  const [adminImageSource, setAdminImageSource] = useState(null);
+  const [adminImageLoading, setAdminImageLoading] = useState(false);
+  const [adminImageError, setAdminImageError] = useState("");
+  const [adminImageMeta, setAdminImageMeta] = useState(null);
+  const [adminImageStageSize, setAdminImageStageSize] = useState({ width: 0, height: 0 });
+  const [adminCropScale, setAdminCropScale] = useState(0.72);
+  const [adminCropCenter, setAdminCropCenter] = useState({ x: 0.5, y: 0.5 });
+  const adminImageStageRef = useRef(null);
+  const adminImageElementRef = useRef(null);
+  const adminImageFileInputRef = useRef(null);
+  const adminCropDragRef = useRef(null);
 
   useEffect(() => {
     if (!city) return;
@@ -911,6 +1986,357 @@ const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
       .catch(() => setData([]))
       .finally(() => { setLoading(false); setLoaded(true); });
   }, [city, lang, limit]);
+
+  useEffect(() => {
+    setAdminImageModal(null);
+  }, [city, lang, limit]);
+
+  useEffect(() => {
+    if (!adminImageModal) return undefined;
+
+    const updateStageSize = () => {
+      const node = adminImageStageRef.current;
+      if (!node) return;
+      const rect = node.getBoundingClientRect();
+      setAdminImageStageSize((current) => {
+        const nextSize = {
+          width: Math.max(0, rect.width),
+          height: Math.max(0, rect.height),
+        };
+        if (current.width === nextSize.width && current.height === nextSize.height) {
+          return current;
+        }
+        return nextSize;
+      });
+    };
+
+    const frameId = window.requestAnimationFrame(updateStageSize);
+    const resizeObserver = typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(updateStageSize)
+      : null;
+    if (resizeObserver && adminImageStageRef.current) {
+      resizeObserver.observe(adminImageStageRef.current);
+    }
+    window.addEventListener("resize", updateStageSize);
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", updateStageSize);
+    };
+  }, [adminImageModal, adminImageSource?.previewSrc]);
+
+  useEffect(() => {
+    if (!adminImageModal) return undefined;
+
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousHtmlOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+      document.documentElement.style.overflow = previousHtmlOverflow;
+    };
+  }, [adminImageModal]);
+
+  const adminDisplayLayout = getAttractionDisplayLayout(adminImageStageSize, adminImageMeta, adminCropScale);
+  const adminCropRect = getAttractionCropRect(adminDisplayLayout, adminCropCenter);
+  const adminStageHeight = adminImageMeta && adminImageStageSize.width
+    ? clampAttractionValue(
+      adminImageStageSize.width / (adminImageMeta.width / adminImageMeta.height),
+      260,
+      620
+    )
+    : null;
+
+  useEffect(() => {
+    if (!adminImageModal || !adminCropDragRef.current) return undefined;
+
+    const handlePointerMove = (event) => {
+      const dragState = adminCropDragRef.current;
+      if (!dragState || !adminDisplayLayout) return;
+      const deltaX = event.clientX - dragState.startX;
+      const deltaY = event.clientY - dragState.startY;
+      setAdminCropCenter(getAttractionClampedCropCenter({
+        x: dragState.startCenter.x + (deltaX / adminDisplayLayout.displayWidth),
+        y: dragState.startCenter.y + (deltaY / adminDisplayLayout.displayHeight),
+      }, adminDisplayLayout));
+    };
+
+    const handlePointerUp = () => {
+      adminCropDragRef.current = null;
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [adminImageModal, adminDisplayLayout]);
+
+  useEffect(() => {
+    if (!adminDisplayLayout) return;
+    setAdminCropCenter((current) => getAttractionClampedCropCenter(current, adminDisplayLayout));
+  }, [
+    adminDisplayLayout?.displayWidth,
+    adminDisplayLayout?.displayHeight,
+    adminDisplayLayout?.cropWidth,
+    adminDisplayLayout?.cropHeight,
+    adminDisplayLayout?.offsetX,
+    adminDisplayLayout?.offsetY,
+    adminDisplayLayout,
+  ]);
+
+  const resetAdminImageEditor = () => {
+    setAdminImageUrlInput("");
+    setAdminImageSource(null);
+    setAdminImageLoading(false);
+    setAdminImageError("");
+    setAdminImageMeta(null);
+    setAdminCropScale(0.72);
+    setAdminCropCenter({ x: 0.5, y: 0.5 });
+    setAdminImageStageSize({ width: 0, height: 0 });
+    adminCropDragRef.current = null;
+    if (adminImageFileInputRef.current) {
+      adminImageFileInputRef.current.value = "";
+    }
+  };
+
+  const closeAdminImageModal = () => {
+    if (savingImageIndex !== null) return;
+    setAdminImageModal(null);
+    resetAdminImageEditor();
+  };
+
+  const openAdminImageModal = (event, attraction, index) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!token) return;
+
+    setAdminImageModal({ attraction, index });
+    setAdminImageError("");
+    setAdminImageLoading(false);
+    setAdminImageMeta(null);
+    setAdminCropScale(0.72);
+    setAdminCropCenter({ x: 0.5, y: 0.5 });
+
+    const currentImage = String(attraction.image || "").trim();
+    if (!currentImage) {
+      setAdminImageUrlInput("");
+      setAdminImageSource(null);
+      return;
+    }
+
+    const isDataUrl = currentImage.startsWith("data:image/");
+    setAdminImageUrlInput(isDataUrl ? "" : currentImage);
+    setAdminImageSource({
+      previewSrc: isDataUrl ? currentImage : buildAttractionProxyUrl(currentImage),
+      originalSrc: currentImage,
+      isDataUrl,
+    });
+  };
+
+  const loadAdminImageFromUrl = async () => {
+    const trimmedUrl = adminImageUrlInput.trim();
+    if (!trimmedUrl) {
+      setAdminImageError(lang === "en" ? "Paste an image URL first" : "Сначала вставь ссылку на картинку");
+      return;
+    }
+
+    setAdminImageLoading(true);
+    setAdminImageError("");
+    setAdminImageMeta(null);
+    setAdminCropScale(0.72);
+    setAdminCropCenter({ x: 0.5, y: 0.5 });
+    setAdminImageSource({
+      previewSrc: buildAttractionProxyUrl(trimmedUrl),
+      originalSrc: trimmedUrl,
+      isDataUrl: false,
+    });
+  };
+
+  const handleAdminImageFileChange = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setAdminImageError(lang === "en" ? "Choose an image file" : "Выбери файл-картинку");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const previewSrc = String(reader.result || "");
+      setAdminImageLoading(false);
+      setAdminImageError("");
+      setAdminImageMeta(null);
+      setAdminCropScale(0.72);
+      setAdminCropCenter({ x: 0.5, y: 0.5 });
+      setAdminImageSource({
+        previewSrc,
+        originalSrc: previewSrc,
+        isDataUrl: true,
+      });
+    };
+    reader.onerror = () => {
+      setAdminImageError(lang === "en" ? "Could not read file" : "Не удалось прочитать файл");
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleAdminImageLoaded = (event) => {
+    setAdminImageLoading(false);
+    setAdminImageError("");
+    setAdminImageMeta({
+      width: event.currentTarget.naturalWidth,
+      height: event.currentTarget.naturalHeight,
+    });
+  };
+
+  const handleAdminImageLoadError = () => {
+    setAdminImageLoading(false);
+    setAdminImageMeta(null);
+    setAdminImageError(lang === "en" ? "Could not load image" : "Не удалось загрузить картинку");
+  };
+
+  const applyAdminCropScale = React.useCallback((nextScale) => {
+    const normalizedScale = clampAttractionValue(nextScale, 0.24, 1);
+    if (!adminImageMeta || !adminImageStageSize.width || !adminImageStageSize.height) {
+      setAdminCropScale(normalizedScale);
+      return;
+    }
+
+    const nextLayout = getAttractionDisplayLayout(adminImageStageSize, adminImageMeta, normalizedScale);
+    setAdminCropScale(normalizedScale);
+    setAdminCropCenter((current) => getAttractionClampedCropCenter(current, nextLayout));
+  }, [adminImageMeta, adminImageStageSize]);
+
+  useEffect(() => {
+    const stageNode = adminImageStageRef.current;
+    if (!adminImageModal || !stageNode) return undefined;
+
+    const nativeWheelHandler = (event) => {
+      if (!adminImageMeta) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const wheelStep = clampAttractionValue(event.deltaY * 0.00035, -0.014, 0.014);
+      applyAdminCropScale(adminCropScale + wheelStep);
+    };
+
+    stageNode.addEventListener("wheel", nativeWheelHandler, { passive: false });
+    return () => {
+      stageNode.removeEventListener("wheel", nativeWheelHandler);
+    };
+  }, [adminCropScale, adminImageMeta, adminImageModal, adminImageStageSize.width, adminImageStageSize.height, applyAdminCropScale]);
+
+  const handleAdminCropPointerDown = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!adminDisplayLayout) return;
+    adminCropDragRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      startCenter: adminCropRect?.center || { x: 0.5, y: 0.5 },
+    };
+  };
+
+  const buildAdminCroppedImage = () => {
+    const imageNode = adminImageElementRef.current;
+    const layout = adminDisplayLayout;
+    const cropRect = adminCropRect;
+
+    if (!imageNode || !layout || !cropRect || !adminImageMeta) {
+      throw new Error(lang === "en" ? "Load an image first" : "Сначала загрузи картинку");
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = ATTRACTION_CROP_OUTPUT_WIDTH;
+    canvas.height = ATTRACTION_CROP_OUTPUT_HEIGHT;
+    const context = canvas.getContext("2d");
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
+    const sourceX = clampAttractionValue(
+      ((cropRect.left - layout.offsetX) / layout.displayWidth) * adminImageMeta.width,
+      0,
+      adminImageMeta.width
+    );
+    const sourceY = clampAttractionValue(
+      ((cropRect.top - layout.offsetY) / layout.displayHeight) * adminImageMeta.height,
+      0,
+      adminImageMeta.height
+    );
+    const sourceWidth = clampAttractionValue(
+      (cropRect.width / layout.displayWidth) * adminImageMeta.width,
+      1,
+      adminImageMeta.width - sourceX
+    );
+    const sourceHeight = clampAttractionValue(
+      (cropRect.height / layout.displayHeight) * adminImageMeta.height,
+      1,
+      adminImageMeta.height - sourceY
+    );
+    context.drawImage(
+      imageNode,
+      sourceX,
+      sourceY,
+      sourceWidth,
+      sourceHeight,
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    );
+
+    return canvas.toDataURL("image/jpeg", 0.9);
+  };
+
+  const handleAdminImageSave = async () => {
+    if (!token || !adminImageModal) return;
+
+    setSavingImageIndex(adminImageModal.index);
+    setAdminImageError("");
+
+    try {
+      const croppedImage = buildAdminCroppedImage();
+      const attraction = adminImageModal.attraction;
+      const response = await fetch(`${API_URL}/attractions/image`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          city,
+          lang,
+          limit,
+          attraction_name: attraction.name,
+          attraction_link: attraction.link || null,
+          image: croppedImage,
+        }),
+      });
+
+      const responseData = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(responseData.detail || (lang === "en" ? "Could not save image" : "Не удалось сохранить картинку"));
+      }
+
+      if (Array.isArray(responseData.attractions)) {
+        setData(responseData.attractions);
+      } else {
+        setData((prev) => prev.map((item, itemIndex) => (
+          itemIndex === adminImageModal.index
+            ? { ...item, image: croppedImage, image_source: "admin", admin_image: true }
+            : item
+        )));
+      }
+
+      closeAdminImageModal();
+    } catch (error) {
+      setAdminImageError(error.message || (lang === "en" ? "Could not save image" : "Не удалось сохранить картинку"));
+    } finally {
+      setSavingImageIndex(null);
+    }
+  };
 
   if (loaded && data.length === 0) return null;
   if (!loaded && !loading) return null;
@@ -929,51 +2355,201 @@ const AttractionsCityBlock = React.memo(({ city, lang, limit }) => {
           {data.map((a, i) => (
             <div key={i} className="attraction-card">
               <a href={lang === 'ru' ? `https://yandex.ru/search/?text=${encodeURIComponent(a.name + ' ' + city)}` : `https://www.google.com/search?q=${encodeURIComponent(a.name + ' ' + city)}`} target="_blank" rel="noopener noreferrer" className="attraction-bg-link">
-                {a.image && <img src={a.image} alt={a.name} className="attraction-img" loading="lazy" />}
+                {a.image && (
+                  <img
+                    src={a.image}
+                    alt={a.name}
+                    className="attraction-img"
+                    loading="lazy"
+                    style={{ objectPosition: a.image_position || "center center" }}
+                  />
+                )}
                 <div className="attraction-body">
                   <div className="attraction-name">{a.name}</div>
                 </div>
               </a>
-              <div
-                className={`attraction-map-btn ${expandedMap === i ? 'active' : ''}`}
-                onClick={() => setExpandedMap(expandedMap === i ? null : i)}
-                title={lang === 'ru' ? 'Показать на карте' : 'Show on map'}
+              <a
+                className="attraction-map-btn"
+                href={buildMapsPlaceUrl({
+                  lang,
+                  query: `${a.name} ${city}`,
+                  lat: a.lat,
+                  lng: a.lng,
+                })}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={getMapsPlaceLabel(lang)}
+                aria-label={getMapsPlaceLabel(lang)}
+                onClick={(event) => event.stopPropagation()}
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
                   <circle cx="12" cy="10" r="3" />
                 </svg>
-
-                {expandedMap === i && (
-                  <div className="attraction-map-popup" onClick={e => e.stopPropagation()}>
-                    <a
-                      href={`https://yandex.ru/maps/?text=${encodeURIComponent(a.name + ' ' + city)}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="map-link yandex"
-                    >
-                      Яндекс Карты
-                    </a>
-                    <a
-                      href={a.link || `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(a.name + ', ' + city)}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="map-link google"
-                    >
-                      Google Maps
-                    </a>
-                  </div>
-                )}
-              </div>
+              </a>
+              {user?.is_admin && (
+                <button
+                  type="button"
+                  className="attraction-admin-image-btn"
+                  onClick={(event) => openAdminImageModal(event, a, i)}
+                  disabled={savingImageIndex === i}
+                  title={lang === "en" ? "Edit card image" : "Настроить картинку карточки"}
+                >
+                  {savingImageIndex === i ? "..." : (lang === "en" ? "Photo" : "Фото")}
+                </button>
+              )}
             </div>
           ))}
+        </div>
+      )}
+
+      {user?.is_admin && adminImageModal && (
+        <div className="modal-overlay" onClick={closeAdminImageModal}>
+          <div className="modal-content attraction-crop-modal" onClick={(event) => event.stopPropagation()}>
+            <button type="button" className="modal-close" onClick={closeAdminImageModal}>&times;</button>
+            <div className="attraction-crop-modal-head">
+              <span>{lang === "en" ? "Card image" : "Картинка карточки"}</span>
+              <h3>{adminImageModal.attraction?.name}</h3>
+            </div>
+
+            <div className="attraction-crop-modal-layout">
+              <div className="attraction-crop-stage-wrap">
+                <div
+                  ref={adminImageStageRef}
+                  className="attraction-crop-stage"
+                  style={adminStageHeight ? { height: `${adminStageHeight}px` } : undefined}
+                >
+                  {!adminImageSource && (
+                    <div className="attraction-crop-placeholder">
+                      {lang === "en" ? "Load an image to start framing it." : "Загрузи картинку, и здесь появится область кадрирования."}
+                    </div>
+                  )}
+
+                  {adminImageLoading && (
+                    <div className="attraction-crop-placeholder">
+                      {lang === "en" ? "Loading image..." : "Загружаю картинку..."}
+                    </div>
+                  )}
+
+                  {adminImageSource && (
+                    <img
+                      ref={adminImageElementRef}
+                      src={adminImageSource.previewSrc}
+                      alt=""
+                      className="attraction-crop-image"
+                      style={{
+                        width: `${adminDisplayLayout?.displayWidth || 0}px`,
+                        height: `${adminDisplayLayout?.displayHeight || 0}px`,
+                        left: `${adminDisplayLayout?.offsetX || 0}px`,
+                        top: `${adminDisplayLayout?.offsetY || 0}px`,
+                      }}
+                      onLoad={handleAdminImageLoaded}
+                      onError={handleAdminImageLoadError}
+                      crossOrigin="anonymous"
+                    />
+                  )}
+
+                  {adminCropRect && (
+                    <div
+                      className="attraction-crop-box"
+                      style={{
+                        left: `${adminCropRect.left}px`,
+                        top: `${adminCropRect.top}px`,
+                        width: `${adminCropRect.width}px`,
+                        height: `${adminCropRect.height}px`,
+                      }}
+                      onPointerDown={handleAdminCropPointerDown}
+                    >
+                      <span />
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="attraction-crop-controls">
+                <label className="attraction-crop-field">
+                  <span>{lang === "en" ? "Image URL" : "Ссылка на картинку"}</span>
+                  <div className="attraction-crop-link-row">
+                    <input
+                      type="url"
+                      value={adminImageUrlInput}
+                      onChange={(event) => setAdminImageUrlInput(event.target.value)}
+                      placeholder="https://..."
+                    />
+                    <button
+                      type="button"
+                      className="action-btn attraction-crop-inline-btn"
+                      onClick={loadAdminImageFromUrl}
+                      disabled={adminImageLoading}
+                    >
+                      {lang === "en" ? "Load" : "Загрузить"}
+                    </button>
+                  </div>
+                </label>
+
+                <div className="attraction-crop-divider">{lang === "en" ? "or" : "или"}</div>
+
+                <input
+                  ref={adminImageFileInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="attraction-crop-file-input"
+                  onChange={handleAdminImageFileChange}
+                />
+                <button
+                  type="button"
+                  className="action-btn"
+                  onClick={() => adminImageFileInputRef.current?.click()}
+                >
+                  {lang === "en" ? "Choose file" : "Выбрать файл"}
+                </button>
+
+                <label className="attraction-crop-field">
+                  <span>{lang === "en" ? "Frame size" : "Размер области"}</span>
+                  <input
+                    type="range"
+                    min="0.24"
+                    max="1"
+                    step="0.05"
+                    value={adminCropScale}
+                    onChange={(event) => applyAdminCropScale(Number(event.target.value))}
+                    disabled={!adminImageSource}
+                  />
+                </label>
+
+                <p className="attraction-crop-help">
+                  {lang === "en"
+                    ? "The full image stays open. Drag the frame with the left mouse button, and use the mouse wheel to change its size."
+                    : "Картинка открыта целиком. Зажми левую кнопку мыши и двигай рамку по изображению, а колесиком меняй размер области."}
+                </p>
+
+                {adminImageError && <div className="telegram-modal-error attraction-crop-error">{adminImageError}</div>}
+
+                <div className="attraction-crop-actions">
+                  <button type="button" className="action-btn" onClick={closeAdminImageModal}>
+                    {lang === "en" ? "Cancel" : "Отмена"}
+                  </button>
+                  <button
+                    type="button"
+                    className="action-btn primary"
+                    onClick={handleAdminImageSave}
+                    disabled={savingImageIndex === adminImageModal.index || !adminCropRect}
+                  >
+                    {savingImageIndex === adminImageModal.index
+                      ? "..."
+                      : (lang === "en" ? "Save crop" : "Сохранить кадр")}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </>
   );
 });
 
-const AttractionsSection = React.memo(({ city, lang, compact = false }) => {
+const AttractionsSection = React.memo(({ city, lang, compact = false, user, token }) => {
   const citiesList = city ? (city.includes(" + ") ? city.split(" + ").map(c => c.trim()) : [city]) : [];
   const primaryCity = citiesList[0] || "";
   const [activeCity, setActiveCity] = useState(primaryCity);
@@ -1010,7 +2586,7 @@ const AttractionsSection = React.memo(({ city, lang, compact = false }) => {
         </div>
       )}
       <div key={activeCity}>
-        <AttractionsCityBlock city={activeCity} lang={lang} limit={limit} />
+        <AttractionsCityBlock city={activeCity} lang={lang} limit={limit} user={user} token={token} />
       </div>
       <div style={{ display: "flex", justifyContent: "center", marginTop: "1rem" }}>
         <a
@@ -1027,12 +2603,131 @@ const AttractionsSection = React.memo(({ city, lang, compact = false }) => {
   );
 });
 
-const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang, compact = false }) => {
+const TripPartyEditor = React.memo(({
+  value,
+  onChange,
+  lang,
+  readOnly = false,
+  className = "",
+}) => {
+  const party = normalizeTripParty(value);
+  const { adults, children_ages: childrenAges, child_profiles: childProfiles } = party;
+  const isRu = lang !== "en";
+  const applyPatch = (patch) => {
+    if (!onChange || readOnly) return;
+    onChange({
+      ...party,
+      ...patch,
+    });
+  };
+
+  const setChildrenCount = (nextCount) => {
+    const nextChildrenAges = resizeChildrenAges(childrenAges, nextCount);
+    applyPatch({
+      children_ages: nextChildrenAges,
+      child_profiles: normalizeChildProfiles(childProfiles, nextChildrenAges),
+    });
+  };
+
+  const setChildAge = (index, nextAge) => {
+    const nextChildrenAges = [...childrenAges];
+    nextChildrenAges[index] = Number.parseInt(nextAge, 10);
+    const normalizedAges = normalizeChildrenAges(nextChildrenAges);
+    applyPatch({
+      children_ages: normalizedAges,
+      child_profiles: normalizeChildProfiles(childProfiles, normalizedAges),
+    });
+  };
+
+  const setChildName = (index, nextName) => {
+    const nextProfiles = normalizeChildProfiles(childProfiles, childrenAges);
+    nextProfiles[index] = {
+      ...nextProfiles[index],
+      name: nextName.slice(0, 40),
+    };
+    applyPatch({ child_profiles: nextProfiles });
+  };
+
+  return (
+    <div className={`trip-party-editor ${className}`.trim()}>
+      <div className="guest-row">
+        <div className="guest-info">
+          <span className="guest-label">{isRu ? "Взрослые" : "Adults"}</span>
+          <span className="guest-label-note">{isRu ? "18 лет и старше" : "18 years and older"}</span>
+        </div>
+        <div className="guest-controls">
+          <button type="button" onClick={() => applyPatch({ adults: Math.max(1, adults - 1) })} className="guest-control-btn" disabled={readOnly || adults <= 1}>-</button>
+          <span className="guest-value">{adults}</span>
+          <button type="button" onClick={() => applyPatch({ adults: adults + 1 })} className="guest-control-btn" disabled={readOnly}>+</button>
+        </div>
+      </div>
+
+      <div className="guest-row">
+        <div className="guest-info">
+          <span className="guest-label">{isRu ? "Дети" : "Children"}</span>
+        </div>
+        <div className="guest-controls">
+          <button type="button" onClick={() => setChildrenCount(childrenAges.length - 1)} className="guest-control-btn" disabled={readOnly || childrenAges.length === 0}>-</button>
+          <span className="guest-value">{childrenAges.length}</span>
+          <button type="button" onClick={() => setChildrenCount(childrenAges.length + 1)} className="guest-control-btn" disabled={readOnly || childrenAges.length >= 8}>+</button>
+        </div>
+      </div>
+
+      {childrenAges.length > 0 && (
+        <div className="children-ages-wrap">
+          {childrenAges.map((age, index) => (
+            <div key={`child-${index}`} className="child-age-card">
+              <div className="child-age-copy">
+                <span className="child-age-label">{isRu ? `Ребенок ${index + 1}` : `Child ${index + 1}`}</span>
+                <input
+                  className="child-name-input"
+                  type="text"
+                  value={childProfiles[index]?.name || ""}
+                  onChange={(event) => setChildName(index, event.target.value)}
+                  placeholder={isRu ? "Имя" : "Name"}
+                  disabled={readOnly}
+                />
+              </div>
+              <div className="child-age-inline-controls">
+                <button
+                  type="button"
+                  className="child-age-stepper"
+                  onClick={() => setChildAge(index, Math.max(0, age - 1))}
+                  disabled={readOnly || age <= 0}
+                >
+                  -
+                </button>
+                <div className="child-age-current">{age} {isRu ? "лет" : "y.o."}</div>
+                <button
+                  type="button"
+                  className="child-age-stepper"
+                  onClick={() => setChildAge(index, Math.min(17, age + 1))}
+                  disabled={readOnly || age >= 17}
+                >
+                  +
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+});
+
+const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang, compact = false, tripProfile = null }) => {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [flightClass, setFlightClass] = useState("0");
 
   const [genericLink, setGenericLink] = useState("");
+  const [flightSearchLinks, setFlightSearchLinks] = useState({ outbound: "", inbound: "" });
+  const passengerCounts = getFlightPassengerCounts(tripProfile || {});
+  const flightClassOptions = getFlightClassOptions(lang);
+  const selectedFlightClassLabel = flightClassOptions.find((option) => option.value === flightClass)?.label || flightClassOptions[0]?.label || "";
+  const isGroupSearch = passengerCounts.adults + passengerCounts.children + passengerCounts.infants > 1;
+  const isEconomyClass = flightClass === "0";
 
   useEffect(() => {
     if (!city) return;
@@ -1042,18 +2737,53 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang, 
     if (startDate) params.append("date", startDate);
     if (origin) params.append("origin", origin);
     if (returnDate) params.append("return_date", returnDate);
+    params.append("adults", String(passengerCounts.adults));
+    params.append("children", String(passengerCounts.children));
+    params.append("infants", String(passengerCounts.infants));
+    params.append("trip_class", flightClass);
     fetch(`${API_URL}/flights/search?${params}`)
       .then(r => r.json())
       .then(d => {
         setData(d.flights || []);
-        if (d.generic_link) setGenericLink(d.generic_link);
+        setGenericLink(d.generic_link || "");
+        setFlightSearchLinks({
+          outbound: d.outbound_link || "",
+          inbound: d.inbound_link || "",
+        });
       })
       .catch(() => setData([]))
       .finally(() => { setLoading(false); setLoaded(true); });
-  }, [city, startDate, origin, returnDate]);
+  }, [city, startDate, origin, returnDate, passengerCounts.adults, passengerCounts.children, passengerCounts.infants, flightClass]);
 
   if (loaded && data.length === 0 && !genericLink) return null;
   const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
+  const renderFlightCard = (f, key) => (
+    <a key={key} href={f.link} target="_blank" rel="noopener noreferrer" className="flight-card" style={{ height: "100%" }}>
+      {f.tag && <div className="flight-tag">{translateFlightTagLabel(f.tag, lang)}</div>}
+      <div className="flight-price">
+        {f.price ? `${f.price.toLocaleString(formatChecklistLocale(lang))} ₽` : t.priceOnRequest}
+        {f.price && isGroupSearch && <span className="flight-price-note">{t.flightPricePerPassenger}</span>}
+      </div>
+      <div className="flight-route">
+        {f.origin_label || f.origin} → {f.destination_label || f.destination}
+      </div>
+      {f.airline && (
+        <div className="flight-airline">
+          <PlaneIcon style={{ width: '16px', height: '16px', marginRight: '4px', marginTop: '-1px' }} />
+          <span>{translateAirlineLabel(f.airline_name || f.airline, lang)}</span>
+        </div>
+      )}
+      <div className="flight-info">
+        <span>{f.transfers === 0 ? t.directFlight : pluralize(f.transfers, ['пересадка', 'пересадки', 'пересадок'], ['stop', 'stops'], lang)}</span>
+        {f.duration > 0 && <span style={{ display: 'inline-flex', alignItems: 'center' }}><ClockIcon style={{ width: '16px', height: '16px', marginRight: '4px', marginTop: '-1px' }} /> {formatDuration(f.duration, lang)}</span>}
+        {f.departure_at && (
+          <span className="flight-date-inline">
+            {new Date(f.departure_at).toLocaleDateString(formatChecklistLocale(lang), { day: "numeric", month: "short" })}
+          </span>
+        )}
+      </div>
+    </a>
+  );
 
   return (
     <TravelSectionShell
@@ -1061,8 +2791,24 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang, 
       title={t.flightsTitle}
       icon={<PlaneIcon />}
       defaultExpanded={!compact}
-      summary={loading ? (lang === "en" ? "Loading" : "Загружается") : (lang === "en" ? "Flight ideas" : "Подборка билетов")}
+      summary={loading ? (lang === "en" ? "Loading" : "Загружается") : formatTripPartySummary(tripProfile || {}, lang)}
     >
+      <div className="flight-class-picker" aria-label={t.flightClassLabel}>
+        <span className="flight-class-label">{t.flightClassLabel}</span>
+        <div className="flight-class-options">
+          {flightClassOptions.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={`flight-class-chip ${flightClass === option.value ? "active" : ""}`}
+              onClick={() => setFlightClass(option.value)}
+              disabled={loading}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      </div>
       {loading ? (
         <div className="loading-spinner-wrap">
           <div className="loading-spinner" />
@@ -1070,6 +2816,32 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang, 
         </div>
       ) : (
         <>
+          {!isEconomyClass && (
+            <div className="flight-class-search-panel">
+              <div className="flights-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+                {flightSearchLinks.outbound && (
+                  <a href={flightSearchLinks.outbound} target="_blank" rel="noopener noreferrer" className="flight-card flight-search-card">
+                    <div className="flight-search-card-top">
+                      <span className="flight-search-pill">{selectedFlightClassLabel}</span>
+                      <span className="flight-search-arrow">→</span>
+                    </div>
+                    <div className="flight-search-title">{t.outboundFlights}</div>
+                    <div className="flight-search-cta">{lang === "en" ? "Open search" : "Открыть поиск"}</div>
+                  </a>
+                )}
+                {flightSearchLinks.inbound && (
+                  <a href={flightSearchLinks.inbound} target="_blank" rel="noopener noreferrer" className="flight-card flight-search-card">
+                    <div className="flight-search-card-top">
+                      <span className="flight-search-pill">{selectedFlightClassLabel}</span>
+                      <span className="flight-search-arrow">→</span>
+                    </div>
+                    <div className="flight-search-title">{t.inboundFlights}</div>
+                    <div className="flight-search-cta">{lang === "en" ? "Open search" : "Открыть поиск"}</div>
+                  </a>
+                )}
+              </div>
+            </div>
+          )}
           {data.length > 0 && (
             <div style={{ display: "flex", gap: "2rem", flexWrap: "wrap", marginBottom: "1.5rem" }}>
               {data.filter(f => f.type === "outbound" || !f.type).length > 0 && (
@@ -1077,23 +2849,7 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang, 
                   <h4 style={{ margin: "0 0 0.75rem 0", color: "#9ca3af", fontSize: "0.95rem", fontWeight: "600" }}>{t.outboundFlights}</h4>
                   <div className="flights-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
                     {data.filter(f => f.type === "outbound" || !f.type).map((f, i) => (
-                      <a key={`out-${i}`} href={f.link} target="_blank" rel="noopener noreferrer" className="flight-card" style={{ height: "100%" }}>
-                        {f.tag && <div className="flight-tag">{f.tag}</div>}
-                        <div className="flight-price">{f.price ? `${f.price.toLocaleString("ru-RU")} ₽` : t.priceOnRequest}</div>
-                        <div className="flight-route">
-                          {f.origin} → {f.destination}
-                        </div>
-                        {f.departure_at && (
-                          <div className="flight-date">
-                            {new Date(f.departure_at).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}
-                          </div>
-                        )}
-                        <div className="flight-info">
-                          {f.airline && <span style={{ display: 'inline-flex', alignItems: 'center' }}><PlaneIcon style={{ width: '16px', height: '16px', marginRight: '4px', marginTop: '-2px' }} /> {f.airline}</span>}
-                          <span>{f.transfers === 0 ? t.directFlight : pluralize(f.transfers, ['пересадка', 'пересадки', 'пересадок'], ['stop', 'stops'], lang)}</span>
-                          {f.duration > 0 && <span style={{ display: 'inline-flex', alignItems: 'center' }}><ClockIcon style={{ width: '16px', height: '16px', marginRight: '4px', marginTop: '-1px' }} /> {formatDuration(f.duration, lang)}</span>}
-                        </div>
-                      </a>
+                      renderFlightCard(f, `out-${i}`)
                     ))}
                   </div>
                 </div>
@@ -1103,30 +2859,14 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang, 
                   <h4 style={{ margin: "0 0 0.75rem 0", color: "#9ca3af", fontSize: "0.95rem", fontWeight: "600" }}>{t.inboundFlights}</h4>
                   <div className="flights-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
                     {data.filter(f => f.type === "inbound").map((f, i) => (
-                      <a key={`in-${i}`} href={f.link} target="_blank" rel="noopener noreferrer" className="flight-card" style={{ height: "100%" }}>
-                        {f.tag && <div className="flight-tag">{f.tag}</div>}
-                        <div className="flight-price">{f.price ? `${f.price.toLocaleString("ru-RU")} ₽` : t.priceOnRequest}</div>
-                        <div className="flight-route">
-                          {f.origin} → {f.destination}
-                        </div>
-                        {f.departure_at && (
-                          <div className="flight-date">
-                            {new Date(f.departure_at).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}
-                          </div>
-                        )}
-                        <div className="flight-info">
-                          {f.airline && <span style={{ display: 'inline-flex', alignItems: 'center' }}><PlaneIcon style={{ width: '16px', height: '16px', marginRight: '4px', marginTop: '-2px' }} /> {f.airline}</span>}
-                          <span>{f.transfers === 0 ? t.directFlight : pluralize(f.transfers, ['пересадка', 'пересадки', 'пересадок'], ['stop', 'stops'], lang)}</span>
-                          {f.duration > 0 && <span style={{ display: 'inline-flex', alignItems: 'center' }}><ClockIcon style={{ width: '16px', height: '16px', marginRight: '4px', marginTop: '-1px' }} /> {formatDuration(f.duration, lang)}</span>}
-                        </div>
-                      </a>
+                      renderFlightCard(f, `in-${i}`)
                     ))}
                   </div>
                 </div>
               )}
             </div>
           )}
-          {data.length === 0 && genericLink && (
+          {isEconomyClass && data.length === 0 && genericLink && (
             <div style={{ marginBottom: "1rem", textAlign: "center", color: "#9ca3af" }}>
               {t.noCachedTickets}<br /><br />
             </div>
@@ -1145,7 +2885,7 @@ const FlightsSection = React.memo(({ city, startDate, origin, returnDate, lang, 
   );
 });
 
-const HotelsSection = React.memo(({ city, startDate, endDate, lang, compact = false }) => {
+const HotelsSection = React.memo(({ city, startDate, endDate, lang, compact = false, tripProfile = null }) => {
   const citiesList = city ? city.split("+").map(c => c.trim()) : [];
   const primaryCity = citiesList[0] || "";
   const [activeCity, setActiveCity] = useState(primaryCity);
@@ -1157,10 +2897,30 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang, compact = fa
 
   const [provider, setProvider] = useState(null);
   const [links, setLinks] = useState({});
-
-  const [adults, setAdults] = useState(2);
-  const [childrenAges, setChildrenAges] = useState([]);
-  const [showGuestMenu, setShowGuestMenu] = useState(false);
+  const { adults } = getTripPartyCounts(tripProfile || {});
+  const childrenAges = buildHotelChildrenAges(tripProfile || {});
+  const travelersCount = adults + childrenAges.length;
+  const roomLimit = Math.max(1, Math.min(travelersCount, 8));
+  const [hotelRooms, setHotelRooms] = useState(1);
+  const [hotelRating, setHotelRating] = useState(0);
+  const [hotelPriceMin, setHotelPriceMin] = useState("");
+  const [hotelPriceMax, setHotelPriceMax] = useState("");
+  const [hotelMinBedrooms, setHotelMinBedrooms] = useState(0);
+  const normalizedHotelRooms = normalizeHotelRoomsCount(hotelRooms, travelersCount);
+  const accommodationPlan = buildAccommodationUnitPlan({
+    adults,
+    childrenAges,
+    units: normalizedHotelRooms,
+  });
+  const showRoomsControl = travelersCount > 1;
+  const normalizedHotelRating = normalizeHotelRating(hotelRating);
+  const normalizedHotelPriceMin = normalizeHotelPriceValue(hotelPriceMin);
+  const normalizedHotelPriceMax = normalizeHotelPriceValue(hotelPriceMax);
+  const normalizedHotelMinBedrooms = normalizeHotelBedroomsValue(hotelMinBedrooms);
+  const passengerSignature = `${adults}:${childrenAges.join(",")}:${normalizedHotelRooms}:${normalizedHotelRating}:${normalizedHotelPriceMin}:${normalizedHotelPriceMax}:${normalizedHotelMinBedrooms}`;
+  const lastPassengerSignatureRef = useRef(passengerSignature);
+  const hotelCurrency = lang === "en" ? "USD" : "RUB";
+  const hotelLocale = lang === "en" ? "en-us" : "ru";
 
   const doFetch = () => {
     if (!activeCity) return;
@@ -1168,9 +2928,16 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang, compact = fa
     setLoaded(false);
     setTriggered(true);
     const params = new URLSearchParams({ city: activeCity, adults });
+    params.append("rooms", String(normalizedHotelRooms));
     if (startDate) params.append("check_in", startDate);
     if (endDate) params.append("check_out", endDate);
     if (childrenAges.length > 0) params.append("children_ages", childrenAges.join(","));
+    if (normalizedHotelRating > 0) params.append("review_score", String(normalizedHotelRating));
+    if (normalizedHotelPriceMin) params.append("price_min", normalizedHotelPriceMin);
+    if (normalizedHotelPriceMax) params.append("price_max", normalizedHotelPriceMax);
+    if (normalizedHotelMinBedrooms > 0) params.append("min_bedrooms", String(normalizedHotelMinBedrooms));
+    params.append("currency", hotelCurrency);
+    params.append("locale", hotelLocale);
     fetch(`${API_URL}/hotels/search?${params}&limit_per_city=${citiesList.length > 1 ? 5 : 10}`)
       .then(r => r.json())
       .then(d => {
@@ -1191,11 +2958,19 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang, compact = fa
   const isRussia = cLower.includes("россия") || cLower.includes("russia") || ruCities.some(rc => cLower.includes(rc));
 
   const childrenQuery = childrenAges.length > 0 ? `&group_children=${childrenAges.length}` + childrenAges.map(age => `&age=${age}`).join("") : "";
-  const bookingDirectLink = activeCity ? `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(activeCity.split(",")[0].trim())}${startDate ? `&checkin=${startDate}` : ""}${endDate ? `&checkout=${endDate}` : ""}&group_adults=${adults}${childrenQuery}&no_rooms=1` : "#";
+  const bookingDirectLink = activeCity ? `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(activeCity.split(",")[0].trim())}${startDate ? `&checkin=${startDate}` : ""}${endDate ? `&checkout=${endDate}` : ""}&group_adults=${adults}${childrenQuery}&no_rooms=${normalizedHotelRooms}` : "#";
+
+  const updateHotelRooms = (nextRooms) => {
+    setHotelRooms(normalizeHotelRoomsCount(nextRooms, travelersCount));
+  };
 
   useEffect(() => {
     setActiveCity(primaryCity);
   }, [primaryCity]);
+
+  useEffect(() => {
+    setHotelRooms((currentRooms) => normalizeHotelRoomsCount(currentRooms, travelersCount));
+  }, [travelersCount]);
 
   useEffect(() => {
     if (!activeCity) return;
@@ -1209,9 +2984,52 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang, compact = fa
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCity]);
 
+  useEffect(() => {
+    if (lastPassengerSignatureRef.current === passengerSignature) return;
+    lastPassengerSignatureRef.current = passengerSignature;
+    if (!activeCity) return;
+    if (triggered || isRussia) {
+      doFetch();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCity, isRussia, passengerSignature, triggered]);
+
+  useEffect(() => {
+    if (!activeCity) return;
+    if (triggered || isRussia) {
+      doFetch();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hotelCurrency, hotelLocale]);
+
   if (!city) return null;
 
   const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
+  const roomsControlLabel = isRussia ? t.hotelUnitsLabel : t.hotelRoomsLabel;
+  const ostrovokHint = formatRuProviderHint("ostrovok", accommodationPlan, lang);
+  const sutochnoHint = formatRuProviderHint("sutochno", accommodationPlan, lang);
+  const ratingOptions = [
+    { id: 0, label: t.hotelAnyOption },
+    { id: 10, label: "10" },
+    { id: 9, label: "9+" },
+    { id: 8, label: "8+" },
+    { id: 7, label: "7+" },
+  ];
+  const bedroomsOptions = [
+    { id: 0, label: t.hotelAnyOption },
+    { id: 2, label: `${t.hotelFromOption} 2` },
+    { id: 3, label: `${t.hotelFromOption} 3` },
+    { id: 4, label: `${t.hotelFromOption} 4` },
+    { id: 5, label: `${t.hotelFromOption} 5` },
+    { id: 6, label: `${t.hotelFromOption} 6` },
+  ];
+  const roomOptions = Array.from({ length: roomLimit }, (_, index) => ({
+    id: index + 1,
+    label: String(index + 1),
+  }));
+  const ratingSummary = ratingOptions.find((option) => option.id === normalizedHotelRating)?.label || t.hotelAnyOption;
+  const bedroomsSummary = bedroomsOptions.find((option) => option.id === normalizedHotelMinBedrooms)?.label || t.hotelAnyOption;
+  const roomSummary = `${normalizedHotelRooms}`;
 
   return (
     <TravelSectionShell
@@ -1221,7 +3039,7 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang, compact = fa
       defaultExpanded={!compact}
       summary={triggered
         ? `${data.length || 0} ${lang === "en" ? "options" : "вариантов"}`
-        : (lang === "en" ? "Ready when needed" : "Под рукой, когда понадобится")}
+        : t.hotelsSummary}
       actions={
         loaded && data.length > 0 && provider !== "ru_widgets" && !isRussia ? (
           <a href={bookingDirectLink} target="_blank" rel="noopener noreferrer" className="booking-corner-link" title={t.goToBooking}>
@@ -1246,65 +3064,64 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang, compact = fa
         </div>
       )}
       <div className="hotels-filter-wrap">
-        <div className="guest-selector-container">
-          <button className="guest-selector-toggle" onClick={() => setShowGuestMenu(!showGuestMenu)}>
-            <span>👥 {adults} {t.adults.toLowerCase()}{childrenAges.length > 0 ? `, ${childrenAges.length} ${t.children.toLowerCase()}` : ""}</span>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: showGuestMenu ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}><polyline points="6 9 12 15 18 9"></polyline></svg>
-          </button>
-          {showGuestMenu && (
-            <div className="guest-selector-dropdown">
-              <div className="guest-row">
-                <div className="guest-info">
-                  <span className="guest-label">{t.adults}</span>
-                </div>
-                <div className="guest-controls">
-                  <button onClick={() => setAdults(Math.max(1, adults - 1))} className="guest-control-btn">-</button>
-                  <span className="guest-value">{adults}</span>
-                  <button onClick={() => setAdults(adults + 1)} className="guest-control-btn">+</button>
-                </div>
-              </div>
-              <div className="guest-row">
-                <div className="guest-info">
-                  <span className="guest-label">{t.children}</span>
-                </div>
-                <div className="guest-controls">
-                  <button onClick={() => setChildrenAges(childrenAges.slice(0, -1))} className="guest-control-btn" disabled={childrenAges.length === 0}>-</button>
-                  <span className="guest-value">{childrenAges.length}</span>
-                  <button onClick={() => setChildrenAges([...childrenAges, 7])} className="guest-control-btn">+</button>
-                </div>
-              </div>
-              {childrenAges.length > 0 && (
-                <div className="children-ages-wrap">
-                  {childrenAges.map((age, idx) => (
-                    <div key={idx} className="child-age-row">
-                      <span className="child-age-label">{t.childAge} {idx + 1}</span>
-                      <select
-                        value={age}
-                        onChange={(e) => {
-                          const newAges = [...childrenAges];
-                          newAges[idx] = parseInt(e.target.value, 10);
-                          setChildrenAges(newAges);
-                        }}
-                        className="child-age-select"
-                      >
-                        {[...Array(18)].map((_, i) => (
-                          <option key={i} value={i}>{i}</option>
-                        ))}
-                      </select>
-                    </div>
-                  ))}
+        {isRussia && (
+          <div className="ru-hotels-settings-card">
+            <div className="ru-hotels-settings-header">{t.hotelFiltersTitle}</div>
+            <div className="ru-hotels-settings-grid">
+              {showRoomsControl && (
+                <div className="ru-hotels-settings-group">
+                  <TripSettingsDropdown
+                    label={roomsControlLabel}
+                    value={normalizedHotelRooms}
+                    onChange={(value) => updateHotelRooms(value)}
+                    options={roomOptions}
+                    summary={roomSummary}
+                  />
                 </div>
               )}
-              <button className="guest-done-btn" onClick={() => {
-                setShowGuestMenu(false);
-                if (triggered) doFetch();
-              }}>{t.doneBtn}</button>
+              <div className="ru-hotels-settings-group">
+                <TripSettingsDropdown
+                  label={t.hotelRatingLabel}
+                  value={normalizedHotelRating}
+                  onChange={(value) => setHotelRating(value)}
+                  options={ratingOptions}
+                  summary={ratingSummary}
+                />
+              </div>
+              <div className="ru-hotels-settings-group">
+                <TripSettingsDropdown
+                  label={t.hotelBedroomsLabel}
+                  value={normalizedHotelMinBedrooms}
+                  onChange={(value) => setHotelMinBedrooms(value)}
+                  options={bedroomsOptions}
+                  summary={bedroomsSummary}
+                />
+              </div>
+              <div className="ru-hotels-settings-group ru-hotels-settings-group-price">
+                <span className="ru-hotels-settings-label">{t.hotelPriceLabel}</span>
+                <div className="ru-hotels-price-row">
+                  <input
+                    className="ru-hotels-price-input"
+                    inputMode="numeric"
+                    placeholder={t.hotelPriceFromPlaceholder}
+                    value={hotelPriceMin}
+                    onChange={(event) => setHotelPriceMin(normalizeHotelPriceValue(event.target.value))}
+                  />
+                  <input
+                    className="ru-hotels-price-input"
+                    inputMode="numeric"
+                    placeholder={t.hotelPriceToPlaceholder}
+                    value={hotelPriceMax}
+                    onChange={(event) => setHotelPriceMax(normalizeHotelPriceValue(event.target.value))}
+                  />
+                </div>
+              </div>
             </div>
-          )}
-        </div>
+          </div>
+        )}
         <div className="hotels-buttons-row">
           {!triggered && (
-            <button className="flights-search-btn" onClick={doFetch}>
+            <button className="flights-search-btn hotels-action-btn" onClick={doFetch}>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
                 <polyline points="9 22 9 12 15 12 15 22" />
@@ -1312,8 +3129,8 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang, compact = fa
               {t.showHotels}
             </button>
           )}
-          {!isRussia && (
-            <a href={bookingDirectLink} target="_blank" rel="noopener noreferrer" className="booking-secondary-btn" title={t.searchDirectlyBooking}>
+          {!isRussia && !triggered && (
+            <a href={bookingDirectLink} target="_blank" rel="noopener noreferrer" className="booking-secondary-btn hotels-action-btn" title={t.searchDirectlyBooking}>
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
                 <polyline points="15 3 21 3 21 9"></polyline>
@@ -1331,14 +3148,8 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang, compact = fa
         </div>
       ) : provider === "ru_widgets" ? (
         <div className="ru-widgets-container">
-          <div className="ru-widgets-text">
-            {t.ruWidgetsDisclaimer}
-          </div>
           <div className="ru-widgets-grid">
             <a href={links.ostrovok} target="_blank" rel="noopener noreferrer" className="ru-widget-card">
-              <div className="ru-widget-icon">
-                <HotelIcon style={{ width: '28px', height: '28px' }} />
-              </div>
               <h4 className="ru-widget-title">Ostrovok.ru</h4>
               <p className="ru-widget-description">
                 <span className="ru-widget-copy-full">
@@ -1350,15 +3161,13 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang, compact = fa
                   {lang === "en" ? "Hotels in Russia" : "Отели и апартаменты"}
                 </span>
               </p>
-              <div className="ru-widget-cta">
+              <p className="ru-widget-plan">{ostrovokHint}</p>
+              <div className="ru-widget-cta ru-widget-cta-subtle">
                 <span className="ru-widget-cta-full">{lang === "en" ? "Search Ostrovok" : "Поиск на Ostrovok"}</span>
                 <span className="ru-widget-cta-mobile">{lang === "en" ? "Open" : "Открыть"}</span>
               </div>
             </a>
             <a href={links.sutochno} target="_blank" rel="noopener noreferrer" className="ru-widget-card">
-              <div className="ru-widget-icon">
-                <GlobeIcon style={{ width: '28px', height: '28px' }} />
-              </div>
               <h4 className="ru-widget-title">Суточно.ру</h4>
               <p className="ru-widget-description">
                 <span className="ru-widget-copy-full">
@@ -1370,7 +3179,8 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang, compact = fa
                   {lang === "en" ? "Daily rentals" : "Квартиры посуточно"}
                 </span>
               </p>
-              <div className="ru-widget-cta">
+              <p className="ru-widget-plan">{sutochnoHint}</p>
+              <div className="ru-widget-cta ru-widget-cta-subtle">
                 <span className="ru-widget-cta-full">{lang === "en" ? "Search Sutochno" : "Поиск на Суточно"}</span>
                 <span className="ru-widget-cta-mobile">{lang === "en" ? "Open" : "Открыть"}</span>
               </div>
@@ -1401,16 +3211,22 @@ const HotelsSection = React.memo(({ city, startDate, endDate, lang, compact = fa
                     </span>
                   )}
                 </div>
-                {h.price_per_night && (
-                  <div className="hotel-price">
-                    {h.currency === "RUB"
-                      ? `${h.price_per_night.toLocaleString("ru-RU")} ₽ / ${t.perNight}`
-                      : `${h.currency === "EUR" ? "€" : h.currency === "USD" ? "$" : h.currency} ${h.price_per_night.toLocaleString("ru-RU")} / ${t.perNight}`}
-                    {h.price_rub && h.currency !== "RUB" && (
-                      <span className="hotel-price-rub"> (~{h.price_rub.toLocaleString("ru-RU")} ₽)</span>
-                    )}
-                  </div>
-                )}
+                {h.price_per_night && (() => {
+                  const mainCurrency = lang === "en" ? "USD" : h.currency;
+                  const mainValue = lang === "en"
+                    ? (h.currency === "USD" ? h.price_per_night : h.price_usd || h.price_per_night)
+                    : h.price_per_night;
+                  return (
+                    <div className="hotel-price">
+                      <span className="hotel-price-main">
+                        {formatHotelCurrencyPrice(mainCurrency, mainValue, lang)} / {t.perNight}
+                      </span>
+                      {lang !== "en" && h.price_rub && h.currency !== "RUB" && (
+                        <span className="hotel-price-rub">~{h.price_rub.toLocaleString("ru-RU")} ₽</span>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             </a>
           ))}
@@ -1519,13 +3335,12 @@ const EsimSection = React.memo(({ city, lang, compact = false }) => {
 });
 
 // === Itinerary Section ===
-const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwnerId, currentUserId, hiddenSections, onToggleVisibility, requestConfirm }) => {
+const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwnerId, currentUserId, hiddenSections, onToggleVisibility, requestConfirm, highlightedEventIds = [] }) => {
   const [events, setEvents] = useState(checklist?.events || []);
   const [addingDay, setAddingDay] = useState(null);
   const [newEvent, setNewEvent] = useState({ time: "", title: "", description: "", address: "" });
   const [loading, setLoading] = useState(false);
   const [showItinerary, setShowItinerary] = useState(false);
-  const [expandedAddress, setExpandedAddress] = useState(null);
   const [editingEvent, setEditingEvent] = useState(null);
   const [editData, setEditData] = useState({ time: "", title: "", description: "", address: "" });
   const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
@@ -1535,6 +3350,12 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
   useEffect(() => {
     if (checklist?.events) setEvents(checklist.events);
   }, [checklist]);
+
+  useEffect(() => {
+    if ((highlightedEventIds || []).length > 0) {
+      setShowItinerary(true);
+    }
+  }, [highlightedEventIds]);
 
   if (!checklist || !checklist.start_date || !checklist.end_date) return null;
 
@@ -1580,6 +3401,7 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
 
   const handleEditSubmit = async (eventId) => {
     if (!editData.title) return alert("Введите название события");
+    const originalEvent = events.find(event => event.id === eventId);
     setLoading(true);
     try {
       const resp = await fetch(`${API_URL}/events/${eventId}`, {
@@ -1594,7 +3416,28 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
       });
       if (resp.ok) {
         const updated = await resp.json();
-        setEvents(events.map(ev => ev.id === eventId ? updated : ev));
+        let nextEvents = events.map(ev => ev.id === eventId ? updated : ev);
+        const shouldCascadeTimes = originalEvent
+          && originalEvent.event_date === updated.event_date
+          && originalEvent.time !== updated.time
+          && updated.time;
+        const cascadedUpdates = shouldCascadeTimes ? buildCascadedEventTimeUpdates(nextEvents, updated) : [];
+        if (cascadedUpdates.length > 0) {
+          const persistedCascade = [];
+          for (const cascadedEvent of cascadedUpdates) {
+            const cascadeResp = await fetch(`${API_URL}/events/${cascadedEvent.id}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+              body: JSON.stringify({ time: cascadedEvent.time })
+            });
+            if (cascadeResp.ok) {
+              persistedCascade.push(await cascadeResp.json());
+            }
+          }
+          const cascadeMap = new Map(persistedCascade.map(event => [event.id, event]));
+          nextEvents = nextEvents.map(event => cascadeMap.get(event.id) || event);
+        }
+        setEvents(nextEvents);
         setEditingEvent(null);
       } else {
         alert("Ошибка при сохранении изменений");
@@ -1657,7 +3500,7 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
           <div className="itinerary-timeline">
             {days.map((d, index) => {
               const dStr = d.toISOString().split("T")[0];
-              const hasEvents = events.filter(e => e.event_date === dStr).sort((a, b) => (a.time || "").localeCompare(b.time || ""));
+              const hasEvents = events.filter(e => e.event_date === dStr).sort(compareItineraryEvents);
               const isAdding = addingDay === dStr;
 
               return (
@@ -1667,6 +3510,30 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
                     <span className="itinerary-day-date">
                       • {d.toLocaleDateString(lang === "en" ? "en-US" : "ru-RU", { weekday: 'short', month: 'short', day: 'numeric' })}
                     </span>
+                    {isOwner && hasEvents.length > 0 && (
+                      <button
+                        className="itinerary-clear-day-btn"
+                        onClick={async () => {
+                          const confirmed = await requestConfirm({
+                            title: lang === "en" ? "Clear day" : "Очистить день",
+                            message: lang === "en" ? `Delete all ${hasEvents.length} events for this day?` : `Удалить все ${hasEvents.length} событий за этот день?`,
+                            confirmLabel: lang === "en" ? "Delete" : "Удалить",
+                            cancelLabel: lang === "en" ? "Cancel" : "Отмена",
+                            tone: "danger",
+                          });
+                          if (!confirmed) return;
+                          for (const ev of hasEvents) {
+                            try {
+                              await fetch(`${API_URL}/events/${ev.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+                            } catch {}
+                          }
+                          setEvents(prev => prev.filter(e => e.event_date !== dStr));
+                        }}
+                        title={lang === "en" ? "Clear this day" : "Очистить день"}
+                      >
+                        {lang === "en" ? "Clear day" : "Очистить"}
+                      </button>
+                    )}
                   </div>
 
                   <div className="itinerary-events-list">
@@ -1674,7 +3541,7 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
                       <div className="itinerary-empty">{t.noEvents}</div>
                     )}
                     {hasEvents.map(ev => (
-                      <div key={ev.id} className="itinerary-event-card">
+                      <div key={ev.id} className={`itinerary-event-card ${highlightedEventIds.includes(ev.id) ? 'itinerary-event-card-highlighted' : ''}`}>
                         {editingEvent === ev.id ? (
                           /* === Edit Mode === */
                           <div className="itinerary-form" style={{ flex: 1 }}>
@@ -1695,21 +3562,26 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
                             {ev.time && <div className="itinerary-event-time">{ev.time}</div>}
                             <div className="itinerary-event-content">
                               <div className="itinerary-event-title">{ev.title}</div>
+                              {highlightedEventIds.includes(ev.id) && (
+                                <div className="itinerary-event-badge">{lang === "en" ? "Added by AI" : "Добавлено AI"}</div>
+                              )}
                               {ev.description && <div className="itinerary-event-desc">{ev.description}</div>}
                               {ev.address && (
                                 <div className="itinerary-event-address">
-                                  <span
+                                  <a
                                     className="address-link"
-                                    onClick={(e) => { e.stopPropagation(); setExpandedAddress(expandedAddress === ev.id ? null : ev.id); }}
+                                    href={buildMapsPlaceUrl({
+                                      lang,
+                                      query: ev.address || ev.title,
+                                      lat: ev.lat,
+                                      lng: ev.lng,
+                                    })}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={e => e.stopPropagation()}
                                   >
                                     📍 {ev.address}
-                                  </span>
-                                  {expandedAddress === ev.id && (
-                                    <div className="address-map-links">
-                                      <a href={`https://yandex.ru/maps/?text=${encodeURIComponent(ev.address)}`} target="_blank" rel="noopener noreferrer" className="map-link yandex" onClick={e => e.stopPropagation()}>Яндекс Карты</a>
-                                      <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(ev.address)}`} target="_blank" rel="noopener noreferrer" className="map-link google" onClick={e => e.stopPropagation()}>Google Maps</a>
-                                    </div>
-                                  )}
+                                  </a>
                                 </div>
                               )}
                             </div>
@@ -1779,6 +3651,826 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
               );
             })}
           </div>
+          {isOwner && events.length > 0 && (
+            <button
+              className="itinerary-clear-all-btn"
+              onClick={async () => {
+                const confirmed = await requestConfirm({
+                  title: lang === "en" ? "Clear entire plan" : "Очистить весь план",
+                  message: lang === "en" ? `Delete all ${events.length} events? This cannot be undone.` : `Удалить все ${events.length} событий? Это нельзя отменить.`,
+                  confirmLabel: lang === "en" ? "Delete all" : "Удалить всё",
+                  cancelLabel: lang === "en" ? "Cancel" : "Отмена",
+                  tone: "danger",
+                });
+                if (!confirmed) return;
+                for (const ev of events) {
+                  try {
+                    await fetch(`${API_URL}/events/${ev.id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+                  } catch {}
+                }
+                setEvents([]);
+              }}
+            >
+              {lang === "en" ? "Clear entire plan" : "Очистить весь план"}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+});
+
+const getTripMapStyleUrl = (theme = "dark") => (
+  theme === "light"
+    ? "https://tiles.openfreemap.org/styles/positron"
+    : "https://tiles.openfreemap.org/styles/liberty"
+);
+
+const getTripMapFallbackStyle = (theme = "dark") => ({
+  version: 8,
+  name: "Luggify fallback map",
+  glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+  sources: {
+    osm: {
+      type: "raster",
+      tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+      tileSize: 256,
+      attribution: "© OpenStreetMap",
+    },
+  },
+  layers: [
+    {
+      id: "luggify-map-bg",
+      type: "background",
+      paint: {
+        "background-color": theme === "light" ? "#f7f1e8" : "#181511",
+      },
+    },
+    {
+      id: "luggify-osm-raster",
+      type: "raster",
+      source: "osm",
+      paint: {
+        "raster-opacity": theme === "light" ? 0.42 : 0.28,
+        "raster-saturation": -0.45,
+      },
+    },
+  ],
+});
+
+const getTripMapColors = () => {
+  if (typeof window === "undefined") {
+    return { accent: "#c87442", accentSoft: "rgba(200, 116, 66, 0.24)", text: "#f4ede4" };
+  }
+  const styles = window.getComputedStyle(document.documentElement);
+  return {
+    accent: styles.getPropertyValue("--orange").trim() || "#c87442",
+    accentSoft: styles.getPropertyValue("--orange-glow-strong").trim() || "rgba(200, 116, 66, 0.24)",
+    text: styles.getPropertyValue("--text-primary").trim() || "#f4ede4",
+  };
+};
+
+const escapeMapPopupText = (value = "") => (
+  String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;")
+);
+
+const getTripMapPlaceTypeLabel = (event = {}, lang = "ru") => {
+  const normalized = String(event.event_type || "").trim().toLowerCase();
+  const labels = {
+    attraction: { ru: "Достопримечательность", en: "Attraction" },
+    restaurant: { ru: "Еда", en: "Food" },
+    food: { ru: "Еда", en: "Food" },
+    museum: { ru: "Музей", en: "Museum" },
+    park: { ru: "Парк", en: "Park" },
+    hotel: { ru: "Жильё", en: "Stay" },
+    transfer: { ru: "Переезд", en: "Transfer" },
+    activity: { ru: "Активность", en: "Activity" },
+  };
+  if (labels[normalized]) return labels[normalized][lang] || labels[normalized].ru;
+  if (/музе|museum/i.test(event.title || "")) return lang === "en" ? "Museum" : "Музей";
+  if (/парк|park/i.test(event.title || "")) return lang === "en" ? "Park" : "Парк";
+  if (/обед|ужин|кафе|ресторан|lunch|dinner|cafe|restaurant/i.test(event.title || "")) return lang === "en" ? "Food" : "Еда";
+  return lang === "en" ? "Place" : "Место";
+};
+
+const getTripMapPlaceKind = (event = {}) => {
+  const normalized = String(event.event_type || "").trim().toLowerCase();
+  if (["food", "restaurant", "cafe", "bar"].includes(normalized)) return "food";
+  if (["hotel", "stay", "accommodation"].includes(normalized)) return "stay";
+  if (/обед|ужин|кафе|ресторан|lunch|dinner|cafe|restaurant/i.test(event.title || "")) return "food";
+  return "place";
+};
+
+const getTripMapPlaceImage = (event = {}) => {
+  const meta = event?.meta && typeof event.meta === "object" ? event.meta : {};
+  return (
+    meta.image
+    || meta.image_url
+    || meta.photo
+    || meta.photo_url
+    || meta.thumbnail
+    || meta.attraction_image
+    || ""
+  );
+};
+
+const buildTripMapPopupHtml = (event, index, lang = "ru", compact = false) => {
+  const title = escapeMapPopupText(event.title);
+  const address = escapeMapPopupText(event.address || "");
+  const description = escapeMapPopupText(event.description || "");
+  const typeLabel = escapeMapPopupText(getTripMapPlaceTypeLabel(event, lang));
+  const dateLabel = event.event_date
+    ? escapeMapPopupText(new Date(`${event.event_date}T00:00:00`).toLocaleDateString(formatChecklistLocale(lang), { day: "numeric", month: "short" }))
+    : "";
+  const routeUrl = buildMapsPlaceUrl({
+    lang,
+    query: event.address || event.title,
+    lat: event.lat,
+    lng: event.lng,
+  });
+  const safeRouteUrl = escapeMapPopupText(routeUrl);
+  if (compact) {
+    return `
+      <div class="trip-map-popup-card trip-map-popup-card-compact">
+        <strong>${title}</strong>
+        ${typeLabel ? `<span>${typeLabel}</span>` : ""}
+      </div>
+    `;
+  }
+  return `
+    <div class="trip-map-popup-card">
+      <div class="trip-map-popup-top">
+        <span class="trip-map-popup-index">${index + 1}</span>
+        <span class="trip-map-popup-type">${typeLabel}</span>
+      </div>
+      <strong>${title}</strong>
+      ${description ? `<p>${description}</p>` : ""}
+      <div class="trip-map-popup-meta">
+        ${dateLabel ? `<span>${dateLabel}</span>` : ""}
+        ${event.duration_minutes ? `<span>${event.duration_minutes} ${lang === "en" ? "min" : "мин"}</span>` : ""}
+      </div>
+      ${address ? `<a href="${safeRouteUrl}" target="_blank" rel="noopener noreferrer" class="trip-map-popup-address">📍 ${address}</a>` : ""}
+    </div>
+  `;
+};
+
+const TripMapSection = React.memo(({ checklist, lang, compact = false, highlightedEventIds = [], theme = "dark" }) => {
+  const mapRef = useRef(null);
+  const maplibreRef = useRef(null);
+  const containerRef = useRef(null);
+  const markersRef = useRef([]);
+  const popupRef = useRef(null);
+  const hoverPopupRef = useRef(null);
+  const fallbackTimerRef = useRef(null);
+  const [expanded, setExpanded] = useState(!compact);
+  const [mapReady, setMapReady] = useState(false);
+  const [mapLoading, setMapLoading] = useState(false);
+  const [selectedDayKey, setSelectedDayKey] = useState("all");
+  const [activeMapPlace, setActiveMapPlace] = useState(null);
+  const eventsWithCoords = useMemo(() => (
+    (checklist?.events || [])
+      .map((event) => ({ event, coords: getEventCoordinates(event) }))
+      .filter((item) => item.coords)
+      .sort((a, b) => compareItineraryEvents(a.event, b.event))
+  ), [checklist?.events]);
+  const dayOptions = useMemo(() => {
+    const uniqueDates = Array.from(new Set(eventsWithCoords.map(({ event }) => event.event_date).filter(Boolean)));
+    return uniqueDates.map((dateKey, index) => ({
+      key: dateKey,
+      label: lang === "en" ? `Day ${index + 1}` : `День ${index + 1}`,
+      dateLabel: new Date(`${dateKey}T00:00:00`).toLocaleDateString(
+        formatChecklistLocale(lang),
+        { day: "numeric", month: "short" }
+      ),
+    }));
+  }, [eventsWithCoords, lang]);
+  const activeEvents = useMemo(() => (
+    selectedDayKey === "all"
+      ? eventsWithCoords
+      : eventsWithCoords.filter(({ event }) => event.event_date === selectedDayKey)
+  ), [eventsWithCoords, selectedDayKey]);
+  const selectedMapOption = selectedDayKey === "all"
+    ? "all"
+    : dayOptions.find((option) => option.key === selectedDayKey)?.key || "all";
+  useEffect(() => {
+    if (selectedDayKey === "all") return;
+    if (!dayOptions.some((option) => option.key === selectedDayKey)) {
+      setSelectedDayKey("all");
+    }
+  }, [dayOptions, selectedDayKey]);
+
+  useEffect(() => {
+    if (!activeMapPlace) return;
+    if (!activeEvents.some(({ event }) => event.id === activeMapPlace.event.id)) {
+      setActiveMapPlace(null);
+    }
+  }, [activeEvents, activeMapPlace]);
+
+  useEffect(() => {
+    if (!expanded || !containerRef.current || mapRef.current) return;
+    setMapReady(false);
+    setMapLoading(true);
+    let cancelled = false;
+    let mapBaseReady = false;
+
+    const initializeMap = async () => {
+      const { default: maplibregl } = await import("maplibre-gl");
+      if (cancelled || !containerRef.current || mapRef.current) return;
+      maplibreRef.current = maplibregl;
+      const createMap = (style) => new maplibregl.Map({
+          container: containerRef.current,
+          style,
+          center: [37.618423, 55.751244],
+          zoom: 10,
+          attributionControl: false,
+        });
+      const map = createMap(getTripMapStyleUrl(theme));
+      map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+      map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
+      map.scrollZoom.disable();
+      mapRef.current = map;
+
+      const finishMapSetup = () => {
+        if (cancelled) return;
+        if (fallbackTimerRef.current) {
+          window.clearTimeout(fallbackTimerRef.current);
+          fallbackTimerRef.current = null;
+        }
+        mapBaseReady = true;
+        setMapReady(true);
+        setMapLoading(false);
+        window.setTimeout(() => map.resize(), 80);
+      };
+
+      map.once("load", finishMapSetup);
+      map.once("error", () => {
+        if (mapBaseReady || cancelled) return;
+        map.setStyle(getTripMapFallbackStyle(theme));
+        map.once("style.load", finishMapSetup);
+      });
+      fallbackTimerRef.current = window.setTimeout(() => {
+        if (cancelled || mapBaseReady) return;
+        map.setStyle(getTripMapFallbackStyle(theme));
+        map.once("style.load", finishMapSetup);
+      }, 2800);
+    };
+
+    initializeMap();
+    return () => {
+      cancelled = true;
+      if (fallbackTimerRef.current) {
+        window.clearTimeout(fallbackTimerRef.current);
+      fallbackTimerRef.current = null;
+      }
+      markersRef.current.forEach((marker) => marker.remove());
+      markersRef.current = [];
+      popupRef.current?.remove();
+      popupRef.current = null;
+      hoverPopupRef.current?.remove();
+      hoverPopupRef.current = null;
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+      }
+      maplibreRef.current = null;
+      setMapReady(false);
+      setMapLoading(false);
+    };
+  }, [expanded, theme]);
+
+  useEffect(() => {
+    if (!expanded || !mapRef.current || !mapReady) return;
+    const map = mapRef.current;
+    const maplibregl = maplibreRef.current;
+    if (!maplibregl) return;
+
+    markersRef.current.forEach((marker) => marker.remove());
+    markersRef.current = [];
+    hoverPopupRef.current?.remove();
+    hoverPopupRef.current = null;
+
+    if (activeEvents.length === 0) return;
+
+    const colors = getTripMapColors();
+    activeEvents.forEach(({ event, coords }, index) => {
+      const markerEl = document.createElement("button");
+      markerEl.type = "button";
+      markerEl.className = `trip-map-marker ${highlightedEventIds.includes(event.id) ? "highlighted" : ""}`;
+      markerEl.style.setProperty("--marker-color", highlightedEventIds.includes(event.id) ? colors.text : colors.accent);
+      markerEl.innerHTML = `<span>${index + 1}</span>`;
+      markerEl.addEventListener("mouseenter", () => {
+        if (popupRef.current) return;
+        hoverPopupRef.current?.remove();
+        hoverPopupRef.current = new maplibregl.Popup({
+          closeButton: false,
+          closeOnClick: false,
+          offset: 18,
+          className: "trip-map-popup trip-map-hover-popup",
+        })
+          .setLngLat([coords[1], coords[0]])
+          .setHTML(buildTripMapPopupHtml(event, index, lang, true))
+          .addTo(map);
+      });
+      markerEl.addEventListener("mouseleave", () => {
+        hoverPopupRef.current?.remove();
+        hoverPopupRef.current = null;
+      });
+      markerEl.addEventListener("click", () => {
+        hoverPopupRef.current?.remove();
+        hoverPopupRef.current = null;
+        setActiveMapPlace({ event, index });
+        map.easeTo({
+          center: [coords[1], coords[0]],
+          zoom: Math.max(map.getZoom(), 14),
+          offset: compact ? [0, -80] : [-160, 0],
+          duration: 420,
+        });
+      });
+      const marker = new maplibregl.Marker({ element: markerEl, anchor: "center" })
+        .setLngLat([coords[1], coords[0]])
+        .addTo(map);
+      markersRef.current.push(marker);
+    });
+
+    if (activeEvents.length === 1) {
+      const [lat, lng] = activeEvents[0].coords;
+      map.easeTo({ center: [lng, lat], zoom: Math.max(map.getZoom(), 13), duration: 520 });
+    } else {
+      const bounds = activeEvents.reduce((nextBounds, item) => (
+        nextBounds.extend([item.coords[1], item.coords[0]])
+      ), new maplibregl.LngLatBounds(
+        [activeEvents[0].coords[1], activeEvents[0].coords[0]],
+        [activeEvents[0].coords[1], activeEvents[0].coords[0]]
+      ));
+      map.fitBounds(bounds, { padding: compact ? 42 : 64, maxZoom: 14, duration: 620 });
+    }
+    window.setTimeout(() => map.resize(), 80);
+  }, [expanded, mapReady, activeEvents, highlightedEventIds, compact, lang]);
+
+  if (eventsWithCoords.length === 0) return null;
+
+  return (
+    <div className={`forecast-section trip-map-section ${!expanded ? "collapsed" : ""}`}>
+      <div className="forecast-header">
+        <div className="forecast-header-left" onClick={() => setExpanded(!expanded)}>
+          <h3><span style={{ display: "flex", alignItems: "center" }}><MapIcon /> {lang === "en" ? "Route map" : "Карта маршрута"}</span></h3>
+        </div>
+        <div className="forecast-header-actions">
+          <button className="collapse-toggle" onClick={() => setExpanded(!expanded)}>
+            <span className={`chevron ${expanded ? "up" : ""}`}>▾</span>
+          </button>
+        </div>
+      </div>
+      {expanded && (
+        <div className="trip-map-content">
+          <div className="trip-map-shell">
+            <div ref={containerRef} className="trip-map-canvas" />
+            {mapLoading && (
+              <div className="trip-map-loading">
+                {lang === "en" ? "Loading map..." : "Загружаем карту..."}
+              </div>
+            )}
+            <div className="trip-map-control">
+              <select
+                value={selectedMapOption}
+                onChange={(event) => setSelectedDayKey(event.target.value)}
+                aria-label={lang === "en" ? "Map day" : "День на карте"}
+              >
+                <option value="all">{lang === "en" ? "Whole trip" : "Вся поездка"}</option>
+                {dayOptions.map((option) => (
+                  <option key={option.key} value={option.key}>
+                    {option.label} · {option.dateLabel}
+                  </option>
+                ))}
+              </select>
+              <strong>{activeEvents.length}</strong>
+            </div>
+            {activeMapPlace && (
+              <div className={`trip-map-place-card ${getTripMapPlaceKind(activeMapPlace.event) === "food" ? "food" : ""}`}>
+                <button
+                  type="button"
+                  className="trip-map-place-close"
+                  onClick={() => setActiveMapPlace(null)}
+                  aria-label={lang === "en" ? "Close place card" : "Закрыть карточку места"}
+                >
+                  ×
+                </button>
+                {getTripMapPlaceKind(activeMapPlace.event) !== "food" && (
+                  <div className="trip-map-place-media">
+                    {getTripMapPlaceImage(activeMapPlace.event) ? (
+                      <img src={getTripMapPlaceImage(activeMapPlace.event)} alt={activeMapPlace.event.title} loading="lazy" />
+                    ) : (
+                      <div className="trip-map-place-media-fallback">
+                        <MapIcon />
+                      </div>
+                    )}
+                  </div>
+                )}
+                <div className="trip-map-place-body">
+                  <div className="trip-map-place-top">
+                    <span className="trip-map-place-index">{activeMapPlace.index + 1}</span>
+                    <span className="trip-map-place-type">{getTripMapPlaceTypeLabel(activeMapPlace.event, lang)}</span>
+                  </div>
+                  <strong>{activeMapPlace.event.title}</strong>
+                  <p>
+                    {activeMapPlace.event.description
+                      || (getTripMapPlaceKind(activeMapPlace.event) === "food"
+                        ? (lang === "en" ? "A food stop in the route. Check the address and open it in maps when you are ready." : "Точка для еды по маршруту. Можно быстро открыть адрес в картах.")
+                        : (lang === "en" ? "A route stop with saved coordinates and address." : "Точка маршрута с сохранёнными координатами и адресом."))}
+                  </p>
+                  {activeMapPlace.event.address && (
+                    <a
+                      href={buildMapsPlaceUrl({
+                        lang,
+                        query: activeMapPlace.event.address || activeMapPlace.event.title,
+                        lat: activeMapPlace.event.lat,
+                        lng: activeMapPlace.event.lng,
+                      })}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="trip-map-place-address"
+                    >
+                      📍 {activeMapPlace.event.address}
+                    </a>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+});
+
+const ExpensesSection = React.memo(({
+  checklist,
+  lang,
+  slug,
+  token,
+  canEdit,
+  realOwnerId,
+  currentUserId,
+  hiddenSections,
+  onToggleVisibility,
+  onChecklistUpdated,
+  requestConfirm,
+  isOffline,
+}) => {
+  const [expanded, setExpanded] = useState(false);
+  const [expenses, setExpenses] = useState(checklist?.expenses || []);
+  const [summary, setSummary] = useState(checklist?.expense_summary || null);
+  const [budgetAmount, setBudgetAmount] = useState(
+    checklist?.expense_budget_amount != null ? String(checklist.expense_budget_amount) : ""
+  );
+  const [baseCurrency, setBaseCurrency] = useState(normalizeExpenseCurrency(checklist?.expense_base_currency || "RUB"));
+  const localCurrency = getExpenseLocalCurrency(checklist);
+  const [draft, setDraft] = useState({
+    expense_date: checklist?.start_date || "",
+    title: "",
+    category: "other",
+    amount: "",
+    currency: localCurrency,
+    note: "",
+  });
+  const [editingId, setEditingId] = useState(null);
+  const [editingBudget, setEditingBudget] = useState(false);
+  const [showExpenseForm, setShowExpenseForm] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const authHeaders = token ? { Authorization: `Bearer ${token}` } : {};
+  const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
+  const effectiveSummary = summary || {
+    budget_amount: checklist?.expense_budget_amount,
+    base_currency: checklist?.expense_base_currency || "RUB",
+    total_spent: 0,
+    remaining: checklist?.expense_budget_amount ?? null,
+    by_category: {},
+    expense_count: 0,
+  };
+  const effectiveCurrency = normalizeExpenseCurrency(effectiveSummary.base_currency || baseCurrency);
+  const budgetCurrencyOptions = buildExpenseCurrencyOptions(
+    effectiveCurrency,
+    localCurrency,
+    EXPENSE_BASE_CURRENCIES
+  );
+  const expenseCurrencyOptions = buildExpenseCurrencyOptions(
+    localCurrency,
+    effectiveCurrency,
+    EXPENSE_BASE_CURRENCIES,
+    draft.currency
+  );
+  const categoryOptions = EXPENSE_CATEGORIES.map((category) => ({
+    id: category,
+    label: getExpenseCategoryLabel(category, lang),
+  }));
+
+  useEffect(() => {
+    setExpenses(checklist?.expenses || []);
+    setSummary(checklist?.expense_summary || null);
+    setBudgetAmount(checklist?.expense_budget_amount != null ? String(checklist.expense_budget_amount) : "");
+    setBaseCurrency(normalizeExpenseCurrency(checklist?.expense_base_currency || "RUB"));
+    setDraft((prev) => ({
+      ...prev,
+      expense_date: prev.expense_date || checklist?.start_date || "",
+      currency: editingId ? prev.currency : getExpenseLocalCurrency(checklist),
+    }));
+  }, [checklist, editingId]);
+
+  const applyExpenseResponse = (data) => {
+    if (Array.isArray(data?.expenses)) setExpenses(data.expenses);
+    if (data?.summary) setSummary(data.summary);
+    if (data?.checklist && onChecklistUpdated) onChecklistUpdated(data.checklist);
+  };
+
+  const resetDraft = () => {
+    setEditingId(null);
+    setShowExpenseForm(false);
+    setDraft({
+      expense_date: checklist?.start_date || "",
+      title: "",
+      category: "other",
+      amount: "",
+      currency: getExpenseLocalCurrency(checklist) || normalizeExpenseCurrency(baseCurrency || "RUB"),
+      note: "",
+    });
+  };
+
+  const openNewExpenseForm = () => {
+    setEditingId(null);
+    setDraft((prev) => ({
+      ...prev,
+      expense_date: prev.expense_date || checklist?.start_date || "",
+      category: prev.category || "other",
+      currency: getExpenseLocalCurrency(checklist) || normalizeExpenseCurrency(baseCurrency || "RUB"),
+    }));
+    setShowExpenseForm(true);
+  };
+
+  const saveSettings = async () => {
+    if (!slug || !token || busy) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/checklists/${slug}/expenses/settings`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: JSON.stringify({
+          budget_amount: budgetAmount === "" ? 0 : Number(budgetAmount),
+          base_currency: normalizeExpenseCurrency(baseCurrency),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || (lang === "en" ? "Could not save budget." : "Не удалось сохранить бюджет."));
+      applyExpenseResponse(data);
+      setEditingBudget(false);
+    } catch (error) {
+      alert(error?.message || (lang === "en" ? "Could not save budget." : "Не удалось сохранить бюджет."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitExpense = async () => {
+    if (!slug || !token || busy || !draft.title.trim() || !draft.amount) return;
+    setBusy(true);
+    try {
+      const payload = {
+        expense_date: draft.expense_date || null,
+        title: draft.title.trim(),
+        category: draft.category,
+        amount: Number(draft.amount),
+        currency: normalizeExpenseCurrency(draft.currency),
+        note: draft.note.trim() || null,
+      };
+      const res = await fetch(editingId ? `${API_URL}/expenses/${editingId}` : `${API_URL}/checklists/${slug}/expenses`, {
+        method: editingId ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || (lang === "en" ? "Could not save expense." : "Не удалось сохранить трату."));
+      applyExpenseResponse(data);
+      resetDraft();
+    } catch (error) {
+      alert(error?.message || (lang === "en" ? "Could not save expense." : "Не удалось сохранить трату."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startEdit = (expense) => {
+    setEditingId(expense.id);
+    setDraft({
+      expense_date: expense.expense_date || "",
+      title: expense.title || "",
+      category: expense.category || "other",
+      amount: String(expense.amount ?? ""),
+      currency: normalizeExpenseCurrency(expense.currency || effectiveCurrency),
+      note: expense.note || "",
+    });
+    setExpanded(true);
+    setShowExpenseForm(true);
+  };
+
+  const deleteExpense = async (expense) => {
+    const confirmed = await requestConfirm({
+      title: lang === "en" ? "Delete expense" : "Удалить трату",
+      message: lang === "en" ? `Delete "${expense.title}"?` : `Удалить «${expense.title}»?`,
+      confirmLabel: lang === "en" ? "Delete" : "Удалить",
+      cancelLabel: lang === "en" ? "Cancel" : "Отмена",
+      tone: "danger",
+    });
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`${API_URL}/expenses/${expense.id}`, {
+        method: "DELETE",
+        headers: authHeaders,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || (lang === "en" ? "Could not delete expense." : "Не удалось удалить трату."));
+      applyExpenseResponse(data);
+      if (editingId === expense.id) resetDraft();
+    } catch (error) {
+      alert(error?.message || (lang === "en" ? "Could not delete expense." : "Не удалось удалить трату."));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className={`forecast-section expenses-section ${!expanded ? "collapsed" : ""}`}>
+      <div className="forecast-header">
+        <div className="forecast-header-left" onClick={() => setExpanded(!expanded)}>
+          <h3><span style={{ display: "flex", alignItems: "center" }}><WalletIcon /> {lang === "en" ? "Trip expenses" : "Траты поездки"}</span></h3>
+        </div>
+        <div className="forecast-header-actions">
+          {realOwnerId === currentUserId && (
+            <span
+              className={`section-visibility-toggle ${hiddenSections?.includes("expenses") ? "hidden" : "visible"}`}
+              onClick={(e) => { e.stopPropagation(); onToggleVisibility("expenses"); }}
+              title={hiddenSections?.includes("expenses") ? (lang === "en" ? "Expenses hidden from others" : "Траты скрыты от других") : (lang === "en" ? "Expenses visible" : "Траты видны")}
+            >
+              {hiddenSections?.includes("expenses") ? <LockIcon style={{ marginRight: 0 }} /> : <UnlockIcon style={{ marginRight: 0 }} />}
+            </span>
+          )}
+          <button className="collapse-toggle" onClick={() => setExpanded(!expanded)}>
+            <span className={`chevron ${expanded ? "up" : ""}`}>▾</span>
+          </button>
+        </div>
+      </div>
+
+      {expanded && (
+        <div className="expenses-content">
+          <div className="expenses-summary-grid">
+            <div className={`expenses-summary-card expenses-budget-card ${editingBudget ? "editing" : ""}`}>
+              <div className="expenses-summary-card-head">
+                <span>{lang === "en" ? "Budget" : "Бюджет"}</span>
+                {canEdit && !editingBudget && (
+                  <button
+                    type="button"
+                    className="expenses-icon-btn"
+                    onClick={() => {
+                      setBudgetAmount(effectiveSummary.budget_amount != null ? String(effectiveSummary.budget_amount) : "");
+                      setBaseCurrency(effectiveCurrency);
+                      setEditingBudget(true);
+                    }}
+                    title={lang === "en" ? "Edit budget" : "Редактировать бюджет"}
+                    disabled={busy || isOffline}
+                  >
+                    ✎
+                  </button>
+                )}
+              </div>
+              {editingBudget ? (
+                <div className="expenses-budget-inline">
+                  <input
+                    className="expenses-input"
+                    inputMode="decimal"
+                    value={budgetAmount}
+                    onChange={(e) => setBudgetAmount(normalizeExpenseAmountInput(e.target.value))}
+                    placeholder={lang === "en" ? "Budget" : "Бюджет"}
+                    disabled={busy || isOffline}
+                  />
+                  <TripSettingsDropdown
+                    className="expenses-dropdown-field"
+                    options={budgetCurrencyOptions}
+                    value={baseCurrency}
+                    onChange={setBaseCurrency}
+                    placeholder={lang === "en" ? "Currency" : "Валюта"}
+                    disabled={busy || isOffline}
+                  />
+                  <div className="expenses-inline-actions">
+                    <button className="expenses-text-btn" onClick={() => setEditingBudget(false)} disabled={busy}>{t.cancel}</button>
+                    <button className="expenses-text-btn primary" onClick={saveSettings} disabled={busy || isOffline}>
+                      {lang === "en" ? "Save" : "Сохранить"}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <strong>{effectiveSummary.budget_amount != null ? formatMoney(effectiveSummary.budget_amount, effectiveCurrency, lang) : "—"}</strong>
+              )}
+            </div>
+            <div className="expenses-summary-card">
+              <span>{lang === "en" ? "Spent" : "Потрачено"}</span>
+              <strong>{formatMoney(effectiveSummary.total_spent || 0, effectiveCurrency, lang)}</strong>
+            </div>
+            <div className={`expenses-summary-card ${(effectiveSummary.remaining ?? 0) < 0 ? "negative" : ""}`}>
+              <span>{lang === "en" ? "Remaining" : "Осталось"}</span>
+              <strong>{effectiveSummary.remaining != null ? formatMoney(effectiveSummary.remaining, effectiveCurrency, lang) : "—"}</strong>
+            </div>
+          </div>
+
+          {canEdit && (
+            <div className="expenses-editor">
+              {!showExpenseForm ? (
+                <div className="expenses-toolbar">
+                  <button
+                    className="action-btn primary"
+                    onClick={openNewExpenseForm}
+                    disabled={busy || isOffline}
+                  >
+                    {lang === "en" ? "Add expense" : "Добавить трату"}
+                  </button>
+                </div>
+              ) : (
+                <div className="expenses-form-shell">
+                  <div className="expenses-form-title">
+                    <strong>{editingId ? (lang === "en" ? "Edit expense" : "Редактировать трату") : (lang === "en" ? "New expense" : "Новая трата")}</strong>
+                    <button className="expenses-icon-btn" onClick={resetDraft} disabled={busy} title={t.cancel}>×</button>
+                  </div>
+                  <div className="expenses-form">
+                    <input className="expenses-input" type="date" value={draft.expense_date} onChange={(e) => setDraft({ ...draft, expense_date: e.target.value })} disabled={busy || isOffline} />
+                    <input className="expenses-input expenses-title-input" value={draft.title} onChange={(e) => setDraft({ ...draft, title: e.target.value })} placeholder={lang === "en" ? "Expense title" : "Название траты"} disabled={busy || isOffline} />
+                    <TripSettingsDropdown
+                      className="expenses-dropdown-field"
+                      options={categoryOptions}
+                      value={draft.category}
+                      onChange={(category) => setDraft({ ...draft, category })}
+                      placeholder={lang === "en" ? "Category" : "Категория"}
+                      disabled={busy || isOffline}
+                    />
+                    <input className="expenses-input" inputMode="decimal" value={draft.amount} onChange={(e) => setDraft({ ...draft, amount: normalizeExpenseAmountInput(e.target.value) })} placeholder={lang === "en" ? "Amount" : "Сумма"} disabled={busy || isOffline} />
+                    <TripSettingsDropdown
+                      className="expenses-dropdown-field"
+                      options={expenseCurrencyOptions}
+                      value={draft.currency}
+                      onChange={(currency) => setDraft({ ...draft, currency })}
+                      placeholder={lang === "en" ? "Currency" : "Валюта"}
+                      disabled={busy || isOffline}
+                    />
+                    <input className="expenses-input expenses-note-input" value={draft.note} onChange={(e) => setDraft({ ...draft, note: e.target.value })} placeholder={lang === "en" ? "Note" : "Заметка"} disabled={busy || isOffline} />
+                    <div className="expenses-form-actions">
+                      <button className="action-btn primary" onClick={submitExpense} disabled={busy || isOffline || !draft.title.trim() || !draft.amount}>
+                        {editingId ? (lang === "en" ? "Save" : "Сохранить") : (lang === "en" ? "Add expense" : "Добавить трату")}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="expenses-category-strip">
+            {Object.entries(effectiveSummary.by_category || {}).map(([category, amount]) => (
+              <span key={category} className="expenses-category-pill">
+                {getExpenseCategoryLabel(category, lang)} · {formatMoney(amount, effectiveCurrency, lang)}
+              </span>
+            ))}
+          </div>
+
+          <div className="expenses-list">
+            {expenses.length === 0 ? (
+              <div className="expenses-empty">{lang === "en" ? "No expenses yet." : "Пока нет трат."}</div>
+            ) : expenses.map((expense) => (
+              <div key={expense.id} className="expense-row">
+                <div className="expense-row-main">
+                  <strong>{expense.title}</strong>
+                  <span>
+                    {expense.expense_date ? new Date(expense.expense_date).toLocaleDateString(formatChecklistLocale(lang), { day: "numeric", month: "short" }) : ""}
+                    {expense.expense_date ? " · " : ""}
+                    {getExpenseCategoryLabel(expense.category, lang)}
+                  </span>
+                </div>
+                <div className="expense-row-amount">
+                  <strong>{formatMoney(expense.amount, expense.currency, lang)}</strong>
+                  {expense.currency !== expense.base_currency && (
+                    <span>~{formatMoney(expense.amount_base, expense.base_currency, lang)}</span>
+                  )}
+                </div>
+                {canEdit && (
+                  <div className="expense-row-actions">
+                    <button className="edit-evt-btn" onClick={() => startEdit(expense)} title={lang === "en" ? "Edit" : "Редактировать"} disabled={busy || isOffline}>✎</button>
+                    <button className="del-evt-btn" onClick={() => deleteExpense(expense)} title={lang === "en" ? "Delete" : "Удалить"} disabled={busy || isOffline}>×</button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -1788,7 +4480,7 @@ const ItinerarySection = React.memo(({ checklist, lang, slug, isOwner, realOwner
 const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview, onReviewSaved, requestConfirm }) => {
   const [rating, setRating] = useState(0);
   const [text, setText] = useState("");
-  const [photo, setPhoto] = useState("");
+  const [photos, setPhotos] = useState([]);
   const [saving, setSaving] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [error, setError] = useState("");
@@ -1801,24 +4493,23 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
   const averageRating = reviews.length
     ? (reviews.reduce((sum, review) => sum + review.rating, 0) / reviews.length).toFixed(1)
     : null;
+  const getReviewPhotos = React.useCallback((review) => {
+    if (Array.isArray(review?.photos) && review.photos.length > 0) {
+      return review.photos.filter(Boolean);
+    }
+    return review?.photo ? [review.photo] : [];
+  }, []);
 
   useEffect(() => {
     setRating(myReview?.rating || 0);
     setText(myReview?.text || "");
-    setPhoto(myReview?.photo || "");
+    setPhotos(getReviewPhotos(myReview));
     setIsEditing(false);
     setError("");
     setSuccess("");
-  }, [checklist?.slug, myReview?.id, myReview?.photo, myReview?.rating, myReview?.text, user?.id]);
+  }, [checklist?.slug, getReviewPhotos, myReview, user?.id]);
 
-  if (!tripEnded && reviews.length === 0 && !canReview) {
-    return null;
-  }
-
-  const handlePhotoChange = (event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
+  const resizeReviewPhoto = React.useCallback((file) => new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = (loadEvent) => {
       const img = new Image();
@@ -1838,12 +4529,47 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
         canvas.width = width;
         canvas.height = height;
         const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          reject(new Error("canvas_unavailable"));
+          return;
+        }
         ctx.drawImage(img, 0, 0, width, height);
-        setPhoto(canvas.toDataURL("image/jpeg", 0.82));
+        resolve(canvas.toDataURL("image/jpeg", 0.82));
       };
+      img.onerror = () => reject(new Error("image_load_failed"));
       img.src = loadEvent.target.result;
     };
+    reader.onerror = () => reject(new Error("file_read_failed"));
     reader.readAsDataURL(file);
+  }), []);
+
+  if (!tripEnded && reviews.length === 0 && !canReview) {
+    return null;
+  }
+
+  const handlePhotoChange = async (event) => {
+    const freeSlots = Math.max(0, MAX_REVIEW_PHOTOS - photos.length);
+    const files = Array.from(event.target.files || []).slice(0, freeSlots);
+    if (files.length === 0) return;
+
+    try {
+      const nextPhotos = await Promise.all(files.map((file) => resizeReviewPhoto(file)));
+      setPhotos((currentPhotos) => [...currentPhotos, ...nextPhotos].slice(0, MAX_REVIEW_PHOTOS));
+      const selectedFilesCount = Array.from(event.target.files || []).length;
+      if (selectedFilesCount > freeSlots) {
+        setError(lang === "en" ? "You can attach up to 8 photos" : "Можно прикрепить до 8 фото");
+      } else {
+        setError("");
+      }
+    } catch {
+      setError(lang === "en" ? "Failed to process photos" : "Не удалось обработать фотографии");
+    } finally {
+      event.target.value = "";
+    }
+  };
+
+  const handleRemovePhoto = (photoIndex) => {
+    setPhotos((currentPhotos) => currentPhotos.filter((_, index) => index !== photoIndex));
   };
 
   const handleSubmit = async () => {
@@ -1874,7 +4600,8 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
         body: JSON.stringify({
           rating,
           text: text.trim(),
-          photo: photo || null,
+          photo: photos[0] || null,
+          photos,
         }),
       });
 
@@ -1899,7 +4626,7 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
     if (!myReview) return;
     setRating(myReview.rating || 0);
     setText(myReview.text || "");
-    setPhoto(myReview.photo || "");
+    setPhotos(getReviewPhotos(myReview));
     setError("");
     setSuccess("");
     setIsEditing(true);
@@ -1937,7 +4664,7 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
       onReviewSaved(null, user?.id);
       setRating(0);
       setText("");
-      setPhoto("");
+      setPhotos([]);
       setIsEditing(false);
       setSuccess(lang === "en" ? "Review deleted" : "Отзыв удалён");
     } catch (deleteError) {
@@ -1975,7 +4702,7 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
           <div className="trip-review-form-head">
             <div>
               <h4>{myReview ? (lang === "en" ? "Edit your review" : "Обновить отзыв") : (lang === "en" ? "Share your impression" : "Поделитесь впечатлением")}</h4>
-              <p>{lang === "en" ? "Tell others how the trip went and add a photo." : "Расскажите, как прошла поездка, и при желании добавьте фото."}</p>
+              <p>{lang === "en" ? "Tell others how the trip went and add photos if you want." : "Расскажите, как прошла поездка, и при желании добавьте фото."}</p>
             </div>
             <div className="trip-review-stars" aria-label="rating">
               {[1, 2, 3, 4, 5].map((star) => (
@@ -1994,9 +4721,12 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
           <textarea
             className="trip-review-textarea"
             value={text}
-            onChange={(event) => setText(event.target.value)}
+            onChange={(event) => {
+              setText(event.target.value);
+              resizeTextareaToContent(event.currentTarget);
+            }}
             placeholder={lang === "en" ? "What was great, what surprised you, what would you advise to others?" : "Что понравилось, что удивило, что посоветуете другим?"}
-            rows={5}
+            rows={1}
           />
 
           <div className="trip-review-actions">
@@ -2004,17 +4734,13 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
               ref={photoInputRef}
               type="file"
               accept="image/*"
+              multiple
               className="visually-hidden-input"
               onChange={handlePhotoChange}
             />
             <button type="button" className="action-btn" onClick={() => photoInputRef.current?.click()}>
-              {photo ? (lang === "en" ? "Change photo" : "Сменить фото") : (lang === "en" ? "Attach photo" : "Прикрепить фото")}
+              {photos.length > 0 ? (lang === "en" ? "Add more photos" : "Добавить ещё фото") : (lang === "en" ? "Attach photos" : "Прикрепить фото")}
             </button>
-            {photo && (
-              <button type="button" className="action-btn" onClick={() => setPhoto("")}>
-                {lang === "en" ? "Remove photo" : "Убрать фото"}
-              </button>
-            )}
             {myReview && (
               <button
                 type="button"
@@ -2023,7 +4749,7 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
                   setIsEditing(false);
                   setRating(myReview.rating || 0);
                   setText(myReview.text || "");
-                  setPhoto(myReview.photo || "");
+                  setPhotos(getReviewPhotos(myReview));
                   setError("");
                   setSuccess("");
                 }}
@@ -2036,9 +4762,21 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
             </button>
           </div>
 
-          {photo && (
-            <div className="trip-review-photo-preview">
-              <img src={photo} alt={lang === "en" ? "Review preview" : "Предпросмотр отзыва"} />
+          {photos.length > 0 && (
+            <div className={`trip-review-photo-preview-grid photos-${Math.min(photos.length, 4)}`}>
+              {photos.map((photo, index) => (
+                <div key={`${photo}-${index}`} className="trip-review-photo-preview">
+                  <button
+                    type="button"
+                    className="trip-review-photo-remove"
+                    aria-label={lang === "en" ? `Remove photo ${index + 1}` : `Убрать фото ${index + 1}`}
+                    onClick={() => handleRemovePhoto(index)}
+                  >
+                    ×
+                  </button>
+                  <img src={photo} alt={lang === "en" ? `Review preview ${index + 1}` : `Предпросмотр отзыва ${index + 1}`} />
+                </div>
+              ))}
             </div>
           )}
 
@@ -2107,9 +4845,13 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
 
               <p className="trip-review-text">{review.text}</p>
 
-              {review.photo && (
-                <div className="trip-review-photo">
-                  <img src={review.photo} alt={lang === "en" ? "Trip review" : "Фото из поездки"} />
+              {getReviewPhotos(review).length > 0 && (
+                <div className={`trip-review-photo-gallery photos-${Math.min(getReviewPhotos(review).length, 4)}`}>
+                  {getReviewPhotos(review).map((photo, index) => (
+                    <div key={`${review.id}-${index}`} className="trip-review-photo">
+                      <img src={photo} alt={lang === "en" ? `Trip review photo ${index + 1}` : `Фото из поездки ${index + 1}`} />
+                    </div>
+                  ))}
                 </div>
               )}
             </article>
@@ -2120,21 +4862,133 @@ const TripReviewsSection = React.memo(({ checklist, user, token, lang, canReview
   );
 });
 
+const TripSettingsDropdown = React.memo(({
+  label,
+  options,
+  value,
+  onChange,
+  placeholder,
+  multiple = false,
+  summary,
+  placeholderActive = false,
+  disabled = false,
+  className = "",
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = useRef(null);
+
+  useEffect(() => {
+    if (!isOpen) return undefined;
+
+    const handlePointerDown = (event) => {
+      const target = event.target;
+      if (dropdownRef.current && !dropdownRef.current.contains(target)) {
+        setIsOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("touchstart", handlePointerDown);
+    };
+  }, [isOpen]);
+
+  const resolvedSummary = multiple
+    ? (summary || placeholder)
+    : options.find((item) => item.id === value)?.label || placeholder;
+
+  const showPlaceholder = multiple ? placeholderActive : !options.some((item) => item.id === value);
+
+  return (
+    <div className={`trip-settings-field ${className}`.trim()} ref={dropdownRef}>
+      {label && <label className="section-label">{label}</label>}
+      <button
+        type="button"
+        className={`trip-settings-dropdown-trigger ${isOpen ? "open" : ""}`}
+        onClick={() => setIsOpen((prev) => !prev)}
+        disabled={disabled}
+      >
+        <span className={`trip-settings-dropdown-value ${showPlaceholder ? "placeholder" : ""}`}>
+          {resolvedSummary}
+        </span>
+        <span className="trip-settings-chevron" aria-hidden="true">▾</span>
+      </button>
+      {isOpen && (
+        <div className="trip-settings-dropdown-menu">
+          {options.map((item) => {
+            const isSelected = multiple
+              ? Array.isArray(value) && value.includes(item.id)
+              : value === item.id;
+
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className={`trip-settings-dropdown-option ${isSelected ? "active" : ""}`}
+                onClick={() => {
+                  onChange(item.id);
+                  if (!multiple) setIsOpen(false);
+                }}
+              >
+                <span>{item.label}</span>
+                <span className="trip-settings-dropdown-check" aria-hidden="true">
+                  {isSelected ? "✓" : ""}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+});
+
 const App = ({ page }) => {
   const { id } = useParams(); // slug из URL
   const navigate = useNavigate();
   const location = useLocation();
 
   const [lang, setLang] = useState("ru");
+  const [theme, setTheme] = useState(resolveInitialTheme);
   const t = TRANSLATIONS[lang];
+  const [showMobileNavMenu, setShowMobileNavMenu] = useState(false);
+  const mobileNavMenuRef = useRef(null);
+
+  const toggleLanguage = () => {
+    setLang((current) => (current === "ru" ? "en" : "ru"));
+  };
+
+  const toggleThemeMode = () => {
+    setTheme((current) => (current === "light" ? "dark" : "light"));
+  };
+
+  useEffect(() => {
+    if (!showMobileNavMenu) return undefined;
+
+    const handlePointerDown = (event) => {
+      if (mobileNavMenuRef.current && !mobileNavMenuRef.current.contains(event.target)) {
+        setShowMobileNavMenu(false);
+      }
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [showMobileNavMenu]);
+
+  useEffect(() => {
+    setShowMobileNavMenu(false);
+  }, [location.pathname]);
 
   const [destinations, setDestinations] = useState([
     { id: 1, city: null, dates: { start: null, end: null }, transport: "plane" }
   ]);
-  const [options, setOptions] = useState({
-    trip_type: "vacation",
-  });
+  const [options, setOptions] = useState(() => normalizeTripOptions(INITIAL_TRIP_OPTIONS, { preserveEmptySelections: true }));
   const [result, setResult] = useState(null);
+  const [checklistLoading, setChecklistLoading] = useState(() => Boolean(id));
   const [error, setError] = useState(null);
   const [originCity, setOriginCity] = useState("");
   const [returnTransport, setReturnTransport] = useState("plane");
@@ -2147,7 +5001,18 @@ const App = ({ page }) => {
     return safeParseJson(saved, null);
   });
   const [token, setToken] = useState(() => localStorage.getItem("token"));
+  const [isOffline, setIsOffline] = useState(() =>
+    typeof navigator === "undefined" ? false : !navigator.onLine
+  );
+  const [usingStoredChecklist, setUsingStoredChecklist] = useState(false);
+  const [hasPendingOfflineSync, setHasPendingOfflineSync] = useState(() =>
+    Boolean(loadPendingChecklistSnapshot())
+  );
+  const [isSyncingOfflineChanges, setIsSyncingOfflineChanges] = useState(false);
   const [savedSlug, setSavedSlug] = useState(null);
+  const [highlightedItineraryEventIds, setHighlightedItineraryEventIds] = useState([]);
+  const latestResultRef = useRef(null);
+  const persistPendingAfterRenderRef = useRef(false);
 
   // Состояние для чеклиста
   const [checkedItems, setCheckedItems] = useState({});
@@ -2155,10 +5020,16 @@ const App = ({ page }) => {
   const [removedItems, setRemovedItems] = useState([]);
   const [addItemMode, setAddItemMode] = useState(false);
   const [newItem, setNewItem] = useState("");
+  const [newItemQuantity, setNewItemQuantity] = useState(1);
+  const [newItemCategory, setNewItemCategory] = useState("");
   const [showPackingModal, setShowPackingModal] = useState(false);
+  const [showAdvancedTripSettings, setShowAdvancedTripSettings] = useState(false);
+  const [activePackingProfile, setActivePackingProfile] = useState(() => normalizePackingProfile(DEFAULT_PACKING_PROFILE));
   const [packingProfileDraft, setPackingProfileDraft] = useState(() => normalizePackingProfile(DEFAULT_PACKING_PROFILE));
   const [packingProfileSaving, setPackingProfileSaving] = useState(false);
   const [newBaseItem, setNewBaseItem] = useState("");
+  const [showBaseItemsModal, setShowBaseItemsModal] = useState(false);
+  const [showCollaboratorsModal, setShowCollaboratorsModal] = useState(false);
   const [quantityEditor, setQuantityEditor] = useState(null);
   const [activeTab, setActiveTab] = useState("shared");
   const [activeParticipantId, setActiveParticipantId] = useState(null);
@@ -2173,6 +5044,7 @@ const App = ({ page }) => {
   const [moveItemBusy, setMoveItemBusy] = useState(false);
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState(null);
+  const [appNotice, setAppNotice] = useState(null);
   const [inviteToken, setInviteToken] = useState("");
   const [followers, setFollowers] = useState([]);
   const [inviteBusyIds, setInviteBusyIds] = useState([]);
@@ -2187,7 +5059,7 @@ const App = ({ page }) => {
 
   // Computed: can current user view/edit different sections of this checklist?
   const isChecklistParticipant = Boolean(user && result && (result.user_id === user.id || (result.backpacks && result.backpacks.some(b => b.user_id === user.id))));
-  const baggageParticipants = buildBaggageParticipants(result, user);
+  const baggageParticipants = buildBaggageParticipants(result, user, lang);
   const checklistParticipantIds = getChecklistParticipantIds(result);
   const inviteBusyIdSet = new Set(inviteBusyIds);
   const inviteSentIdSet = new Set(inviteSentIds);
@@ -2199,13 +5071,62 @@ const App = ({ page }) => {
   const canEditActiveBaggage = Boolean(
     user &&
     activeBaggage &&
-    canUserEditBaggage(activeBaggage, user.id, result?.backpacks || [])
+    canUserEditBaggage(activeBaggage, user.id, result?.backpacks || [], result)
   );
   const canEditCurrentSection = activeTab === "shared" ? isChecklistParticipant : canEditActiveBaggage;
   const canManageSelectedParticipant = Boolean(
     user &&
     activeParticipant &&
-    activeParticipant.userId === user.id
+    (activeParticipant.userId === user.id || (activeParticipant.isChild && activeParticipant.ownerUserId === user.id))
+  );
+  const isOfflineEditAllowedForChecklist = isOfflineChecklistEditable(result, user?.id);
+  const canMutateCurrentSection = canEditCurrentSection && (!isOffline || isOfflineEditAllowedForChecklist);
+  const canUseOfflineChecklistReadOnly = Boolean(isOffline && result && !isOfflineEditAllowedForChecklist);
+  const isChecklistRoute = Boolean(id);
+  const showChecklistSkeleton = isChecklistRoute && checklistLoading && !result;
+  const showChecklistErrorState = isChecklistRoute && !checklistLoading && !result && Boolean(error);
+  const showHomeForm = !result && !showChecklistSkeleton && !showChecklistErrorState;
+  const checklistSyncBadge = result ? (() => {
+    if (isSyncingOfflineChanges) {
+      return {
+        tone: "syncing",
+        text: lang === "en" ? "Syncing offline changes..." : "Синхронизируем офлайн-изменения...",
+      };
+    }
+    if (isOffline && isOfflineEditAllowedForChecklist) {
+      return {
+        tone: "offline",
+        text: hasPendingOfflineSync
+          ? (lang === "en" ? "Offline mode: changes will sync later" : "Офлайн-режим: изменения синхронизируются позже")
+          : (lang === "en" ? "Offline mode for your last checklist" : "Офлайн-режим для вашего последнего чеклиста"),
+      };
+    }
+    if (canUseOfflineChecklistReadOnly) {
+      return {
+        tone: "readonly",
+        text: lang === "en"
+          ? "Offline read-only mode for shared checklist"
+          : "Совместный чеклист офлайн доступен только для чтения",
+      };
+    }
+    if (hasPendingOfflineSync) {
+      return {
+        tone: "pending",
+        text: lang === "en" ? "Unsynced offline changes" : "Есть несинхронизированные офлайн-изменения",
+      };
+    }
+    if (usingStoredChecklist) {
+      return {
+        tone: "cached",
+        text: lang === "en" ? "Showing saved last checklist copy" : "Показываем сохраненную копию последнего чеклиста",
+      };
+    }
+    return null;
+  })() : null;
+  const panelLoader = (
+    <div className="loading-spinner-wrap" aria-hidden="true">
+      <div className="loading-spinner" />
+    </div>
   );
   const canReviewTrip = Boolean(
     user &&
@@ -2219,24 +5140,38 @@ const App = ({ page }) => {
       (baggage) =>
         baggage.id !== moveItemDialog?.sourceBackpackId &&
         user &&
-        canUserEditBaggage(baggage, user.id, result?.backpacks || [])
+        canUserEditBaggage(baggage, user.id, result?.backpacks || [], result)
     )
   ).map((baggage) => {
-    const participant = baggageParticipants.find((entry) => entry.userId === baggage.user_id);
+    const participant = baggage.child_profile_id
+      ? baggageParticipants.find((entry) => entry.childProfileId === baggage.child_profile_id)
+      : baggageParticipants.find((entry) => entry.userId === baggage.user_id);
     const ownerLabel = participant?.isCurrentUser
       ? (lang === "en" ? "Mine" : "Мне")
-      : participant?.username || baggage.user?.username || (lang === "en" ? "Participant" : "Участнику");
+      : participant?.isChild
+        ? participant.username
+        : participant?.username || baggage.user?.username || (lang === "en" ? "Participant" : "Участнику");
     return {
       id: baggage.id,
-      title: baggage.name || getBaggageKindLabel(baggage),
-      subtitle: `${ownerLabel} • ${getBaggageMetaLine(baggage)}`,
+      title: translateKnownBaggageName(baggage.name || getBaggageKindLabel(baggage, lang), lang),
+      subtitle: `${ownerLabel} • ${getBaggageMetaLine(baggage, lang)}`,
       isMine: baggage.user_id === user?.id,
     };
   });
   const ownMoveDestinations = moveDestinations.filter((destination) => destination.isMine);
   const otherMoveDestinations = moveDestinations.filter((destination) => !destination.isMine);
-  const checklistColumns = viewportWidth <= 600 ? 1 : viewportWidth <= 900 ? 2 : 3;
   const isMobileChecklistView = viewportWidth <= 600;
+  const resetAddItemDraft = () => {
+    setNewItem("");
+    setNewItemQuantity(1);
+    setNewItemCategory("");
+  };
+  const toggleAddItemMode = () => {
+    setAddItemMode((prev) => {
+      if (prev) resetAddItemDraft();
+      return !prev;
+    });
+  };
 	  const canMoveQuantityEditorItem = quantityEditor
 	    ? (quantityEditor.sectionKey === "shared"
 	        ? (result?.backpacks?.length || 0) > 0
@@ -2272,6 +5207,18 @@ const App = ({ page }) => {
     setConfirmDialog(null);
   }, []);
 
+  const pushAppNotice = React.useCallback((message, tone = "default") => {
+    setAppNotice({ message, tone });
+  }, []);
+
+  useEffect(() => {
+    if (!appNotice) return undefined;
+    const timeoutId = window.setTimeout(() => {
+      setAppNotice(null);
+    }, 3200);
+    return () => window.clearTimeout(timeoutId);
+  }, [appNotice]);
+
   const handleAuth = (userData, accessToken) => {
     setUser(userData);
     setToken(accessToken);
@@ -2286,7 +5233,14 @@ const App = ({ page }) => {
   }, [user]);
 
   useEffect(() => {
-    setPackingProfileDraft(normalizePackingProfile(user?.packing_profile || DEFAULT_PACKING_PROFILE));
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    const nextPackingProfile = normalizePackingProfile(user?.packing_profile || DEFAULT_PACKING_PROFILE);
+    setActivePackingProfile(nextPackingProfile);
+    setPackingProfileDraft(nextPackingProfile);
   }, [user]);
 
   useEffect(() => {
@@ -2333,8 +5287,11 @@ const App = ({ page }) => {
   const handleLogout = React.useCallback(() => {
     setUser(null);
     setToken(null);
+    setHasPendingOfflineSync(false);
+    setUsingStoredChecklist(false);
     localStorage.removeItem("token");
     localStorage.removeItem("user");
+    clearOfflineChecklistSnapshots();
     navigate('/');
   }, [navigate]);
 
@@ -2342,17 +5299,335 @@ const App = ({ page }) => {
     () => (token ? { Authorization: `Bearer ${token}` } : {}),
     [token]
   );
-  const packingProfile = normalizePackingProfile(user?.packing_profile || DEFAULT_PACKING_PROFILE);
-  const packingProfileSummaryParts = [
-    ...(packingProfile.gender === "female"
-      ? [lang === "en" ? "Female" : "Женский"]
-      : packingProfile.gender === "male"
-        ? [lang === "en" ? "Male" : "Мужской"]
-        : []),
-    ...(packingProfile.traveling_with_pet ? [lang === "en" ? "With pet" : "С питомцем"] : []),
-    ...(packingProfile.has_allergies ? [lang === "en" ? "Allergies" : "Аллергии"] : []),
-  ];
+
+  const markChecklistPendingSync = React.useCallback(({ waitForNextRender = false, checklist = null } = {}) => {
+    setHasPendingOfflineSync(true);
+
+    if (waitForNextRender) {
+      persistPendingAfterRenderRef.current = true;
+      return;
+    }
+
+    const snapshot = checklist || latestResultRef.current;
+    if (snapshot?.slug) {
+      savePendingChecklistSnapshot(snapshot, user?.id ?? snapshot.user_id);
+    }
+  }, [user?.id]);
+
+  const clearChecklistPendingSync = React.useCallback((checklist = null) => {
+    const snapshot = checklist || latestResultRef.current;
+    const pendingEntry = loadPendingChecklistSnapshot();
+    if (pendingEntry?.slug && pendingEntry.slug !== snapshot?.slug) {
+      return;
+    }
+
+    clearPendingChecklistSnapshot();
+    setHasPendingOfflineSync(false);
+
+    if (snapshot?.slug) {
+      saveLastChecklistSnapshot(snapshot, user?.id ?? snapshot.user_id);
+    }
+  }, [user?.id]);
+
+  const syncStoredChecklist = React.useCallback(async () => {
+    if (isOffline || !authHeaders.Authorization) return false;
+
+    const pendingEntry = loadPendingChecklistSnapshot();
+    const pendingChecklist = pendingEntry?.checklist;
+    if (!pendingChecklist?.slug) return false;
+
+    if (!isOfflineChecklistEditable(pendingChecklist, user?.id ?? pendingChecklist.user_id)) {
+      clearChecklistPendingSync(pendingChecklist);
+      return false;
+    }
+
+    setIsSyncingOfflineChanges(true);
+
+    try {
+      const checklistResponse = await fetch(`${API_URL}/checklist/${pendingChecklist.slug}/state`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders,
+        },
+        body: JSON.stringify(buildChecklistStatePayload(pendingChecklist)),
+      });
+
+      if (!checklistResponse.ok) {
+        throw new Error("Checklist sync failed");
+      }
+
+      for (const backpack of pendingChecklist.backpacks || []) {
+        if (!backpack?.id) continue;
+
+        const backpackResponse = await fetch(`${API_URL}/backpacks/${backpack.id}/state`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            ...authHeaders,
+          },
+          body: JSON.stringify(buildBackpackStatePayload(backpack)),
+        });
+
+        if (!backpackResponse.ok) {
+          throw new Error("Backpack sync failed");
+        }
+      }
+
+      const freshResponse = await fetch(`${API_URL}/checklist/${pendingChecklist.slug}`, {
+        headers: authHeaders,
+      });
+      const freshChecklist = freshResponse.ok
+        ? await freshResponse.json()
+        : pendingChecklist;
+
+      writeChecklistCache(pendingChecklist.slug, authHeaders, freshChecklist);
+      clearChecklistPendingSync(freshChecklist);
+
+      if ((savedSlug || id) === pendingChecklist.slug) {
+        setResult(freshChecklist);
+        setSavedSlug(pendingChecklist.slug);
+        setUsingStoredChecklist(false);
+      }
+
+      return true;
+    } catch (syncError) {
+      console.error("Offline checklist sync error:", syncError);
+      markChecklistPendingSync({ checklist: pendingChecklist });
+      return false;
+    } finally {
+      setIsSyncingOfflineChanges(false);
+    }
+  }, [
+    authHeaders,
+    clearChecklistPendingSync,
+    id,
+    isOffline,
+    markChecklistPendingSync,
+    savedSlug,
+    user?.id,
+  ]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+
+    const handleOnline = () => setIsOffline(false);
+    const handleOffline = () => setIsOffline(true);
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    latestResultRef.current = result;
+  }, [result]);
+
+  useEffect(() => {
+    if (!result?.slug) return;
+
+    const targetLang = lang === "en" ? "en" : "ru";
+    const translationJobs = [];
+
+    (result.items || []).forEach((item) => {
+      const raw = String(item || "").trim();
+      if (!raw) return;
+      if (translateChecklistItemLabel(raw, targetLang, result.item_translations || {}) !== raw) return;
+      if (detectItemTextLanguage(raw) === targetLang) return;
+      translationJobs.push({ scope: "shared", item: raw });
+    });
+
+    (result.backpacks || []).forEach((backpack) => {
+      (backpack?.items || []).forEach((item) => {
+        const raw = String(item || "").trim();
+        if (!raw) return;
+        if (translateChecklistItemLabel(raw, targetLang, backpack?.item_translations || {}) !== raw) return;
+        if (detectItemTextLanguage(raw) === targetLang) return;
+        translationJobs.push({ scope: "backpack", backpackId: backpack.id, item: raw });
+      });
+    });
+
+    if (translationJobs.length === 0) return;
+
+    let cancelled = false;
+
+    Promise.all(
+      translationJobs.slice(0, 40).map(async (job) => {
+        const translatedText = await requestChecklistItemTranslation(job.item, targetLang);
+        if (!translatedText || translatedText === job.item) return null;
+        const entry = buildChecklistItemTranslationEntry(
+          job.item,
+          translatedText,
+          targetLang,
+          detectItemTextLanguage(job.item)
+        );
+        if (!entry) return null;
+        return { ...job, entry };
+      })
+    )
+      .then((resolvedJobs) => {
+        if (cancelled) return;
+        const successfulJobs = resolvedJobs.filter(Boolean);
+        if (successfulJobs.length === 0) return;
+
+        let nextChecklistTranslations = normalizeItemTranslationMap(result.item_translations || {});
+        let checklistChanged = false;
+        const backpackUpdates = new Map();
+
+        successfulJobs.forEach((job) => {
+          if (job.scope === "shared") {
+            const previous = JSON.stringify(nextChecklistTranslations[job.item] || {});
+            nextChecklistTranslations = mergeItemTranslationEntry(nextChecklistTranslations, job.item, job.entry);
+            if (previous !== JSON.stringify(nextChecklistTranslations[job.item] || {})) {
+              checklistChanged = true;
+            }
+            return;
+          }
+
+          const backpack = (result.backpacks || []).find((entry) => entry.id === job.backpackId);
+          const currentTranslations = backpackUpdates.get(job.backpackId)
+            || normalizeItemTranslationMap(backpack?.item_translations || {});
+          const nextTranslations = mergeItemTranslationEntry(currentTranslations, job.item, job.entry);
+          backpackUpdates.set(job.backpackId, nextTranslations);
+        });
+
+        if (!checklistChanged && backpackUpdates.size === 0) return;
+
+        setResult((prev) => {
+          if (!prev) return prev;
+          const next = { ...prev };
+          if (checklistChanged) {
+            next.item_translations = nextChecklistTranslations;
+          }
+          if (backpackUpdates.size > 0) {
+            next.backpacks = (prev.backpacks || []).map((backpack) => (
+              backpackUpdates.has(backpack.id)
+                ? { ...backpack, item_translations: backpackUpdates.get(backpack.id) }
+                : backpack
+            ));
+          }
+          return next;
+        });
+
+        if (checklistChanged) {
+          syncChecklist({ item_translations: nextChecklistTranslations });
+        }
+        backpackUpdates.forEach((itemTranslations, backpackId) => {
+          syncBackpackItems(backpackId, { item_translations: itemTranslations });
+        });
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+    // sync helpers are intentionally called with the latest result snapshot in this migration effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lang, result]);
+
+  useEffect(() => {
+    if (!result?.slug) return;
+
+    saveLastChecklistSnapshot(result, user?.id ?? result.user_id);
+
+    if (persistPendingAfterRenderRef.current) {
+      savePendingChecklistSnapshot(result, user?.id ?? result.user_id);
+      persistPendingAfterRenderRef.current = false;
+      setHasPendingOfflineSync(true);
+    }
+  }, [result, user?.id]);
+
+  useEffect(() => {
+    if (isOffline || !token || !hasPendingOfflineSync) return;
+    syncStoredChecklist();
+  }, [hasPendingOfflineSync, isOffline, syncStoredChecklist, token]);
+
+  useEffect(() => {
+    if (!token) return undefined;
+
+    let cancelled = false;
+    fetch(`${API_URL}/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data) {
+          setUser(data);
+          localStorage.setItem("user", JSON.stringify(data));
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  const packingProfile = normalizePackingProfile(activePackingProfile);
   const hasVisibleSharedItems = false;
+  const tripScenarioOptions = [
+    { id: "city_break", label: lang === "en" ? "City walks" : "Город" },
+    { id: "business_trip", label: lang === "en" ? "Work" : "Работа" },
+    { id: "beach_escape", label: lang === "en" ? "Beach" : "Пляж" },
+    { id: "outdoor_adventure", label: lang === "en" ? "Outdoor" : "Активный отдых" },
+    { id: "winter_trip", label: lang === "en" ? "Winter" : "Зима" },
+    { id: "romantic_getaway", label: lang === "en" ? "Date / romance" : "Романтика" },
+    { id: "hiking", label: (t.activityHiking || "").trim() },
+    { id: "workout", label: (t.activityWorkout || "").trim() },
+    { id: "photo_content", label: (t.activityPhotoContent || "").trim() },
+  ];
+  const tripActivityOptions = tripScenarioOptions;
+  const baggageFormatOptions = [
+    { id: "carry_on", label: lang === "en" ? "Carry-on" : "Ручная кладь" },
+    { id: "suitcase", label: lang === "en" ? "Suitcase" : "Чемодан" },
+    { id: "suitcase_plus_carry_on", label: lang === "en" ? "Suitcase + carry-on" : "Чемодан + ручная кладь" },
+    { id: "hiking_backpack", label: lang === "en" ? "Hiking backpack" : "Походный рюкзак" },
+  ];
+  const accommodationOptions = [
+    { id: "hotel", label: (t.hotel || "").trim() },
+    { id: "apartment", label: (t.apartment || "").trim() },
+    { id: "hostel", label: (t.hostel || "").trim() },
+    { id: "camping", label: (t.camping || "").trim() },
+  ];
+  const laundryOptions = [
+    { id: "none", label: (t.noLaundry || "").trim() },
+    { id: "limited", label: (t.limitedLaundry || "").trim() },
+    { id: "easy", label: (t.easyLaundry || "").trim() },
+  ];
+  const packingStyleOptions = [
+    { id: "light", label: (t.packingLight || "").trim() },
+    { id: "balanced", label: (t.packingBalanced || "").trim() },
+    { id: "prepared", label: (t.packingPrepared || "").trim() },
+  ];
+  const packingFactorOptions = [
+    {
+      id: "traveling_with_pet",
+      label: lang === "en" ? "Traveling with pet" : "Путешествую с питомцем",
+    },
+    {
+      id: "has_allergies",
+      label: lang === "en" ? "There are allergies" : "Есть аллергии",
+    },
+  ];
+  const selectedTripActivityLabels = tripActivityOptions
+    .filter((activity) => options.trip_activities.includes(activity.id))
+    .map((activity) => activity.label);
+  const tripActivitiesSummary = selectedTripActivityLabels.length === 0
+    ? (lang === "en" ? "Select scenarios" : "Выберите сценарии")
+    : selectedTripActivityLabels.length <= 2
+      ? selectedTripActivityLabels.join(", ")
+      : `${selectedTripActivityLabels.slice(0, 2).join(", ")} +${selectedTripActivityLabels.length - 2}`;
+  const selectedPackingFactorLabels = packingFactorOptions
+    .filter((item) => Boolean(packingProfile[item.id]))
+    .map((item) => item.label);
+  const packingFactorsSummary = selectedPackingFactorLabels.length === 0
+    ? (lang === "en" ? "Select extra factors" : "Выберите дополнительные факторы")
+    : selectedPackingFactorLabels.length <= 2
+      ? selectedPackingFactorLabels.join(", ")
+      : `${selectedPackingFactorLabels.slice(0, 2).join(", ")} +${selectedPackingFactorLabels.length - 2}`;
 
   useEffect(() => {
     if (!token || !collaboratorQuery.trim()) {
@@ -2395,27 +5670,75 @@ const App = ({ page }) => {
   }, [authHeaders, collaboratorQuery, selectedCollaborators, token, user?.id]);
 
   useEffect(() => {
+    if (!id) {
+      setChecklistLoading(false);
+      setUsingStoredChecklist(false);
+      return undefined;
+    }
+
+    let isCancelled = false;
+
     const fetchChecklist = async () => {
+      const cachedChecklist = getCachedChecklistSnapshot(id, authHeaders);
+      const storedChecklist = loadLastChecklistSnapshot(id);
+
+      setError(null);
+      if (cachedChecklist) {
+        setResult(cachedChecklist);
+        setSavedSlug(id);
+        setChecklistLoading(false);
+        setUsingStoredChecklist(false);
+      } else if (storedChecklist) {
+        setResult(storedChecklist);
+        setSavedSlug(id);
+        setChecklistLoading(false);
+        setUsingStoredChecklist(true);
+      } else {
+        setResult((prev) => (prev?.slug === id ? prev : null));
+        setChecklistLoading(true);
+        setUsingStoredChecklist(false);
+      }
+
       try {
-        const requestOptions = authHeaders.Authorization ? { headers: authHeaders } : undefined;
-        let res = await fetch(`${API_URL}/checklist/${id}`, requestOptions);
-        if (res.status === 401 && authHeaders.Authorization) {
-          res = await fetch(`${API_URL}/checklist/${id}`);
-        }
-        if (!res.ok) throw new Error("Чеклист не найден");
-        const data = await res.json();
+        const data = await fetchChecklistCached({ checklistId: id, authHeaders });
+        if (isCancelled) return;
         setResult(data);
         setSavedSlug(id);
+        setUsingStoredChecklist(false);
       } catch (e) {
+        if (isCancelled) return;
         console.error(e);
-        setError("Ошибка при загрузке чеклиста");
+        if (storedChecklist) {
+          setResult(storedChecklist);
+          setSavedSlug(id);
+          setUsingStoredChecklist(true);
+          setError(null);
+        } else {
+          setUsingStoredChecklist(false);
+          setError("Ошибка при загрузке чеклиста");
+        }
+      } finally {
+        if (!isCancelled) {
+          setChecklistLoading(false);
+        }
       }
     };
 
-    if (id) {
-      fetchChecklist();
-    }
+    fetchChecklist();
+    return () => {
+      isCancelled = true;
+    };
   }, [authHeaders, id]);
+
+  useEffect(() => {
+    if (!result?.slug) return;
+    writeChecklistCache(result.slug, authHeaders, result);
+  }, [authHeaders, result]);
+
+  useEffect(() => {
+    if (!result?.trip_profile) return;
+    setOptions((prev) => normalizeTripOptions({ ...prev, ...result.trip_profile }, { preserveEmptySelections: true }));
+  }, [result?.slug, result?.trip_profile]);
 
   useEffect(() => {
     if (result && result.items && savedSlug) {
@@ -2439,7 +5762,7 @@ const App = ({ page }) => {
   useEffect(() => {
     if (!result) return;
 
-    const participants = buildBaggageParticipants(result, user);
+    const participants = buildBaggageParticipants(result, user, lang);
     if (participants.length === 0) {
       setActiveParticipantId(null);
       if (activeTab !== "shared") {
@@ -2478,12 +5801,14 @@ const App = ({ page }) => {
         activeParticipantGroup?.baggage.find((bp) => bp.is_default) || activeParticipantGroup?.baggage[0];
       setActiveTab(fallbackBaggage ? fallbackBaggage.id.toString() : "shared");
     }
-  }, [result, user, activeParticipantId, activeTab, hasVisibleSharedItems]);
+  }, [result, user, activeParticipantId, activeTab, hasVisibleSharedItems, lang]);
 
   useEffect(() => {
     if (location.pathname === "/") {
       setSavedSlug(null);
       setResult(null);
+      setChecklistLoading(false);
+      setUsingStoredChecklist(false);
       setDestinations([{ id: 1, city: null, dates: { start: null, end: null } }]);
       setError(null);
     }
@@ -2511,21 +5836,45 @@ const App = ({ page }) => {
     }));
   };
 
+  const updateTripOption = (key, value) => {
+    setOptions((prev) => normalizeTripOptions({ ...prev, [key]: value }, { preserveEmptySelections: true }));
+  };
+
+  const updateTripPartyOptions = (nextParty) => {
+    setOptions((prev) => normalizeTripOptions({ ...prev, ...normalizeTripParty(nextParty) }, { preserveEmptySelections: true }));
+  };
+
+  const updateActivePackingProfile = (patch) => {
+    setActivePackingProfile((prev) => normalizePackingProfile({ ...prev, ...patch }));
+  };
+
+  const toggleTripActivity = (activityId) => {
+    setOptions((prev) => {
+      const currentActivities = normalizeTripActivities(prev.trip_activities);
+      const nextActivities = currentActivities.includes(activityId)
+        ? currentActivities.filter((item) => item !== activityId)
+        : [...currentActivities, activityId];
+      return normalizeTripOptions({ ...prev, trip_activities: nextActivities }, { preserveEmptySelections: true });
+    });
+  };
+
+  const togglePackingFactor = (factorKey) => {
+    updateActivePackingProfile({ [factorKey]: !packingProfile[factorKey] });
+  };
+
   const handleAddBaseItem = () => {
     const normalizedItem = newBaseItem.trim();
     if (!normalizedItem) return;
-    setPackingProfileDraft((prev) => ({
-      ...prev,
-      always_include_items: normalizePackingProfileItems([...prev.always_include_items, normalizedItem]),
-    }));
+    updateActivePackingProfile({
+      always_include_items: normalizePackingProfileItems([...(packingProfile.always_include_items || []), normalizedItem]),
+    });
     setNewBaseItem("");
   };
 
   const handleRemoveBaseItem = (itemToRemove) => {
-    setPackingProfileDraft((prev) => ({
-      ...prev,
-      always_include_items: prev.always_include_items.filter((item) => item !== itemToRemove),
-    }));
+    updateActivePackingProfile({
+      always_include_items: packingProfile.always_include_items.filter((item) => item !== itemToRemove),
+    });
   };
 
   const handleSavePackingProfile = async () => {
@@ -2550,6 +5899,7 @@ const App = ({ page }) => {
       }
       setUser(data);
       localStorage.setItem("user", JSON.stringify(data));
+      setActivePackingProfile(normalizePackingProfile(data?.packing_profile || DEFAULT_PACKING_PROFILE));
       setShowPackingModal(false);
     } catch (e) {
       alert(e.message || "Не удалось сохранить настройки");
@@ -2571,17 +5921,40 @@ const App = ({ page }) => {
     }
 
     try {
+      const effectiveTripOptions = showAdvancedTripSettings
+        ? options
+        : normalizeTripOptions({
+          ...DEFAULT_TRIP_OPTIONS,
+          trip_note: options.trip_note,
+          adults: options.adults,
+          children_ages: options.children_ages,
+          child_profiles: options.child_profiles,
+        });
+      const effectivePackingProfile = showAdvancedTripSettings
+        ? packingProfile
+        : normalizePackingProfile(DEFAULT_PACKING_PROFILE);
       const payload = {
         segments: destinations.map(d => ({
           city: d.city.fullName,
           start_date: d.dates.start,
           end_date: d.dates.end,
-          trip_type: options.trip_type,
+          trip_type: effectiveTripOptions.trip_type,
           transport: d.transport || "plane",
         })),
-        gender: packingProfile.gender,
-        traveling_with_pet: packingProfile.traveling_with_pet,
-        has_allergies: packingProfile.has_allergies,
+        trip_activities: effectiveTripOptions.trip_activities,
+        baggage_format: effectiveTripOptions.baggage_format,
+        accommodation_type: showAdvancedTripSettings ? effectiveTripOptions.accommodation_type : "",
+        laundry_access: effectiveTripOptions.laundry_access,
+        packing_style: effectiveTripOptions.packing_style,
+        trip_note: effectiveTripOptions.trip_note.trim(),
+        gender: "unspecified",
+        traveling_with_pet: effectivePackingProfile.traveling_with_pet,
+        has_allergies: effectivePackingProfile.has_allergies,
+        traveling_with_children: effectivePackingProfile.traveling_with_children || effectiveTripOptions.children_ages.length > 0,
+        adults: effectiveTripOptions.adults,
+        children_ages: effectiveTripOptions.children_ages,
+        child_profiles: effectiveTripOptions.child_profiles,
+        infants_count: effectiveTripOptions.children_ages.filter((age) => age < 2).length,
         participant_user_ids: selectedCollaborators.map((person) => person.id),
         language: lang,
         origin_city: originCity?.fullName || originCity || "",
@@ -2636,27 +6009,61 @@ const App = ({ page }) => {
   const syncChecklist = async (payload) => {
     try {
       if (!authHeaders.Authorization || !savedSlug) return;
-      await fetch(`${API_URL}/checklist/${savedSlug}/state`, {
+      if (isOffline) {
+        markChecklistPendingSync({ waitForNextRender: true });
+        return;
+      }
+      const response = await fetch(`${API_URL}/checklist/${savedSlug}/state`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", ...authHeaders },
         body: JSON.stringify(payload)
       });
-    } catch (e) { console.error("Checklist sync error:", e); }
+      if (!response.ok) {
+        throw new Error("Checklist sync failed");
+      }
+      clearChecklistPendingSync();
+    } catch (e) {
+      console.error("Checklist sync error:", e);
+      markChecklistPendingSync({ checklist: latestResultRef.current });
+    }
   };
 
   const syncBackpackItems = async (backpackId, payload) => {
     try {
       if (!authHeaders.Authorization) return;
-      await fetch(`${API_URL}/backpacks/${backpackId}/state`, {
+      if (isOffline) {
+        markChecklistPendingSync({ waitForNextRender: true });
+        return;
+      }
+      const response = await fetch(`${API_URL}/backpacks/${backpackId}/state`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json", ...authHeaders },
         body: JSON.stringify(payload)
       });
-    } catch (e) { console.error("Backpack sync error:", e); }
+      if (!response.ok) {
+        throw new Error("Backpack sync failed");
+      }
+      clearChecklistPendingSync();
+    } catch (e) {
+      console.error("Backpack sync error:", e);
+      markChecklistPendingSync({ checklist: latestResultRef.current });
+    }
+  };
+
+  const ensureChecklistEditAllowed = () => {
+    if (!canEditCurrentSection) return false;
+    if (!isOffline || isOfflineEditAllowedForChecklist) return true;
+
+    alert(
+      lang === "en"
+        ? "Offline editing is available only for your personal last checklist. Shared checklists stay read-only offline."
+        : "Офлайн-редактирование доступно только для вашего личного последнего чеклиста. Совместные чеклисты офлайн открываются только для чтения."
+    );
+    return false;
   };
 
   const handleQuantityStateChange = (item, nextNeededQuantity, nextPackedQuantity) => {
-    if (!canEditCurrentSection) return;
+    if (!ensureChecklistEditAllowed()) return;
     const quantity = Math.max(1, Number(nextNeededQuantity) || 1);
     const packed = Math.max(0, Math.min(quantity, Number(nextPackedQuantity) || 0));
 
@@ -2737,7 +6144,7 @@ const App = ({ page }) => {
   };
 
   const handleQuickPackedChange = (item, delta) => {
-    if (!canEditCurrentSection) return;
+    if (!ensureChecklistEditAllowed()) return;
     const targetNeeded = activeTab === "shared"
       ? getItemQuantity(result?.item_quantities || {}, item)
       : getItemQuantity(
@@ -2754,7 +6161,7 @@ const App = ({ page }) => {
   };
 
   const handleCheck = (item) => {
-    if (!canEditCurrentSection) return;
+    if (!ensureChecklistEditAllowed()) return;
     if (activeTab === "shared") {
       const needed = getItemQuantity(result?.item_quantities || {}, item);
       const currentPacked = getPackedQuantity(result?.packed_quantities || {}, item);
@@ -2796,7 +6203,7 @@ const App = ({ page }) => {
   };
 
   const handleRemoveItem = (item) => {
-    if (!canEditCurrentSection) return;
+    if (!ensureChecklistEditAllowed()) return;
     if (activeTab === "shared") {
       const newRemoved = [...removedItems, item];
       setRemovedItems(newRemoved);
@@ -2829,7 +6236,7 @@ const App = ({ page }) => {
   };
 
   const resetChecklist = () => {
-    if (!canEditCurrentSection) return;
+    if (!ensureChecklistEditAllowed()) return;
     if (activeTab === "shared") {
       const reset = {};
       result.items.forEach(item => { reset[item] = false; });
@@ -2851,71 +6258,135 @@ const App = ({ page }) => {
   };
 
   const handleAddItem = () => {
-    if (!canEditCurrentSection) return;
+    if (!ensureChecklistEditAllowed()) return;
     const normalizedItem = newItem.trim();
     if (!normalizedItem) return;
+    const resolvedQuantity = Math.max(1, Number(newItemQuantity) || 1);
+    const sourceLang = detectItemTextLanguage(normalizedItem);
+    const targetLang = sourceLang === "ru" ? "en" : "ru";
+    const targetSectionKey = activeTab;
+    requestChecklistItemTranslation(normalizedItem, targetLang).then((translatedText) => {
+      if (!translatedText || translatedText === normalizedItem) return;
+      const translationEntry = buildChecklistItemTranslationEntry(
+        normalizedItem,
+        translatedText,
+        targetLang,
+        sourceLang
+      );
+      if (!translationEntry) return;
+      cacheChecklistItemTranslation({
+        label: translatedText,
+        translatedText: normalizedItem,
+        targetLang: sourceLang,
+        sourceLang: targetLang,
+      });
+
+      if (targetSectionKey === "shared") {
+        const nextTranslations = mergeItemTranslationEntry(
+          latestResultRef.current?.item_translations || {},
+          normalizedItem,
+          translationEntry
+        );
+        setResult((prev) => (prev ? { ...prev, item_translations: nextTranslations } : prev));
+        syncChecklist({ item_translations: nextTranslations });
+        return;
+      }
+
+      const currentBackpack = (latestResultRef.current?.backpacks || []).find(
+        (bag) => bag.id.toString() === targetSectionKey
+      );
+      const nextTranslations = mergeItemTranslationEntry(
+        currentBackpack?.item_translations || {},
+        normalizedItem,
+        translationEntry
+      );
+      setResult((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          backpacks: (prev.backpacks || []).map((bag) => (
+            bag.id.toString() === targetSectionKey
+              ? { ...bag, item_translations: nextTranslations }
+              : bag
+          )),
+        };
+      });
+      syncBackpackItems(targetSectionKey, { item_translations: nextTranslations });
+    }).catch(() => {});
     if (activeTab === "shared") {
+      const resolvedCategory = newItemCategory || inferItemCategory(normalizedItem, lang, result?.item_categories || {});
       if (result.items.includes(normalizedItem)) {
         if (removedItems.includes(normalizedItem)) {
           const nextRemoved = removedItems.filter((existing) => existing !== normalizedItem);
           const nextQuantities = setItemQuantityInMap(
             result?.item_quantities || {},
             normalizedItem,
-            getItemQuantity(result?.item_quantities || {}, normalizedItem)
+            getItemQuantity(result?.item_quantities || {}, normalizedItem) || resolvedQuantity
           );
           const nextPacked = setPackedQuantityInMap(
             result?.packed_quantities || {},
             normalizedItem,
             getPackedQuantity(result?.packed_quantities || {}, normalizedItem)
           );
+          const nextCategories = setItemCategoryInMap(result?.item_categories || {}, normalizedItem, resolvedCategory);
           setRemovedItems(nextRemoved);
-          setResult((prev) => ({ ...prev, item_quantities: nextQuantities, packed_quantities: nextPacked }));
-          syncChecklist({ removed_items: nextRemoved, item_quantities: nextQuantities, packed_quantities: nextPacked });
+          setResult((prev) => ({ ...prev, item_quantities: nextQuantities, packed_quantities: nextPacked, item_categories: nextCategories }));
+          syncChecklist({ removed_items: nextRemoved, item_quantities: nextQuantities, packed_quantities: nextPacked, item_categories: nextCategories });
         }
-        setNewItem("");
+        resetAddItemDraft();
         setAddItemMode(false);
         return;
       }
       const newItems = [...result.items, normalizedItem];
-      const nextQuantities = setItemQuantityInMap(result?.item_quantities || {}, normalizedItem, 1);
+      const nextQuantities = setItemQuantityInMap(result?.item_quantities || {}, normalizedItem, resolvedQuantity);
       const nextPacked = setPackedQuantityInMap(result?.packed_quantities || {}, normalizedItem, 0);
-      setResult(prev => ({ ...prev, items: newItems, item_quantities: nextQuantities, packed_quantities: nextPacked }));
-      syncChecklist({ items: newItems, item_quantities: nextQuantities, packed_quantities: nextPacked });
+      const nextCategories = setItemCategoryInMap(result?.item_categories || {}, normalizedItem, resolvedCategory);
+      setResult(prev => ({ ...prev, items: newItems, item_quantities: nextQuantities, packed_quantities: nextPacked, item_categories: nextCategories }));
+      syncChecklist({ items: newItems, item_quantities: nextQuantities, packed_quantities: nextPacked, item_categories: nextCategories });
     } else {
       setResult(prev => {
         const next = { ...prev };
         const bp = next.backpacks?.find(b => b.id.toString() === activeTab);
+        const resolvedCategory = newItemCategory || inferItemCategory(normalizedItem, lang, bp?.item_categories || {});
         if (bp && bp.items.includes(normalizedItem)) {
           if (bp.removed_items.includes(normalizedItem)) {
             bp.removed_items = bp.removed_items.filter((existing) => existing !== normalizedItem);
             bp.item_quantities = setItemQuantityInMap(
               bp.item_quantities || {},
               normalizedItem,
-              getItemQuantity(bp.item_quantities || {}, normalizedItem)
+              getItemQuantity(bp.item_quantities || {}, normalizedItem) || resolvedQuantity
             );
             bp.packed_quantities = setPackedQuantityInMap(
               bp.packed_quantities || {},
               normalizedItem,
               getPackedQuantity(bp.packed_quantities || {}, normalizedItem)
             );
+            bp.item_categories = setItemCategoryInMap(bp.item_categories || {}, normalizedItem, resolvedCategory);
             syncBackpackItems(activeTab, {
               removed_items: bp.removed_items,
               item_quantities: bp.item_quantities,
-              packed_quantities: bp.packed_quantities
+              packed_quantities: bp.packed_quantities,
+              item_categories: bp.item_categories,
             });
           }
           return next;
         }
         if (bp) {
           bp.items = [...bp.items, normalizedItem];
-          bp.item_quantities = setItemQuantityInMap(bp.item_quantities || {}, normalizedItem, 1);
+          bp.item_quantities = setItemQuantityInMap(bp.item_quantities || {}, normalizedItem, resolvedQuantity);
           bp.packed_quantities = setPackedQuantityInMap(bp.packed_quantities || {}, normalizedItem, 0);
-          syncBackpackItems(activeTab, { items: bp.items, item_quantities: bp.item_quantities, packed_quantities: bp.packed_quantities });
+          bp.item_categories = setItemCategoryInMap(bp.item_categories || {}, normalizedItem, resolvedCategory);
+          syncBackpackItems(activeTab, {
+            items: bp.items,
+            item_quantities: bp.item_quantities,
+            packed_quantities: bp.packed_quantities,
+            item_categories: bp.item_categories,
+          });
         }
         return next;
       });
     }
-    setNewItem("");
+    resetAddItemDraft();
     setAddItemMode(false);
   };
 
@@ -2929,6 +6400,10 @@ const App = ({ page }) => {
 
   const handleConfirmMoveItem = async () => {
     if (!moveItemDialog?.item || !moveItemDialog?.targetBackpackId || !savedSlug || !authHeaders.Authorization) return;
+    if (isOffline) {
+      alert(lang === "en" ? "Move item is unavailable offline" : "Перемещение вещей офлайн недоступно");
+      return;
+    }
 
     setMoveItemBusy(true);
     try {
@@ -2976,26 +6451,27 @@ const App = ({ page }) => {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders },
         body: JSON.stringify({
-          user_id: activeParticipant.userId,
+          user_id: activeParticipant.isChild ? user.id : activeParticipant.userId,
+          child_profile_id: activeParticipant.isChild ? activeParticipant.childProfileId : null,
           name,
           kind: guessBaggageKind(name),
         }),
       });
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.detail || "Не удалось создать багаж");
+        throw new Error(data.detail || (lang === "en" ? "Failed to create baggage" : "Не удалось создать багаж"));
       }
 
       setResult((prev) => ({
         ...prev,
         backpacks: sortAllBackpacks([...(prev.backpacks || []), data]),
       }));
-      setActiveParticipantId(data.user_id);
+      setActiveParticipantId(data.child_profile_id ? `child:${data.child_profile_id}` : data.user_id);
       setActiveTab(data.id.toString());
       setNewBaggageName("");
       setShowBaggageCreator(false);
     } catch (e) {
-      alert(e.message || "Не удалось создать багаж");
+      alert(e.message || (lang === "en" ? "Failed to create baggage" : "Не удалось создать багаж"));
     } finally {
       setBaggageBusy(false);
     }
@@ -3006,7 +6482,7 @@ const App = ({ page }) => {
     const confirmed = await requestConfirm({
       title: lang === "en" ? "Delete baggage" : "Удалить багаж",
       message: lang === "en"
-        ? `"${baggage.name || "Baggage"}" will be removed from this trip.`
+        ? `"${translateKnownBaggageName(baggage.name || getBaggageKindLabel(baggage, lang), lang)}" will be removed from this trip.`
         : `«${baggage.name || "Багаж"}» будет удалён из этой поездки.`,
       confirmLabel: lang === "en" ? "Delete" : "Удалить",
       cancelLabel: lang === "en" ? "Cancel" : "Отмена",
@@ -3016,13 +6492,36 @@ const App = ({ page }) => {
 
     setBaggageBusy(true);
     try {
-      const res = await fetch(`${API_URL}/baggage/${baggage.id}`, {
+      let res = await fetch(`${API_URL}/baggage/${baggage.id}`, {
         method: "DELETE",
         headers: authHeaders,
       });
-      const data = await res.json();
+      let data = await res.json();
+      if (!res.ok && data?.detail === "Сначала освободите багаж от вещей" && getBaggageVisibleItemCount(baggage) === 0) {
+        const cleanupRes = await fetch(`${API_URL}/backpacks/${baggage.id}/state`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", ...authHeaders },
+          body: JSON.stringify(clearBaggageStatePayload(baggage)),
+        });
+        if (cleanupRes.ok) {
+          setResult((prev) => ({
+            ...prev,
+            backpacks: (prev.backpacks || []).map((bp) => (
+              bp.id === baggage.id
+                ? { ...bp, ...clearBaggageStatePayload(bp) }
+                : bp
+            )),
+          }));
+
+          res = await fetch(`${API_URL}/baggage/${baggage.id}`, {
+            method: "DELETE",
+            headers: authHeaders,
+          });
+          data = await res.json();
+        }
+      }
       if (!res.ok) {
-        throw new Error(data.detail || "Не удалось удалить багаж");
+        throw new Error(data.detail || (lang === "en" ? "Failed to delete baggage" : "Не удалось удалить багаж"));
       }
 
       setResult((prev) => {
@@ -3034,12 +6533,17 @@ const App = ({ page }) => {
         };
       });
 
-      const participant = baggageParticipants.find((entry) => entry.userId === baggage.user_id);
+      const participant = baggage.child_profile_id
+        ? baggageParticipants.find((entry) => entry.childProfileId === baggage.child_profile_id)
+        : baggageParticipants.find((entry) => entry.userId === baggage.user_id);
       const nextBaggage = participant?.baggage.filter((bp) => bp.id !== baggage.id);
       const fallback = nextBaggage?.find((bp) => bp.is_default) || nextBaggage?.[0];
       setActiveTab(fallback ? fallback.id.toString() : "shared");
     } catch (e) {
-      alert(e.message || "Не удалось удалить багаж");
+      pushAppNotice(
+        e.message || (lang === "en" ? "Failed to delete baggage" : "Не удалось удалить багаж"),
+        "error"
+      );
     } finally {
       setBaggageBusy(false);
     }
@@ -3057,14 +6561,14 @@ const App = ({ page }) => {
       });
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.detail || "Не удалось сделать багаж основным");
+        throw new Error(data.detail || (lang === "en" ? "Failed to make baggage primary" : "Не удалось сделать багаж основным"));
       }
 
       setResult((prev) => ({
         ...prev,
         backpacks: sortAllBackpacks(
           (prev.backpacks || []).map((bp) => (
-            bp.user_id === data.user_id
+            bp.user_id === data.user_id && (bp.child_profile_id || null) === (data.child_profile_id || null)
               ? {
                   ...bp,
                   ...(bp.id === data.id ? data : {}),
@@ -3076,7 +6580,7 @@ const App = ({ page }) => {
       }));
       setActiveTab(data.id.toString());
     } catch (e) {
-      alert(e.message || "Не удалось сделать багаж основным");
+      alert(e.message || (lang === "en" ? "Failed to make baggage primary" : "Не удалось сделать багаж основным"));
     } finally {
       setBaggageBusy(false);
     }
@@ -3103,7 +6607,7 @@ const App = ({ page }) => {
       });
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.detail || "Не удалось переименовать багаж");
+        throw new Error(data.detail || (lang === "en" ? "Failed to rename baggage" : "Не удалось переименовать багаж"));
       }
 
       setResult((prev) => ({
@@ -3113,7 +6617,7 @@ const App = ({ page }) => {
       setRenamingBaggageId(null);
       setRenamingBaggageName("");
     } catch (e) {
-      alert(e.message || "Не удалось переименовать багаж");
+      alert(e.message || (lang === "en" ? "Failed to rename baggage" : "Не удалось переименовать багаж"));
     } finally {
       setBaggageBusy(false);
     }
@@ -3125,11 +6629,13 @@ const App = ({ page }) => {
     if (!participant || !anchorBaggage) return;
 
     setAccessOwner({
-      userId: participant.userId,
-      displayName: participant.isCurrentUser ? "Мой багаж" : `Багаж ${participant.username}`,
+      userId: anchorBaggage.user_id,
+      displayName: participant.isChild
+        ? (lang === "en" ? `Child's baggage: ${participant.username}` : `Багаж ребенка: ${participant.username}`)
+        : participant.isCurrentUser ? (lang === "en" ? "My baggage" : "Мой багаж") : (lang === "en" ? `${participant.username}'s baggage` : `Багаж ${participant.username}`),
       anchorBackpackId: anchorBaggage.id,
     });
-    setAccessEditorIds(getOwnerBaggageEditorIds(result?.backpacks || [], participant.userId, anchorBaggage));
+    setAccessEditorIds(getOwnerBaggageEditorIds(result?.backpacks || [], anchorBaggage.user_id, anchorBaggage));
   };
 
   const handleToggleBaggageEditor = (participantUserId) => {
@@ -3152,7 +6658,7 @@ const App = ({ page }) => {
       });
       const data = await res.json();
       if (!res.ok) {
-        throw new Error(data.detail || "Не удалось обновить доступ");
+        throw new Error(data.detail || (lang === "en" ? "Failed to update access" : "Не удалось обновить доступ"));
       }
 
       setResult((prev) => ({
@@ -3166,7 +6672,7 @@ const App = ({ page }) => {
       setAccessOwner(null);
       setAccessEditorIds([]);
     } catch (e) {
-      alert(e.message || "Не удалось обновить доступ");
+      alert(e.message || (lang === "en" ? "Failed to update access" : "Не удалось обновить доступ"));
     } finally {
       setBaggageBusy(false);
     }
@@ -3250,6 +6756,17 @@ const App = ({ page }) => {
     setResult(updatedChecklist);
   };
 
+  const handlePlanApplied = (createdEventIds = []) => {
+    const nextIds = (Array.isArray(createdEventIds) ? createdEventIds : []).filter((value) => Number.isInteger(value));
+    if (nextIds.length === 0) return;
+    setHighlightedItineraryEventIds(nextIds);
+    window.setTimeout(() => {
+      setHighlightedItineraryEventIds((current) => (
+        current.every((id) => nextIds.includes(id)) ? [] : current
+      ));
+    }, 12000);
+  };
+
   const formatDate = (isoDate) => {
     const d = new Date(isoDate);
     const day = String(d.getDate()).padStart(2, "0");
@@ -3263,7 +6780,12 @@ const App = ({ page }) => {
       {/* Navbar */}
       <nav className="navbar">
         <div className="navbar-logo" onClick={() => navigate("/")}>
-          <img src="/luggify-logo.svg" alt="" className="navbar-logo-mark" aria-hidden="true" />
+          <img
+            src={theme === "light" ? "/luggify-logo-light.svg" : "/luggify-logo.svg"}
+            alt=""
+            className="navbar-logo-mark"
+            aria-hidden="true"
+          />
           <span className="navbar-logo-text">LUGGIFY</span>
         </div>
         <div className="navbar-center navbar-search-desktop">
@@ -3275,15 +6797,60 @@ const App = ({ page }) => {
         </div>
         <div className="navbar-user">
           <div className="navbar-locale-tools">
-            <div className="language-switcher">
+            <div className="locale-cluster">
+              <div className="language-switcher" role="group" aria-label={lang === "en" ? "Language" : "Язык"}>
+                <button
+                  className={`lang-btn ${lang === "ru" ? "active" : ""}`}
+                  onClick={() => setLang("ru")}
+                >RU</button>
+                <button
+                  className={`lang-btn ${lang === "en" ? "active" : ""}`}
+                  onClick={() => setLang("en")}
+                >EN</button>
+              </div>
+              <div className="theme-switcher" role="group" aria-label={lang === "en" ? "Color theme" : "Цветовая тема"}>
+                <button
+                  className={`theme-btn ${theme === "light" ? "active" : ""}`}
+                  onClick={() => setTheme("light")}
+                  aria-label={lang === "en" ? "Light theme" : "Светлая тема"}
+                  title={lang === "en" ? "Light theme" : "Светлая тема"}
+                >
+                  <SunIcon style={{ marginRight: 0 }} />
+                </button>
+                <button
+                  className={`theme-btn ${theme === "dark" ? "active" : ""}`}
+                  onClick={() => setTheme("dark")}
+                  aria-label={lang === "en" ? "Dark theme" : "Тёмная тема"}
+                  title={lang === "en" ? "Dark theme" : "Тёмная тема"}
+                >
+                  <MoonIcon style={{ marginRight: 0 }} />
+                </button>
+              </div>
+            </div>
+            <div className="navbar-mobile-quick-actions">
               <button
-                className={`lang-btn ${lang === "ru" ? "active" : ""}`}
-                onClick={() => setLang("ru")}
-              >RU</button>
+                className="navbar-mobile-utility-btn navbar-mobile-lang-btn"
+                onClick={toggleLanguage}
+                aria-label={lang === "en" ? "Switch language" : "Сменить язык"}
+                title={lang === "en" ? "Switch language" : "Сменить язык"}
+              >
+                <GlobeIcon style={{ marginRight: 0 }} />
+                <span>{lang.toUpperCase()}</span>
+              </button>
               <button
-                className={`lang-btn ${lang === "en" ? "active" : ""}`}
-                onClick={() => setLang("en")}
-              >EN</button>
+                className="navbar-mobile-utility-btn"
+                onClick={toggleThemeMode}
+                aria-label={theme === "light"
+                  ? (lang === "en" ? "Switch to dark theme" : "Переключить на тёмную тему")
+                  : (lang === "en" ? "Switch to light theme" : "Переключить на светлую тему")}
+                title={theme === "light"
+                  ? (lang === "en" ? "Switch to dark theme" : "Переключить на тёмную тему")
+                  : (lang === "en" ? "Switch to light theme" : "Переключить на светлую тему")}
+              >
+                {theme === "light"
+                  ? <SunIcon style={{ marginRight: 0 }} />
+                  : <MoonIcon style={{ marginRight: 0 }} />}
+              </button>
             </div>
             <div className="navbar-search-mobile">
               <NavbarUserSearch
@@ -3294,15 +6861,17 @@ const App = ({ page }) => {
               />
             </div>
           </div>
-          {user ? (
-            <>
+          <div className="navbar-primary-actions">
+            {user ? (
+              <>
               <TelegramLinkButton
                 user={user}
                 token={token}
                 onUserUpdate={setUser}
                 lang={lang}
+                buttonClassName="navbar-desktop-only"
               />
-              <div className="navbar-profile" onClick={() => navigate("/profile")}>
+              <div className="navbar-profile navbar-desktop-only" onClick={() => navigate("/profile")}>
                 <div className="navbar-avatar">
                   {user.avatar && (user.avatar.startsWith("data:image") || user.avatar.startsWith("http")) ? (
                     <img src={user.avatar} alt="Avatar" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }} />
@@ -3318,7 +6887,7 @@ const App = ({ page }) => {
                 navigate={navigate}
               />
               <button
-                className="navbar-logout-btn icon-btn"
+                className="navbar-logout-btn icon-btn navbar-desktop-only"
                 onClick={handleLogout}
                 title={t.logout}
               >
@@ -3338,10 +6907,81 @@ const App = ({ page }) => {
                   <line x1="21" y1="12" x2="9" y2="12"></line>
                 </svg>
               </button>
-            </>
-          ) : (
-            <button className="navbar-login-btn" onClick={() => setShowAuth(true)}>{t.login}</button>
-          )}
+              <div className="navbar-mobile-overflow" ref={mobileNavMenuRef}>
+                <button
+                  type="button"
+                  className={`navbar-mobile-menu-trigger ${showMobileNavMenu ? "active" : ""}`}
+                  onClick={() => setShowMobileNavMenu((prev) => !prev)}
+                  aria-label={lang === "en" ? "More actions" : "Ещё действия"}
+                  title={lang === "en" ? "More actions" : "Ещё действия"}
+                >
+                  <ListIcon style={{ marginRight: 0 }} />
+                </button>
+                {showMobileNavMenu && (
+                  <div className="navbar-mobile-menu">
+                    <button
+                      type="button"
+                      className="navbar-mobile-menu-item navbar-mobile-menu-profile"
+                      onClick={() => {
+                        setShowMobileNavMenu(false);
+                        navigate("/profile");
+                      }}
+                    >
+                      <span className="navbar-mobile-menu-avatar">
+                        {user.avatar && (user.avatar.startsWith("data:image") || user.avatar.startsWith("http")) ? (
+                          <img src={user.avatar} alt="Avatar" style={{ width: "100%", height: "100%", borderRadius: "50%", objectFit: "cover" }} />
+                        ) : (
+                          user.avatar ? user.avatar : user.username.charAt(0).toUpperCase()
+                        )}
+                      </span>
+                      <span className="navbar-mobile-menu-copy">
+                        <strong>{lang === "en" ? "Profile" : "Профиль"}</strong>
+                        <span>{user.username}</span>
+                      </span>
+                    </button>
+                    <TelegramLinkButton
+                      user={user}
+                      token={token}
+                      onUserUpdate={setUser}
+                      lang={lang}
+                      buttonClassName="navbar-mobile-menu-item"
+                      onButtonClick={() => setShowMobileNavMenu(false)}
+                      menuMode
+                    />
+                    <button
+                      type="button"
+                      className="navbar-mobile-menu-item danger"
+                      onClick={() => {
+                        setShowMobileNavMenu(false);
+                        handleLogout();
+                      }}
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="18"
+                        height="18"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                        <polyline points="16 17 21 12 16 7"></polyline>
+                        <line x1="21" y1="12" x2="9" y2="12"></line>
+                      </svg>
+                      <span>{t.logout}</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+              </>
+            ) : (
+              <button className="navbar-login-btn" onClick={() => setShowAuth(true)}>{t.login}</button>
+            )}
+          </div>
         </div>
       </nav>
 
@@ -3355,10 +6995,24 @@ const App = ({ page }) => {
       <div className="page-wrapper">
         {/* Profile Page */}
         {page === "profile" ? (
-          <ProfilePage user={user} token={token} onLogout={handleLogout} onUpdateUser={setUser} lang={lang} />
+          <Suspense fallback={panelLoader}>
+            <ProfilePage user={user} token={token} onLogout={handleLogout} onUpdateUser={setUser} lang={lang} />
+          </Suspense>
         ) : (
           <>
-            {!result && (
+            {showChecklistSkeleton ? (
+              <ChecklistRouteSkeleton />
+            ) : showChecklistErrorState ? (
+              <div className="checklist-load-state">
+                <div className="checklist-load-card">
+                  <div className="checklist-load-title">{lang === "en" ? "Checklist unavailable" : "Не удалось открыть чеклист"}</div>
+                  <div className="checklist-load-copy">{error}</div>
+                  <button className="action-btn primary" onClick={() => navigate("/")}>
+                    {lang === "en" ? "Go home" : "На главную"}
+                  </button>
+                </div>
+              </div>
+            ) : showHomeForm && (
               <>
                 <div className="hero">
                   <h2>{t.heroTitle}</h2>
@@ -3462,150 +7116,221 @@ const App = ({ page }) => {
                     </div>
                   </div>
                   <div className="trip-type-selector">
-                    <label className="section-label">Тип поездки:</label>
-                    <div className="trip-types">
-                      {[
-                        { id: "vacation", label: t.vacation, icon: <VacationIcon /> },
-                        { id: "business", label: t.business, icon: <BusinessIcon /> },
-                        { id: "active", label: t.active, icon: <ActiveIcon /> },
-                        { id: "beach", label: t.beach, icon: <BeachIcon /> },
-                        { id: "winter", label: t.winter, icon: <WinterIcon /> },
-                      ].map(type => (
-                        <div
-                          key={type.id}
-                          className={`trip-type-chip ${options.trip_type === type.id ? "active" : ""}`}
-                          onClick={() => setOptions({ ...options, trip_type: type.id })}
-                        >
-                          {type.icon} {type.label}
+                    <label className="section-label">{lang === "en" ? "Trip Setup" : "Параметры поездки"}</label>
+                    <div className="trip-settings-card">
+                      <div className="trip-settings-grid trip-settings-quick-grid">
+                        <div className="trip-settings-field trip-settings-field-full">
+                          <label className="section-label">
+                            {lang === "en" ? "Describe the trip for AI" : "Опишите поездку для ИИ"}
+                          </label>
+                          <textarea
+                            className="trip-settings-note-input"
+                            value={options.trip_note}
+                            onChange={(event) => {
+                              updateTripOption("trip_note", event.target.value);
+                              resizeTextareaToContent(event.currentTarget);
+                            }}
+                            placeholder={t.tripNotePlaceholder}
+                            rows={1}
+                          />
                         </div>
-                      ))}
+
+                        <div className="trip-settings-field trip-settings-panel-field trip-settings-panel-field-wide">
+                          <div className="trip-settings-panel home-setup-card trip-party-card">
+                            <div className="home-setup-card-head">
+                              <div className="home-setup-card-copy">
+                                <span className="home-setup-card-title">
+                                  {lang === "en" ? "Who is traveling" : "Кто едет"}
+                                </span>
+                              </div>
+                            </div>
+                            <TripPartyEditor
+                              value={options}
+                              onChange={updateTripPartyOptions}
+                              lang={lang}
+                              className="trip-party-editor-card"
+                            />
+                          </div>
+                        </div>
+
+                        {user && (
+                          <div className="trip-settings-field trip-settings-panel-field trip-settings-panel-field-half">
+                            <div className="trip-settings-panel home-setup-card packing-profile-summary-card">
+                              <div className="home-setup-card-head">
+                                <div className="home-setup-card-copy">
+                                  <span className="home-setup-card-title">
+                                    {lang === "en" ? "Base items" : "Базовые вещи"}
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="packing-base-items-editor compact">
+                                <div className="packing-base-items-input-row compact">
+                                  <input
+                                    type="text"
+                                    className="packing-base-items-input compact"
+                                    value={newBaseItem}
+                                    onChange={(e) => setNewBaseItem(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") {
+                                        e.preventDefault();
+                                        handleAddBaseItem();
+                                      }
+                                    }}
+                                    placeholder={lang === "en" ? "For example: contact lenses" : "Например: линзы"}
+                                  />
+                                  <button type="button" className="packing-base-items-add compact" onClick={handleAddBaseItem}>
+                                    +
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="compact-list-toggle"
+                                    onClick={() => setShowBaseItemsModal(true)}
+                                    title={lang === "en" ? "Base items list" : "Список базовых вещей"}
+                                  >
+                                    <span className="compact-list-toggle-icon" aria-hidden="true">≡</span>
+                                    <span>{packingProfile.always_include_items.length}</span>
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {user && (
+                          <div className="trip-settings-field trip-settings-panel-field trip-settings-panel-field-half">
+                            <div className="trip-settings-panel collaborator-picker-panel home-setup-card">
+                              <div className="home-setup-card-head">
+                                <div className="home-setup-card-copy">
+                                  <span className="home-setup-card-title">
+                                    {lang === "en" ? "Collaborative checklist" : "Совместный чеклист"}
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="collaborator-search-row">
+                                <div className="collaborator-search-shell">
+                                  <input
+                                    type="text"
+                                    className="collaborator-search-input"
+                                    value={collaboratorQuery}
+                                    onChange={(e) => setCollaboratorQuery(e.target.value)}
+                                    placeholder={lang === "en" ? "Enter username" : "Введите имя пользователя"}
+                                  />
+                                  {collaboratorResults.length > 0 && (
+                                    <div className="collaborator-search-results">
+                                      {collaboratorResults.map((person) => (
+                                        <button
+                                          key={person.id}
+                                          type="button"
+                                          className="collaborator-search-item"
+                                          onClick={() => addCollaborator(person)}
+                                        >
+                                          <span className="collaborator-search-avatar">
+                                            {person.avatar ? (
+                                              <img src={person.avatar} alt={person.username} />
+                                            ) : (
+                                              person.username.charAt(0).toUpperCase()
+                                            )}
+                                          </span>
+                                          <span className="collaborator-search-copy">
+                                            <strong>{person.username}</strong>
+                                            {person.bio && <span>{person.bio}</span>}
+                                          </span>
+                                        </button>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                                <button
+                                  type="button"
+                                  className="compact-list-toggle"
+                                  onClick={() => setShowCollaboratorsModal(true)}
+                                  title={lang === "en" ? "Selected users" : "Список выбранных"}
+                                >
+                                  <span className="compact-list-toggle-icon" aria-hidden="true">≡</span>
+                                  <span>{selectedCollaborators.length}</span>
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="advanced-trip-settings">
+                        <button
+                          type="button"
+                          className={`advanced-trip-settings-toggle ${showAdvancedTripSettings ? "open" : ""}`}
+                          onClick={() => setShowAdvancedTripSettings((prev) => !prev)}
+                        >
+                          <span>
+                            {lang === "en" ? "Advanced settings" : "Расширенные настройки"}
+                          </span>
+                          <span className="advanced-trip-settings-status">
+                            {showAdvancedTripSettings
+                              ? (lang === "en" ? "Active" : "Активны")
+                              : (lang === "en" ? "Off" : "Неактивны")}
+                          </span>
+                          <span className="advanced-trip-settings-chevron">⌄</span>
+                        </button>
+
+                        {showAdvancedTripSettings && (
+                          <div className="trip-settings-grid trip-settings-advanced-grid">
+                            <TripSettingsDropdown
+                              label={lang === "en" ? "Trip scenarios" : "Сценарии поездки"}
+                              options={tripActivityOptions}
+                              value={options.trip_activities}
+                              onChange={toggleTripActivity}
+                              multiple
+                              summary={tripActivitiesSummary}
+                              placeholderActive={selectedTripActivityLabels.length === 0}
+                            />
+
+                            <TripSettingsDropdown
+                              label={lang === "en" ? "Baggage format" : "Формат багажа"}
+                              options={baggageFormatOptions}
+                              value={options.baggage_format}
+                              onChange={(nextValue) => updateTripOption("baggage_format", nextValue)}
+                              placeholder={lang === "en" ? "Select baggage format" : "Выберите формат багажа"}
+                            />
+
+                            <TripSettingsDropdown
+                              label={t.accommodationLabel}
+                              options={accommodationOptions}
+                              value={options.accommodation_type}
+                              onChange={(nextValue) => updateTripOption("accommodation_type", nextValue)}
+                              placeholder={lang === "en" ? "Select accommodation" : "Выберите жильё"}
+                            />
+
+                            <TripSettingsDropdown
+                              label={t.laundryLabel}
+                              options={laundryOptions}
+                              value={options.laundry_access}
+                              onChange={(nextValue) => updateTripOption("laundry_access", nextValue)}
+                              placeholder={lang === "en" ? "Select laundry access" : "Выберите доступ к стирке"}
+                            />
+
+                            <TripSettingsDropdown
+                              label={t.packingStyleLabel}
+                              options={packingStyleOptions}
+                              value={options.packing_style}
+                              onChange={(nextValue) => updateTripOption("packing_style", nextValue)}
+                              placeholder={lang === "en" ? "Select packing style" : "Выберите стиль сборов"}
+                            />
+
+                            <TripSettingsDropdown
+                              label={lang === "en" ? "Extra factors" : "Дополнительные факторы"}
+                              options={packingFactorOptions}
+                              value={packingFactorOptions.filter((item) => Boolean(packingProfile[item.id])).map((item) => item.id)}
+                              onChange={togglePackingFactor}
+                              multiple
+                              summary={packingFactorsSummary}
+                              placeholderActive={selectedPackingFactorLabels.length === 0}
+                            />
+
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
-
-                  {user && (
-                    <div className="packing-profile-summary-card home-setup-card">
-                      <div className="home-setup-card-head">
-                        <div className="home-setup-card-copy">
-                          <span className="home-setup-card-kicker">
-                            {lang === "en" ? "Quick start" : "Быстрый старт"}
-                          </span>
-                          <span className="home-setup-card-title">
-                            {lang === "en" ? "Packing settings" : "Настройки сборов"}
-                          </span>
-                        </div>
-                        <button
-                          className="packing-profile-summary-btn compact"
-                          type="button"
-                          onClick={() => setShowPackingModal(true)}
-                        >
-                          {lang === "en" ? "Configure" : "Настроить"}
-                        </button>
-                      </div>
-                      <div className="packing-profile-summary-tags">
-                        {packingProfileSummaryParts.length > 0 ? (
-                          packingProfileSummaryParts.map((part) => (
-                            <span key={part} className="packing-profile-summary-tag">
-                              {part}
-                            </span>
-                          ))
-                        ) : (
-                          <span className="packing-profile-summary-empty">
-                            {lang === "en" ? "No personal preferences yet" : "Пока без личных параметров"}
-                          </span>
-                        )}
-                        {packingProfile.always_include_items.length > 0 && (
-                          <span
-                            className="packing-profile-summary-tag accent"
-                            title={packingProfile.always_include_items.join(", ")}
-                          >
-                            {lang === "en"
-                              ? `+${packingProfile.always_include_items.length} base items`
-                              : `+${packingProfile.always_include_items.length} базовых вещей`}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  {user && (
-                    <div className="collaborator-picker">
-                      <div className="collaborator-picker-panel home-setup-card">
-                        <div className="home-setup-card-head">
-                          <div className="home-setup-card-copy">
-                            <span className="home-setup-card-kicker">
-                              {lang === "en" ? "Optional" : "По желанию"}
-                            </span>
-                            <span className="home-setup-card-title">
-                              {lang === "en" ? "Collaborative checklist" : "Совместный чеклист"}
-                            </span>
-                          </div>
-                          {selectedCollaborators.length > 0 && (
-                            <span className="home-setup-card-counter">
-                              {lang === "en"
-                                ? `${selectedCollaborators.length} selected`
-                                : `${selectedCollaborators.length} выбрано`}
-                            </span>
-                          )}
-                        </div>
-                        {selectedCollaborators.length > 0 && (
-                          <div className="collaborator-chip-list">
-                            {selectedCollaborators.map((person) => (
-                              <button
-                                key={person.id}
-                                type="button"
-                                className="collaborator-chip"
-                                onClick={() => removeCollaborator(person.id)}
-                                title={lang === "en" ? "Remove" : "Убрать"}
-                              >
-                                <span className="collaborator-chip-avatar">
-                                  {person.avatar ? (
-                                    <img src={person.avatar} alt={person.username} />
-                                  ) : (
-                                    person.username.charAt(0).toUpperCase()
-                                  )}
-                                </span>
-                                <span className="collaborator-chip-name">{person.username}</span>
-                                <span className="collaborator-chip-remove">×</span>
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                        <div className="collaborator-search-shell">
-                          <input
-                            type="text"
-                            className="collaborator-search-input"
-                            value={collaboratorQuery}
-                            onChange={(e) => setCollaboratorQuery(e.target.value)}
-                            placeholder={lang === "en" ? "Find user by username" : "Добавить пользователя по нику"}
-                          />
-                          {collaboratorResults.length > 0 && (
-                            <div className="collaborator-search-results">
-                              {collaboratorResults.map((person) => (
-                                <button
-                                  key={person.id}
-                                  type="button"
-                                  className="collaborator-search-item"
-                                  onClick={() => addCollaborator(person)}
-                                >
-                                  <span className="collaborator-search-avatar">
-                                    {person.avatar ? (
-                                      <img src={person.avatar} alt={person.username} />
-                                    ) : (
-                                      person.username.charAt(0).toUpperCase()
-                                    )}
-                                  </span>
-                                  <span className="collaborator-search-copy">
-                                    <strong>{person.username}</strong>
-                                    {person.bio && <span>{person.bio}</span>}
-                                  </span>
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  )}
 
                   <div className="form-field generate-field">
                     <button
@@ -3620,38 +7345,23 @@ const App = ({ page }) => {
               </>
             )}
 
-            {error && <div className="error-message">{error}</div>}
+            {error && !showChecklistErrorState && <div className="error-message">{error}</div>}
 
             {result && (
               <div className="results-section">
                 <h2 className="checklist-header">
                   <div className="checklist-title-group">
-                    <span className="checklist-city-name">{result.city}</span>
+                    <span className="checklist-city-name">{translatePlaceLabel(result.city, lang)}</span>
                     <span className="checklist-dates">
-                      {(() => {
-                        const renderPart = (dateStr) => {
-                          if (!dateStr) return null;
-                          const d = new Date(dateStr);
-                          const formatted = d.toLocaleDateString("ru-RU", { day: 'numeric', month: 'long' });
-                          const match = formatted.match(/^(\d+)\s+(.+)$/);
-                          if (match) {
-                            return <><span className="date-num">{match[1]}</span> {match[2]}</>;
-                          }
-                          return formatted;
-                        };
-                        return (
-                          <>
-                            {renderPart(result.start_date || destinations[0]?.dates?.start)}
-                            {" — "}
-                            {renderPart(result.end_date || destinations[destinations.length - 1]?.dates?.end)}
-                          </>
-                        );
-                      })()}
+                      {renderChecklistHeaderDate(result.start_date || destinations[0]?.dates?.start, lang)}
+                      {" — "}
+                      {renderChecklistHeaderDate(result.end_date || destinations[destinations.length - 1]?.dates?.end, lang)}
                     </span>
                   </div>
                   {result.user_id === user?.id && (
                     <button
 	                      className="invite-action-btn"
+                        disabled={isOffline}
 	                      onClick={async () => {
 	                        setInviteBusyIds([]);
 	                        setShowInviteModal(true);
@@ -3674,11 +7384,15 @@ const App = ({ page }) => {
                           setInviteToken(result.invite_token);
                         }
                       }}
-                    >
-                      + Пригласить
-                    </button>
+                    >{`+ ${lang === "en" ? "Invite" : "Пригласить"}`}</button>
                   )}
                 </h2>
+
+                {checklistSyncBadge && (
+                  <div className={`checklist-sync-badge ${checklistSyncBadge.tone}`}>
+                    {checklistSyncBadge.text}
+                  </div>
+                )}
 
                 {(savedSlug || id) && (result.user_id === user?.id || (result.backpacks && result.backpacks.length > 0)) && (
                   <div className="baggage-panel">
@@ -3692,14 +7406,14 @@ const App = ({ page }) => {
                               onClick={() => selectParticipant(participant.userId)}
                             >
                               <span className="participant-chip-avatar">
-                                {getInitial(participant.isCurrentUser ? "Я" : participant.username)}
+                                {participant.isChild ? getInitial(participant.username) : getInitial(participant.isCurrentUser ? (lang === "en" ? "Me" : "Я") : participant.username)}
                               </span>
                               <span className="participant-chip-body">
                                 <span className="participant-chip-name">
-                                  {participant.isCurrentUser ? "Я" : participant.username}
+                                  {participant.isChild ? participant.username : participant.isCurrentUser ? (lang === "en" ? "Me" : "Я") : participant.username}
                                 </span>
                                 <span className="participant-chip-meta">
-                                  {participant.baggage.length} багажа • {getParticipantVisibleItemCount(participant)} вещей
+                                  {formatBaggageSummary(participant.baggage.length, getParticipantVisibleItemCount(participant), lang)}
                                 </span>
                               </span>
                             </button>
@@ -3713,10 +7427,12 @@ const App = ({ page }) => {
                         <div className="baggage-panel-header">
                           <div>
                             <div className="baggage-panel-title">
-                              {activeParticipant.isCurrentUser ? "Мой багаж" : `Багаж ${activeParticipant.username}`}
+                              {activeParticipant.isChild
+                                ? (lang === "en" ? `Child's baggage: ${activeParticipant.username}` : `Багаж ребенка: ${activeParticipant.username}`)
+                                : activeParticipant.isCurrentUser ? (lang === "en" ? "My baggage" : "Мой багаж") : (lang === "en" ? `${activeParticipant.username}'s baggage` : `Багаж ${activeParticipant.username}`)}
                             </div>
                             <div className="baggage-panel-subtitle">
-                              {activeParticipant.baggage.length} багажа • {getParticipantVisibleItemCount(activeParticipant)} вещей
+                              {formatBaggageSummary(activeParticipant.baggage.length, getParticipantVisibleItemCount(activeParticipant), lang)}
                             </div>
                           </div>
                           <div className="baggage-panel-actions">
@@ -3724,18 +7440,18 @@ const App = ({ page }) => {
                               <button
                                 className="baggage-create-btn secondary"
                                 onClick={() => openBaggageAccess(activeParticipant)}
-                                disabled={baggageBusy}
+                                disabled={baggageBusy || isOffline}
                               >
-                                Доступ
+                                {lang === "en" ? "Access" : "Доступ"}
                               </button>
                             )}
                             {canManageSelectedParticipant && !showBaggageCreator && (
                               <button
                                 className="baggage-create-btn"
                                 onClick={() => setShowBaggageCreator(true)}
-                                disabled={baggageBusy}
+                                disabled={baggageBusy || isOffline}
                               >
-                                + Багаж
+                                {lang === "en" ? "+ Baggage" : "+ Багаж"}
                               </button>
                             )}
                           </div>
@@ -3792,9 +7508,9 @@ const App = ({ page }) => {
                                       </div>
                                     ) : (
                                       <>
-                                        <span className="baggage-chip-name">{bp.name || "Багаж"}</span>
-                                        {bp.is_default && <span className="baggage-chip-badge">основной</span>}
-                                        {bp.user_id === user?.id && (
+                                        <span className="baggage-chip-name">{translateKnownBaggageName(bp.name || getBaggageKindLabel(bp, lang), lang)}</span>
+                                        {bp.is_default && <span className="baggage-chip-badge">{lang === "en" ? "primary" : "основной"}</span>}
+                                {canUserEditBaggage(bp, user?.id, result?.backpacks || [], result) && (
                                           <button
                                             type="button"
                                             className="baggage-rename-trigger"
@@ -3802,7 +7518,8 @@ const App = ({ page }) => {
                                               e.stopPropagation();
                                               startRenameBaggage(bp);
                                             }}
-                                            title="Переименовать багаж"
+                                            title={lang === "en" ? "Rename baggage" : "Переименовать багаж"}
+                                            disabled={isOffline}
                                           >
                                             ✎
                                           </button>
@@ -3811,45 +7528,46 @@ const App = ({ page }) => {
                                     )}
                                   </div>
                                   <span className="baggage-chip-meta">
-                                    {getBaggageMetaLine(bp)}
+                                    {getBaggageMetaLine(bp, lang)}
                                   </span>
                                 </div>
                               </div>
                               <div className="baggage-chip-actions">
-                                {bp.user_id === user?.id && (
+                                {canUserEditBaggage(bp, user?.id, result?.backpacks || [], result) && (
                                   <button
                                     className={`baggage-default-toggle ${bp.is_default ? "active" : ""}`}
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       handleSetDefaultBaggage(bp);
                                     }}
-                                    title={bp.is_default ? "Основной багаж" : "Сделать основным"}
-                                    disabled={baggageBusy || bp.is_default}
+                                    title={bp.is_default ? (lang === "en" ? "Primary baggage" : "Основной багаж") : (lang === "en" ? "Make primary" : "Сделать основным")}
+                                    disabled={baggageBusy || bp.is_default || isOffline}
                                   >
                                     <span className="baggage-default-toggle-dot" />
                                   </button>
                                 )}
-                                {bp.user_id === user?.id && (
+                                {canUserEditBaggage(bp, user?.id, result?.backpacks || [], result) && (
                                   <button
                                     className={`baggage-chip-action ${result.hidden_sections?.includes(`backpack:${bp.id}`) ? "hidden" : "visible"}`}
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       handleToggleSectionVisibility(`backpack:${bp.id}`);
                                     }}
-                                    title={result.hidden_sections?.includes(`backpack:${bp.id}`) ? "Скрыто от других" : "Видно всем"}
+                                    title={result.hidden_sections?.includes(`backpack:${bp.id}`) ? (lang === "en" ? "Hidden from others" : "Скрыто от других") : (lang === "en" ? "Visible to everyone" : "Видно всем")}
+                                    disabled={isOffline}
                                   >
                                     {result.hidden_sections?.includes(`backpack:${bp.id}`) ? <LockIcon style={{ marginRight: 0 }} /> : <UnlockIcon style={{ marginRight: 0 }} />}
                                   </button>
                                 )}
-                                {bp.user_id === user?.id && !bp.is_default && (
+                                {canUserEditBaggage(bp, user?.id, result?.backpacks || [], result) && !bp.is_default && (
                                   <button
                                     className="baggage-chip-delete"
                                     onClick={(e) => {
                                       e.stopPropagation();
                                       handleDeleteBaggage(bp);
                                     }}
-                                    title="Удалить багаж"
-                                    disabled={baggageBusy}
+                                    title={lang === "en" ? "Delete baggage" : "Удалить багаж"}
+                                    disabled={baggageBusy || isOffline}
                                   >
                                     ×
                                   </button>
@@ -3858,7 +7576,7 @@ const App = ({ page }) => {
                             </div>
                           )) : (
                             <div className="baggage-empty-hint">
-                              У этого участника пока нет отдельного багажа.
+                              {lang === "en" ? "This participant does not have separate baggage yet." : "У этого участника пока нет отдельного багажа."}
                             </div>
                           )}
                         </div>
@@ -3866,7 +7584,12 @@ const App = ({ page }) => {
                         {canManageSelectedParticipant && showBaggageCreator && (
                           <div className="baggage-creator">
                             <div className="baggage-creator-presets">
-                              {["Чемодан", "Ручная кладь", "Рюкзак"].map((preset) => (
+                              {[
+                                lang === "en" ? "Suitcase" : "Чемодан",
+                                lang === "en" ? "Carry-on" : "Ручная кладь",
+                                lang === "en" ? "Backpack" : "Рюкзак",
+                                lang === "en" ? "Hiking backpack" : "Походный рюкзак",
+                              ].map((preset) => (
                                 <button
                                   key={preset}
                                   className={`baggage-preset-chip ${newBaggageName === preset ? "active" : ""}`}
@@ -3883,7 +7606,7 @@ const App = ({ page }) => {
                                 type="text"
                                 value={newBaggageName}
                                 onChange={(e) => setNewBaggageName(e.target.value)}
-                                placeholder="Например: Чемодан"
+                                placeholder={lang === "en" ? "For example: Suitcase" : "Например: Чемодан"}
                                 onKeyDown={(e) => {
                                   if (e.key === "Enter") {
                                     handleCreateBaggage();
@@ -3896,7 +7619,7 @@ const App = ({ page }) => {
                                 onClick={handleCreateBaggage}
                                 disabled={baggageBusy || !newBaggageName.trim()}
                               >
-                                Создать
+                                {lang === "en" ? "Create" : "Создать"}
                               </button>
                               <button
                                 className="baggage-cancel-btn"
@@ -3906,7 +7629,7 @@ const App = ({ page }) => {
                                 }}
                                 disabled={baggageBusy}
                               >
-                                Отмена
+                                {lang === "en" ? "Cancel" : "Отмена"}
                               </button>
                             </div>
                           </div>
@@ -3924,7 +7647,7 @@ const App = ({ page }) => {
                     const isBackpacksHidden = result.hidden_sections?.includes('backpacks');
 
                     if (activeTab === 'shared' && isSharedHidden) {
-                      return <div className="section-restricted-msg"><LockIcon /> {result.user?.username || 'Владелец'} ограничил просмотр этого раздела</div>;
+                      return <div className="section-restricted-msg"><LockIcon /> {lang === "en" ? `${result.user?.username || "Owner"} restricted access to this section` : `${result.user?.username || "Владелец"} ограничил просмотр этого раздела`}</div>;
                     }
                     if (activeTab !== 'shared') {
                       const bp = result.backpacks?.find((entry) => entry.id.toString() === activeTab);
@@ -3935,7 +7658,7 @@ const App = ({ page }) => {
                           || bp.user_id === user?.id
                       );
                       if ((isBackpacksHidden && result.user_id !== user?.id) || !canViewThisBaggage) {
-                        return <div className="section-restricted-msg"><LockIcon /> {(bp?.user?.username || result.user?.username || 'Владелец')} ограничил просмотр этого багажа</div>;
+                        return <div className="section-restricted-msg"><LockIcon /> {lang === "en" ? `${bp?.user?.username || result.user?.username || "Owner"} restricted access to this baggage` : `${bp?.user?.username || result.user?.username || "Владелец"} ограничил просмотр этого багажа`}</div>;
                       }
                     }
 
@@ -3944,6 +7667,7 @@ const App = ({ page }) => {
                     let targetChecked = checkedItems;
                     let targetQuantities = normalizeQuantityMap(result.item_quantities || {});
                     let targetPackedQuantities = normalizePackedQuantityMap(result.packed_quantities || {});
+                    let targetItemCategories = normalizeItemCategoryMap(result.item_categories || {});
 
                     if (activeTab !== "shared" && result.backpacks) {
                       const bp = result.backpacks.find(b => b.id.toString() === activeTab);
@@ -3958,6 +7682,7 @@ const App = ({ page }) => {
                         );
                         targetQuantities = normalizeQuantityMap(bp.item_quantities || {});
                         targetPackedQuantities = normalizePackedQuantityMap(bp.packed_quantities || {});
+                        targetItemCategories = normalizeItemCategoryMap(bp.item_categories || {});
                       }
                     }
 
@@ -3972,24 +7697,26 @@ const App = ({ page }) => {
                       items = items.filter(item => !allBackpackItems.has(item));
                     }
 
-                    const perCol = items.length ? Math.ceil(items.length / checklistColumns) : 0;
-                    const cols = items.length
-                      ? Array.from({ length: checklistColumns }, (_, i) => items.slice(i * perCol, (i + 1) * perCol))
-                      : [];
+                    const categorySections = buildChecklistCategorySections(items, targetItemCategories, lang);
+                    const checklistColumnCount = viewportWidth <= 600 ? 1 : viewportWidth <= 900 ? 2 : 3;
+                    const categoryColumns = buildChecklistColumns(categorySections, checklistColumnCount);
                     return (
                       <div className="checklist-multicolumn">
-                        {items.length === 0 && <div className="empty-state" style={{ padding: "20px", color: "#888" }}>Список пуст.</div>}
-                        {cols.map((col, idx) => (
-                          <div className="checklist-category" key={idx}>
-                            <div className="checklist">
-                              {col.map((item) => (
+                        {items.length === 0 && <div className="empty-state" style={{ padding: "20px", color: "#888" }}>{lang === "en" ? "The list is empty." : "Список пуст."}</div>}
+                        {items.length > 0 && categoryColumns.map((column, columnIndex) => (
+                          <div className="checklist-column" key={`checklist-column-${columnIndex}`}>
+                            {column.map((section) => (
+                              <div className="checklist-category checklist-category-group" key={section.key || section.category}>
+                                {!section.isContinuation && <div className="checklist-category-title">{section.category}</div>}
+                                <div className="checklist">
+                                  {section.items.map((item) => (
                                 (() => {
                                   const quantity = getItemQuantity(targetQuantities, item);
                                   const packedQuantity = getPackedQuantity(targetPackedQuantities, item);
                                   const packedState = `${packedQuantity}/${quantity}`;
-                                  const canMoveItem = activeTab === "shared"
+                                  const canMoveItem = !isOffline && (activeTab === "shared"
                                     ? result?.backpacks?.length > 0
-                                    : result?.backpacks?.length > 1;
+                                    : result?.backpacks?.length > 1);
                                   return (
                                 <label
                                   key={item}
@@ -4000,10 +7727,10 @@ const App = ({ page }) => {
                                     className="checklist-checkbox"
                                     checked={targetChecked[item] || false}
                                     onChange={() => handleCheck(item)}
-                                    disabled={!canEditCurrentSection}
+                                    disabled={!canMutateCurrentSection}
                                   />
                                     <span className="checklist-item-copy">
-                                    <span className="checklist-item-text">{item}</span>
+                                    <span className="checklist-item-text">{translateChecklistItemLabel(item, lang, activeTab === "shared" ? result?.item_translations || {} : (result?.backpacks?.find((entry) => entry.id.toString() === activeTab)?.item_translations || {}))}</span>
                                     {isMobileChecklistView && (
                                       <span className={`checklist-item-meta${packedQuantity >= quantity ? " complete" : packedQuantity > 0 ? " partial" : ""}`}>
                                         {packedState}
@@ -4012,7 +7739,7 @@ const App = ({ page }) => {
                                   </span>
                                   <span className="item-right-controls">
                                     {!isMobileChecklistView && (
-                                      canEditCurrentSection ? (
+                                      canMutateCurrentSection ? (
                                         <button
                                           type="button"
                                           className={`item-progress-badge item-progress-trigger${packedQuantity >= quantity ? " complete" : packedQuantity > 0 ? " partial" : ""}`}
@@ -4030,7 +7757,7 @@ const App = ({ page }) => {
                                         </span>
                                       )
                                     )}
-                                    {canEditCurrentSection && (
+                                    {canMutateCurrentSection && (
                                       isMobileChecklistView ? (
                                         <span className="mobile-item-menu-wrap">
                                           <button
@@ -4097,7 +7824,7 @@ const App = ({ page }) => {
                                       )
                                     )}
                                   </span>
-                                  {!isMobileChecklistView && canEditCurrentSection && quantityEditor?.item === item && quantityEditor?.sectionKey === activeTab && (
+                                  {!isMobileChecklistView && canMutateCurrentSection && quantityEditor?.item === item && quantityEditor?.sectionKey === activeTab && (
                                     <div
                                       className="quantity-editor-popover"
                                       onClick={(e) => {
@@ -4227,14 +7954,16 @@ const App = ({ page }) => {
                                 </label>
                                   );
                                 })()
-                              ))}
-                            </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
                           </div>
                         ))}
-                </div>
-              );
+                      </div>
+                    );
             })()}
-            {isMobileChecklistView && canEditCurrentSection && quantityEditor?.sectionKey === activeTab && (
+            {isMobileChecklistView && canMutateCurrentSection && quantityEditor?.sectionKey === activeTab && (
               <div
                 className="mobile-quantity-sheet-backdrop"
                 onClick={() => setQuantityEditor(null)}
@@ -4353,25 +8082,43 @@ const App = ({ page }) => {
             )}
 
                   <div className="checklist-actions">
-                    {canEditCurrentSection && (
+                    {canMutateCurrentSection && (
                       <>
-                        <button className="action-btn" onClick={resetChecklist}>Сбросить отметки</button>
-                        <button className="action-btn" onClick={() => setAddItemMode(v => !v)}>
-                          {addItemMode ? "Отмена" : "+ Добавить вещь"}
+                        <button className="action-btn" onClick={resetChecklist}>{t.reset}</button>
+                        <button className="action-btn" onClick={toggleAddItemMode}>
+                          {addItemMode ? t.cancel : t.addItem}
                         </button>
                         {addItemMode && (
-                          <>
+                          <div className="add-item-form">
                             <input
                               className="add-item-input"
                               type="text"
                               value={newItem}
                               onChange={e => setNewItem(e.target.value)}
-                              placeholder="Новая вещь"
+                              placeholder={t.newItem}
                               onKeyDown={e => { if (e.key === "Enter") handleAddItem(); }}
                               autoFocus
                             />
+                            <select
+                              className="add-item-select"
+                              value={newItemCategory}
+                              onChange={(e) => setNewItemCategory(e.target.value)}
+                            >
+                              <option value="">{lang === "en" ? "Auto category" : "Автокатегория"}</option>
+                              {(CHECKLIST_CATEGORY_OPTIONS[lang] || CHECKLIST_CATEGORY_OPTIONS.ru).map((category) => (
+                                <option key={category} value={category}>{category}</option>
+                              ))}
+                            </select>
+                            <input
+                              className="add-item-quantity-input"
+                              type="number"
+                              min="1"
+                              value={newItemQuantity}
+                              onChange={(e) => setNewItemQuantity(Math.max(1, Number(e.target.value) || 1))}
+                              onKeyDown={e => { if (e.key === "Enter") handleAddItem(); }}
+                            />
                             <button className="action-btn primary" onClick={handleAddItem}>OK</button>
-                          </>
+                          </div>
                         )}
                       </>
                     )}
@@ -4421,16 +8168,16 @@ const App = ({ page }) => {
 
                                         <img
                                           src={`https://openweathermap.org/img/wn/${day.icon}@2x.png`}
-                                          alt={day.condition}
+                                          alt={translateWeatherConditionLabel(day.condition, lang)}
                                           className="forecast-icon"
                                         />
-                                        <div className="forecast-conditions">{day.condition}</div>
+                                        <div className="forecast-conditions">{translateWeatherConditionLabel(day.condition, lang)}</div>
                                         <div className="forecast-temp">
                                           {day.temp_min.toFixed(1)}° / {day.temp_max.toFixed(1)}°C
                                         </div>
                                         <div className="forecast-details">
-                                          {day.humidity != null && <span title="Влажность" style={{ display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap' }}><DropletIcon style={{ width: '14px', height: '14px', marginRight: '3px' }} /> {day.humidity}%</span>}
-                                          {day.wind_speed != null && <span title="Ветер" style={{ display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap' }}><WindIcon style={{ width: '14px', height: '14px', marginRight: '3px' }} /> {day.wind_speed.toFixed(0)} {t.kmh}</span>}
+                                          {day.humidity != null && <span title={t.humidity} style={{ display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap' }}><DropletIcon style={{ width: '14px', height: '14px', marginRight: '3px' }} /> {day.humidity}%</span>}
+                                          {day.wind_speed != null && <span title={t.wind} style={{ display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap' }}><WindIcon style={{ width: '14px', height: '14px', marginRight: '3px' }} /> {day.wind_speed.toFixed(0)} {t.kmh}</span>}
                                         </div>
                                       </div>
                                     ))}
@@ -4458,9 +8205,9 @@ const App = ({ page }) => {
                             <div className="timeline-city">{typeof dest.city === "object" ? (dest.city?.name || dest.city?.fullName || "...") : (dest.city || "...")}</div>
                             {dest.dates?.start && (
                               <div className="timeline-dates">
-                                {new Date(dest.dates.start).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}
+                                {new Date(dest.dates.start).toLocaleDateString(formatChecklistLocale(lang), { day: "numeric", month: "short" })}
                                 {" — "}
-                                {new Date(dest.dates.end).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}
+                                {new Date(dest.dates.end).toLocaleDateString(formatChecklistLocale(lang), { day: "numeric", month: "short" })}
                               </div>
                             )}
                           </div>
@@ -4475,7 +8222,7 @@ const App = ({ page }) => {
                   <div className="itinerary-wrapper">
                     {!isChecklistParticipant && result.hidden_sections?.includes('itinerary') ? (
                       <div className="section-restricted-msg" style={{ background: 'var(--bg-secondary)' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}><LockIcon /> {result.user?.username || 'Владелец'} ограничил просмотр плана поездки</div>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}><LockIcon /> {lang === "en" ? `${result.user?.username || "Owner"} restricted access to the itinerary` : `${result.user?.username || "Владелец"} ограничил просмотр плана поездки`}</div>
                       </div>
                     ) : (
                       <ItinerarySection
@@ -4488,6 +8235,42 @@ const App = ({ page }) => {
                         hiddenSections={result.hidden_sections}
                         onToggleVisibility={handleToggleSectionVisibility}
                         requestConfirm={requestConfirm}
+                        highlightedEventIds={highlightedItineraryEventIds}
+                      />
+                    )}
+                  </div>
+                )}
+
+                {result && !(!isChecklistParticipant && result.hidden_sections?.includes('itinerary')) && (
+                  <TripMapSection
+                    checklist={result}
+                    lang={lang}
+                    compact={isMobileChecklistView}
+                    highlightedEventIds={highlightedItineraryEventIds}
+                    theme={theme}
+                  />
+                )}
+
+                {result && savedSlug && (
+                  <div className="expenses-wrapper">
+                    {!isChecklistParticipant && result.hidden_sections?.includes('expenses') ? (
+                      <div className="section-restricted-msg" style={{ background: 'var(--bg-secondary)' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}><LockIcon /> {lang === "en" ? `${result.user?.username || "Owner"} restricted access to expenses` : `${result.user?.username || "Владелец"} ограничил просмотр трат`}</div>
+                      </div>
+                    ) : (
+                      <ExpensesSection
+                        checklist={result}
+                        lang={lang}
+                        slug={savedSlug}
+                        token={token}
+                        canEdit={Boolean(isChecklistParticipant && token)}
+                        realOwnerId={result.user_id}
+                        currentUserId={user?.id}
+                        hiddenSections={result.hidden_sections}
+                        onToggleVisibility={handleToggleSectionVisibility}
+                        onChecklistUpdated={handleChecklistUpdated}
+                        requestConfirm={requestConfirm}
+                        isOffline={isOffline}
                       />
                     )}
                   </div>
@@ -4507,11 +8290,11 @@ const App = ({ page }) => {
 
                 {/* Attractions */}
                 {result?.city && (
-                  <AttractionsSection city={result.city} lang={lang} compact={isMobileChecklistView} />
+                  <AttractionsSection city={result.city} lang={lang} compact={isMobileChecklistView} user={user} token={token} />
                 )}
 
                 {/* Flights — only for cities with plane transport */}
-                {(() => {
+                {isChecklistParticipant && (() => {
                   if (!result || !result.city) return null;
                   const allCities = result.city.split(" + ").map(c => c.trim());
                   const transports = result.transports || [];
@@ -4539,17 +8322,18 @@ const App = ({ page }) => {
                       origin={originCity?.fullName || originCity || result.origin_city || ""}
                       lang={lang}
                       compact={isMobileChecklistView}
+                      tripProfile={result.trip_profile || null}
                     />
                   );
                 })()}
 
                 {/* Hotels */}
-                {result && result.city && (
-                  <HotelsSection key={"ht-" + result.city} city={result.city} startDate={result.start_date || destinations[0]?.dates?.start} endDate={result.end_date || destinations[destinations.length - 1]?.dates?.end} lang={lang} compact={isMobileChecklistView} />
+                {isChecklistParticipant && result && result.city && !result.trip_profile?.accommodation_selected && (
+                  <HotelsSection key={"ht-" + result.city} city={result.city} startDate={result.start_date || destinations[0]?.dates?.start} endDate={result.end_date || destinations[destinations.length - 1]?.dates?.end} lang={lang} compact={isMobileChecklistView} tripProfile={result.trip_profile || null} />
                 )}
 
                 {/* eSIM */}
-                {result && result.city && (
+                {isChecklistParticipant && result && result.city && (
                   <EsimSection key={"esim-" + result.city} city={result.city} lang={lang} compact={isMobileChecklistView} />
                 )}
 
@@ -4561,13 +8345,13 @@ const App = ({ page }) => {
 
       {showPackingModal && (
         <div className="modal-overlay" onClick={() => {
-          setPackingProfileDraft(normalizePackingProfile(user?.packing_profile || DEFAULT_PACKING_PROFILE));
+          setPackingProfileDraft(packingProfile);
           setNewBaseItem("");
           setShowPackingModal(false);
         }}>
           <div className="modal-content packing-settings-modal" onClick={(e) => e.stopPropagation()}>
             <button className="modal-close" onClick={() => {
-              setPackingProfileDraft(normalizePackingProfile(user?.packing_profile || DEFAULT_PACKING_PROFILE));
+              setPackingProfileDraft(packingProfile);
               setNewBaseItem("");
               setShowPackingModal(false);
             }}>&times;</button>
@@ -4577,26 +8361,6 @@ const App = ({ page }) => {
                 ? "These preferences are applied when a new checklist is generated from the home page."
                 : "Эти параметры будут использоваться при создании нового чеклиста с главной страницы."}
             </p>
-
-            <div className="packing-settings-group">
-              <span className="packing-settings-label">{lang === "en" ? "Gender" : "Пол"}</span>
-              <div className="packing-settings-segmented">
-                {[
-                  { id: "unspecified", label: lang === "en" ? "Not specified" : "Не указан" },
-                  { id: "male", label: lang === "en" ? "Male" : "Мужской" },
-                  { id: "female", label: lang === "en" ? "Female" : "Женский" },
-                ].map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className={`packing-settings-pill ${packingProfileDraft.gender === item.id ? "active" : ""}`}
-                    onClick={() => setPackingProfileDraft((prev) => ({ ...prev, gender: item.id }))}
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-            </div>
 
             <div className="packing-settings-group">
               <span className="packing-settings-label">{lang === "en" ? "Extra factors" : "Дополнительные факторы"}</span>
@@ -4674,7 +8438,7 @@ const App = ({ page }) => {
                 type="button"
                 className="btn-secondary"
                 onClick={() => {
-                  setPackingProfileDraft(normalizePackingProfile(user?.packing_profile || DEFAULT_PACKING_PROFILE));
+                  setPackingProfileDraft(packingProfile);
                   setNewBaseItem("");
                   setShowPackingModal(false);
                 }}
@@ -4686,6 +8450,83 @@ const App = ({ page }) => {
                 {packingProfileSaving ? "..." : (lang === "en" ? "Save" : "Сохранить")}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {showBaseItemsModal && (
+        <div className="modal-overlay" onClick={() => setShowBaseItemsModal(false)}>
+          <div className="modal-content base-items-modal" onClick={(e) => e.stopPropagation()}>
+            <button type="button" className="modal-close" onClick={() => setShowBaseItemsModal(false)}>&times;</button>
+            <h3>{lang === "en" ? "Base items" : "Базовые вещи"}</h3>
+            <p className="packing-settings-copy">
+              {lang === "en"
+                ? "These items will be added to every generated checklist."
+                : "Эти вещи будут добавляться в каждый новый чеклист."}
+            </p>
+
+            {packingProfile.always_include_items.length > 0 ? (
+              <div className="packing-base-items-list modal-list">
+                {packingProfile.always_include_items.map((item) => (
+                  <button
+                    key={item}
+                    type="button"
+                    className="packing-base-item-chip"
+                    onClick={() => handleRemoveBaseItem(item)}
+                    title={lang === "en" ? "Remove item" : "Убрать вещь"}
+                  >
+                    <span>{item}</span>
+                    <span>×</span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="packing-base-items-empty">
+                {lang === "en" ? "No base items yet" : "Пока нет базовых вещей"}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {showCollaboratorsModal && (
+        <div className="modal-overlay" onClick={() => setShowCollaboratorsModal(false)}>
+          <div className="modal-content base-items-modal collaborators-modal" onClick={(e) => e.stopPropagation()}>
+            <button type="button" className="modal-close" onClick={() => setShowCollaboratorsModal(false)}>&times;</button>
+            <h3>{lang === "en" ? "Selected users" : "Выбранные пользователи"}</h3>
+            <p className="packing-settings-copy">
+              {lang === "en"
+                ? "These users will be invited to the collaborative checklist."
+                : "Эти пользователи будут приглашены в совместный чеклист."}
+            </p>
+
+            {selectedCollaborators.length > 0 ? (
+              <div className="collaborator-chip-list modal-list">
+                {selectedCollaborators.map((person) => (
+                  <button
+                    key={person.id}
+                    type="button"
+                    className="collaborator-chip"
+                    onClick={() => removeCollaborator(person.id)}
+                    title={lang === "en" ? "Remove" : "Убрать"}
+                  >
+                    <span className="collaborator-chip-avatar">
+                      {person.avatar ? (
+                        <img src={person.avatar} alt={person.username} />
+                      ) : (
+                        person.username.charAt(0).toUpperCase()
+                      )}
+                    </span>
+                    <span className="collaborator-chip-name">{person.username}</span>
+                    <span className="collaborator-chip-remove">×</span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="packing-base-items-empty">
+                {lang === "en" ? "No selected users yet" : "Пока нет выбранных пользователей"}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -4788,13 +8629,15 @@ const App = ({ page }) => {
         <div className="modal-overlay modal-overlay-lifted" onClick={() => setAccessOwner(null)}>
           <div className="modal-content baggage-access-modal" onClick={(e) => e.stopPropagation()}>
             <button className="modal-close" onClick={() => setAccessOwner(null)}>&times;</button>
-            <h3>Доступ к багажу</h3>
+            <h3>{lang === "en" ? "Baggage access" : "Доступ к багажу"}</h3>
             <p className="invite-modal-desc">
-              Выбери, кто сможет отмечать, добавлять и удалять вещи во всем разделе «{accessOwner.displayName}».
+              {lang === "en"
+                ? `Choose who can check off, add, and remove items in the entire "${accessOwner.displayName}" section.`
+                : `Выбери, кто сможет отмечать, добавлять и удалять вещи во всем разделе «${accessOwner.displayName}».`}
             </p>
             <div className="baggage-access-list">
               {baggageParticipants
-                .filter((participant) => participant.userId !== accessOwner.userId)
+                .filter((participant) => !participant.isChild && participant.userId !== accessOwner.userId)
                 .map((participant) => (
                   <label key={participant.userId} className={`baggage-access-item ${accessEditorIds.includes(participant.userId) ? "active" : ""}`}>
                     <input
@@ -4805,18 +8648,18 @@ const App = ({ page }) => {
                     />
                     <span className="baggage-access-check" aria-hidden="true" />
                     <span className="baggage-access-avatar">
-                      {getInitial(participant.isCurrentUser ? "Я" : participant.username)}
+                      {getInitial(participant.isCurrentUser ? (lang === "en" ? "Me" : "Я") : participant.username)}
                     </span>
                     <span className="baggage-access-copy">
-                      <strong>{participant.isCurrentUser ? "Я" : participant.username}</strong>
-                      <span>{participant.baggage.length} багажа</span>
+                      <strong>{participant.isCurrentUser ? (lang === "en" ? "Me" : "Я") : participant.username}</strong>
+                      <span>{formatBaggageCount(participant.baggage.length, lang)}</span>
                     </span>
                   </label>
                 ))}
             </div>
             <div className="baggage-access-actions">
-              <button className="action-btn" onClick={() => setAccessOwner(null)} disabled={baggageBusy}>Закрыть</button>
-              <button className="action-btn primary" onClick={handleSaveBaggageAccess} disabled={baggageBusy}>Сохранить доступ</button>
+              <button className="action-btn" onClick={() => setAccessOwner(null)} disabled={baggageBusy}>{lang === "en" ? "Close" : "Закрыть"}</button>
+              <button className="action-btn primary" onClick={handleSaveBaggageAccess} disabled={baggageBusy}>{lang === "en" ? "Save access" : "Сохранить доступ"}</button>
             </div>
           </div>
         </div>
@@ -4826,9 +8669,9 @@ const App = ({ page }) => {
         <div className="modal-overlay modal-overlay-lifted" onClick={() => setShowInviteModal(false)}>
           <div className="modal-content" onClick={e => e.stopPropagation()}>
             <button className="modal-close" onClick={() => setShowInviteModal(false)}>&times;</button>
-            <h3 style={{ marginTop: 0 }}>🔗 Пригласить в путешествие</h3>
+            <h3 style={{ marginTop: 0 }}>{lang === "en" ? "🔗 Invite to trip" : "🔗 Пригласить в путешествие"}</h3>
 
-            <p className="invite-modal-desc">Ваши подписчики:</p>
+            <p className="invite-modal-desc">{lang === "en" ? "Your followers:" : "Ваши подписчики:"}</p>
             <div className="invite-followers-list">
               {followers.length > 0 ? followers.map(f => {
                 const followerId = normalizeUserId(f.id);
@@ -4892,21 +8735,47 @@ const App = ({ page }) => {
 
             <p className="invite-modal-desc" style={{ marginTop: "25px" }}>Или отправьте им ссылку для присоединения к чеклисту:</p>
             {inviteToken ? (
-              <div className="invite-link-box">
-                <input
-                  type="text"
-                  readOnly
-                  value={`${window.location.origin}/join/${inviteToken}`}
-                  className="invite-input"
-                />
-                <button
-                  className="copy-btn action-btn primary"
-                  onClick={() => {
-                    navigator.clipboard.writeText(`${window.location.origin}/join/${inviteToken}`);
-                    alert("Ссылка скопирована!");
-                  }}
-                >Копировать</button>
-              </div>
+              <>
+                <div className="invite-link-box">
+                  <input
+                    type="text"
+                    readOnly
+                    value={`${window.location.origin}/join/${inviteToken}`}
+                    className="invite-input"
+                  />
+                  <button
+                    className="copy-btn action-btn primary"
+                    onClick={() => {
+                      navigator.clipboard.writeText(`${window.location.origin}/join/${inviteToken}`);
+                      alert("Ссылка скопирована!");
+                    }}
+                  >Копировать</button>
+                </div>
+                {normalizeTripParty(result?.trip_profile || {}).child_profiles.filter((profile) => !normalizeUserId(profile.linked_user_id)).length > 0 && (
+                  <div className="child-invite-links">
+                    <p className="invite-modal-desc">Если ребёнок зайдёт сам, отправьте ему персональную ссылку:</p>
+                    {normalizeTripParty(result?.trip_profile || {}).child_profiles
+                      .filter((profile) => !normalizeUserId(profile.linked_user_id))
+                      .map((profile, index) => {
+                        const childLink = `${window.location.origin}/join/${inviteToken}?child_profile_id=${encodeURIComponent(profile.id)}`;
+                        return (
+                          <div key={profile.id} className="child-invite-row">
+                            <span>{getChildProfileDisplayName(profile, lang, index)}</span>
+                            <button
+                              className="copy-btn action-btn"
+                              onClick={() => {
+                                navigator.clipboard.writeText(childLink);
+                                alert("Ссылка скопирована!");
+                              }}
+                            >
+                              Копировать
+                            </button>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </>
             ) : (
               <div className="loading-spinner" style={{ margin: "20px auto" }}></div>
             )}
@@ -4916,17 +8785,27 @@ const App = ({ page }) => {
 
       {/* AI Assistant Chat Widget */}
       {result && (
-        <AIChatWidget
-          city={result.destinations?.[0]?.city || result.city}
-          startDate={result.destinations?.[0]?.start_date || result.start_date}
-          endDate={result.destinations?.[result.destinations?.length - 1]?.end_date || result.end_date}
-          avgTemp={result.avg_temp}
-          tripType={result.trip_type}
-          checklistSlug={savedSlug || result.slug}
-          token={token}
-          onChecklistUpdated={handleChecklistUpdated}
-          language={lang}
-        />
+        <Suspense fallback={null}>
+          <AIChatWidget
+            city={result.destinations?.[0]?.city || result.city}
+            startDate={result.destinations?.[0]?.start_date || result.start_date}
+            endDate={result.destinations?.[result.destinations?.length - 1]?.end_date || result.end_date}
+            avgTemp={result.avg_temp}
+            tripType={result.trip_type || result.trip_profile?.trip_type || options.trip_type}
+            tripProfile={result.trip_profile || null}
+            checklistSlug={savedSlug || result.slug}
+            token={token}
+            onChecklistUpdated={handleChecklistUpdated}
+            onPlanApplied={handlePlanApplied}
+            language={lang}
+            backpacks={result.backpacks || []}
+            hiddenSections={result.hidden_sections || []}
+            localCurrency={getExpenseLocalCurrency(result)}
+            isAdmin={Boolean(user?.is_admin)}
+            currentUserId={user?.id}
+            events={result.events || []}
+          />
+        </Suspense>
       )}
 
       <ConfirmDialog
@@ -4939,6 +8818,22 @@ const App = ({ page }) => {
         onConfirm={() => closeConfirmDialog(true)}
         onCancel={() => closeConfirmDialog(false)}
       />
+      {appNotice && (
+        <div className={`app-notice app-notice-${appNotice.tone}`} role="status" aria-live="polite">
+          <div className="app-notice-copy">
+            <div className="app-notice-title">{lang === "en" ? "Notice" : "Уведомление"}</div>
+            <div className="app-notice-message">{appNotice.message}</div>
+          </div>
+          <button
+            type="button"
+            className="app-notice-close"
+            onClick={() => setAppNotice(null)}
+            aria-label={lang === "en" ? "Close notification" : "Закрыть уведомление"}
+          >
+            ×
+          </button>
+        </div>
+      )}
     </>
   );
 };

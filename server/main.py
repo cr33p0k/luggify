@@ -1,5 +1,6 @@
 import os
 import re
+import json
 from datetime import datetime, timedelta, date
 from urllib.parse import quote as url_quote, urlparse, parse_qs
 
@@ -19,13 +20,25 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import selectinload
 import crud, models, schemas
 from database import SessionLocal, async_engine, get_db
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from auth import (
     verify_password, create_access_token,
     get_current_user, require_current_user
 )
 from telegram_auth import TelegramAuthError, parse_telegram_auth_payload
 from telegram_link import create_telegram_link_token
+from packing_logic import (
+    build_packing_recommendations,
+    build_trip_profile,
+    get_default_baggage_kinds,
+    normalize_trip_profile as normalize_packing_trip_profile,
+    prepare_trip_profile_for_segment,
+)
+from trip_context import build_ad_hoc_trip_context, build_trip_context
+from itinerary_logic import estimate_travel_buffer_minutes, haversine_distance_km
+from currency_rates import convert_currency_amount, get_rub_rate, normalize_currency
+from places_service import search_nearby_restaurants
+from assistant_plan_service import apply_plan_proposals_to_checklist
 
 
 def _parse_csv_env(name: str, defaults: list[str]) -> list[str]:
@@ -39,7 +52,9 @@ OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 OPEN_METEO_HISTORICAL_URL = "https://archive-api.open-meteo.com/v1/archive"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 LOCATION_COUNTRY_CACHE: dict[str, Optional[str]] = {}
-from translations import WMO_CODES, get_item, get_category_map
+LOCATION_COORDS_CACHE: dict[str, tuple[float, float] | None] = {}
+from translations import WMO_CODES, get_item, get_category_map, translate_known_item_label
+from ai_service import DEFAULT_URL
 
 default_cors_origins = [
     "http://localhost:5173",
@@ -69,11 +84,13 @@ app.add_middleware(
 def build_trip_review_payload(review: models.TripReview) -> dict:
     checklist = getattr(review, "checklist", None)
     author = review.user
+    photos = _decode_trip_review_photos(review.photo)
     return {
         "id": review.id,
         "rating": review.rating,
         "text": review.text,
-        "photo": review.photo,
+        "photo": photos[0] if photos else None,
+        "photos": photos,
         "created_at": review.created_at,
         "updated_at": review.updated_at,
         "user": {
@@ -96,6 +113,48 @@ def build_trip_review_payload(review: models.TripReview) -> dict:
         "checklist_start_date": checklist.start_date if checklist else None,
         "checklist_end_date": checklist.end_date if checklist else None,
     }
+
+
+def _decode_trip_review_photos(value: str | None) -> list[str]:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return []
+    if raw_value.startswith("["):
+        try:
+            parsed = json.loads(raw_value)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, list):
+            normalized: list[str] = []
+            for raw_item in parsed:
+                photo = str(raw_item or "").strip()
+                if photo and photo not in normalized:
+                    normalized.append(photo)
+            return normalized
+    return [raw_value]
+
+
+def _normalize_trip_review_photos(photo: str | None = None, photos: list[str] | None = None) -> list[str]:
+    normalized: list[str] = []
+    for raw_photo in ([photo] if photo else []) + list(photos or []):
+        value = str(raw_photo or "").strip()
+        if not value:
+            continue
+        if not (value.startswith("data:image") or value.startswith("http")):
+            raise HTTPException(status_code=400, detail="Поддерживаются только изображения или ссылки на них")
+        if value not in normalized:
+            normalized.append(value)
+        if len(normalized) >= 8:
+            break
+    return normalized
+
+
+def _encode_trip_review_photos(photos: list[str]) -> str | None:
+    if not photos:
+        return None
+    if len(photos) == 1:
+        return photos[0]
+    return json.dumps(photos, ensure_ascii=False)
 
 
 def _split_location_segments(value: str | None) -> list[str]:
@@ -224,6 +283,8 @@ def is_checklist_participant(checklist: models.Checklist, user_id: int) -> bool:
         return False
     if checklist.user_id == user_id:
         return True
+    if get_linked_child_profile_for_user(checklist, user_id):
+        return True
     return any(bp.user_id == user_id for bp in (checklist.backpacks or []))
 
 
@@ -231,10 +292,12 @@ def can_edit_shared_section(checklist: models.Checklist, user_id: int) -> bool:
     return is_checklist_participant(checklist, user_id)
 
 
-def get_baggage_editor_ids(checklist: models.Checklist, owner_user_id: int) -> list[int]:
+def get_baggage_editor_ids(checklist: models.Checklist, owner_user_id: int, child_profile_id: str | None = None) -> list[int]:
     editor_ids: list[int] = []
     for backpack in checklist.backpacks or []:
         if backpack.user_id != owner_user_id:
+            continue
+        if (backpack.child_profile_id or None) != (child_profile_id or None):
             continue
         for raw_value in backpack.editor_user_ids or []:
             try:
@@ -266,15 +329,120 @@ def can_edit_baggage(backpack: models.UserBackpack, checklist: models.Checklist,
         return False
     if backpack.user_id == user_id:
         return True
+    if checklist.user_id == user_id and backpack.child_profile_id:
+        return True
+    if backpack.child_profile_id:
+        child_profile = get_trip_child_profile(checklist, backpack.child_profile_id)
+        if get_child_profile_linked_user_id(child_profile) == user_id:
+            return True
     if is_backpack_hidden_for_viewer(backpack, checklist, user_id):
         return False
-    return user_id in get_baggage_editor_ids(checklist, backpack.user_id)
+    return user_id in get_baggage_editor_ids(checklist, backpack.user_id, backpack.child_profile_id)
 
 
-def can_manage_baggage(backpack: models.UserBackpack, user_id: int) -> bool:
+def can_manage_baggage(backpack: models.UserBackpack, user_id: int, checklist: models.Checklist | None = None) -> bool:
     if not backpack or not user_id:
         return False
-    return backpack.user_id == user_id
+    if backpack.user_id == user_id:
+        return True
+    if checklist and checklist.user_id == user_id and backpack.child_profile_id:
+        return True
+    if checklist and backpack.child_profile_id:
+        child_profile = get_trip_child_profile(checklist, backpack.child_profile_id)
+        return get_child_profile_linked_user_id(child_profile) == user_id
+    return False
+
+
+def get_trip_child_profile(checklist: models.Checklist, child_profile_id: str | None) -> dict[str, Any] | None:
+    if not checklist or not child_profile_id:
+        return None
+    trip_profile = normalize_packing_trip_profile(checklist.trip_profile or {})
+    for profile in trip_profile.get("child_profiles") or []:
+        if isinstance(profile, dict) and str(profile.get("id") or "") == str(child_profile_id):
+            return profile
+    return None
+
+
+def get_child_profile_linked_user_id(profile: dict[str, Any] | None) -> int | None:
+    if not isinstance(profile, dict):
+        return None
+    try:
+        linked_user_id = int(profile.get("linked_user_id") or 0)
+    except (TypeError, ValueError):
+        return None
+    return linked_user_id if linked_user_id > 0 else None
+
+
+def get_linked_child_profile_for_user(checklist: models.Checklist, user_id: int | None) -> dict[str, Any] | None:
+    if not checklist or not user_id:
+        return None
+    trip_profile = normalize_packing_trip_profile(checklist.trip_profile or {})
+    for profile in trip_profile.get("child_profiles") or []:
+        if get_child_profile_linked_user_id(profile) == user_id:
+            return profile
+    return None
+
+
+async def link_trip_child_profile_to_user(
+    db: AsyncSession,
+    checklist: models.Checklist,
+    child_profile_id: str | None,
+    user_id: int,
+) -> dict[str, Any] | None:
+    child_profile = get_trip_child_profile(checklist, child_profile_id)
+    if not child_profile:
+        return None
+
+    trip_profile = normalize_packing_trip_profile(checklist.trip_profile or {})
+    child_profiles: list[dict[str, Any]] = []
+    for profile in trip_profile.get("child_profiles") or []:
+        if not isinstance(profile, dict):
+            continue
+        next_profile = dict(profile)
+        if str(next_profile.get("id") or "") == str(child_profile_id):
+            next_profile["linked_user_id"] = user_id
+            child_profile = next_profile
+        elif get_child_profile_linked_user_id(next_profile) == user_id:
+            next_profile["linked_user_id"] = None
+        child_profiles.append(next_profile)
+
+    trip_profile["child_profiles"] = child_profiles
+    checklist.trip_profile = trip_profile
+    child_backpacks_result = await db.execute(
+        select(models.UserBackpack).where(
+            models.UserBackpack.checklist_id == checklist.id,
+            models.UserBackpack.child_profile_id == child_profile_id,
+        )
+    )
+    child_backpacks = child_backpacks_result.scalars().all()
+    personal_backpacks_result = await db.execute(
+        select(models.UserBackpack).where(
+            models.UserBackpack.checklist_id == checklist.id,
+            models.UserBackpack.user_id == user_id,
+            models.UserBackpack.child_profile_id.is_(None),
+        )
+    )
+    personal_backpacks = personal_backpacks_result.scalars().all()
+    default_seen = any(backpack.is_default for backpack in personal_backpacks)
+    child_has_default = any(backpack.is_default for backpack in child_backpacks)
+    child_default_seen = False
+    for index, backpack in enumerate(child_backpacks):
+        backpack.user_id = user_id
+        backpack.child_profile_id = None
+        if default_seen:
+            backpack.is_default = False
+            continue
+        if backpack.is_default:
+            backpack.is_default = not child_default_seen
+            child_default_seen = True
+            default_seen = True
+        elif not personal_backpacks and not child_has_default and not child_default_seen and index == 0:
+            backpack.is_default = True
+            child_default_seen = True
+            default_seen = True
+    await db.commit()
+    await db.refresh(checklist)
+    return child_profile
 
 
 def normalize_item_key(value: str | None) -> str:
@@ -309,6 +477,35 @@ def set_map_quantity(quantity_map: dict | None, item: str, value: int, *, keep_z
     return next_map
 
 
+def get_map_text(text_map: dict | None, item: str, fallback: str | None = None) -> str | None:
+    normalized_key = normalize_item_key(item)
+    if not normalized_key:
+        return fallback
+    for key, value in (text_map or {}).items():
+        if normalize_item_key(str(key)) != normalized_key:
+            continue
+        text_value = str(value or "").strip()
+        return text_value or fallback
+    return fallback
+
+
+def set_map_text(text_map: dict | None, item: str, value: str | None) -> dict:
+    normalized_key = normalize_item_key(item)
+    next_map = {
+        normalize_item_key(str(key)): str(raw_value).strip()
+        for key, raw_value in (text_map or {}).items()
+        if normalize_item_key(str(key)) and str(raw_value or "").strip()
+    }
+    if not normalized_key:
+        return next_map
+    text_value = str(value or "").strip()
+    if not text_value:
+        next_map.pop(normalized_key, None)
+        return next_map
+    next_map[normalized_key] = text_value
+    return next_map
+
+
 def rebuild_checked_items(items: list[str] | None, item_quantities: dict | None, packed_quantities: dict | None) -> list[str]:
     checked_items: list[str] = []
     for item in items or []:
@@ -326,12 +523,22 @@ class PackingRequest(BaseModel):
     city: str
     start_date: str
     end_date: str
-    trip_type: str = "vacation"  # vacation, business, active, beach, winter
+    trip_type: str = "city_break"
+    trip_activities: List[str] = []
+    baggage_format: str = "flexible"
+    accommodation_type: str = "hotel"
+    laundry_access: str = "limited"
+    packing_style: str = "balanced"
+    trip_note: str = ""
     gender: str = "unspecified"  # male, female, unspecified
     transport: str = "plane"     # plane, train, car, bus
     traveling_with_pet: bool = False
     has_allergies: bool = False
-    has_chronic_diseases: bool = False
+    traveling_with_children: bool = False
+    adults: int = 2
+    children_ages: List[int] = []
+    child_profiles: List[Dict[str, Any]] = []
+    infants_count: int = 0
     language: str = "ru"
     origin_city: str = ""
     participant_user_ids: List[int] = []
@@ -340,15 +547,25 @@ class TripSegment(BaseModel):
     city: str
     start_date: str
     end_date: str
-    trip_type: str = "vacation"
+    trip_type: str = "city_break"
     transport: str = "plane"
 
 class MultiCityPackingRequest(BaseModel):
     segments: List[TripSegment]
+    trip_activities: List[str] = []
+    baggage_format: str = "flexible"
+    accommodation_type: str = "hotel"
+    laundry_access: str = "limited"
+    packing_style: str = "balanced"
+    trip_note: str = ""
     gender: str = "unspecified"
     traveling_with_pet: bool = False
     has_allergies: bool = False
-    has_chronic_diseases: bool = False
+    traveling_with_children: bool = False
+    adults: int = 2
+    children_ages: List[int] = []
+    child_profiles: List[Dict[str, Any]] = []
+    infants_count: int = 0
     language: str = "ru"
     origin_city: str = ""
     return_transport: str = "plane"
@@ -364,31 +581,76 @@ def build_runtime_packing_profile(profile: dict | None = None, overrides: dict |
     normalized["gender"] = override_gender if override_gender in {"male", "female"} else "unspecified"
     normalized["traveling_with_pet"] = bool(overrides.get("traveling_with_pet"))
     normalized["has_allergies"] = bool(overrides.get("has_allergies"))
+    normalized["traveling_with_children"] = bool(overrides.get("traveling_with_children"))
     return normalized
+
+
+async def resolve_request_trip_profile(
+    *,
+    trip_type: str,
+    trip_activities: list[str] | None = None,
+    accommodation_type: str = "hotel",
+    laundry_access: str = "limited",
+    packing_style: str = "balanced",
+    baggage_format: str = "flexible",
+    adults: int = 2,
+    children_ages: list[int] | None = None,
+    child_profiles: list[dict[str, Any]] | None = None,
+    infants_count: int = 0,
+    trip_note: str = "",
+    language: str = "ru",
+) -> dict:
+    return await build_trip_profile(
+        {
+            "trip_type": trip_type,
+            "trip_activities": trip_activities or [],
+            "accommodation_type": accommodation_type,
+            "laundry_access": laundry_access,
+            "packing_style": packing_style,
+            "baggage_format": baggage_format,
+            "adults": adults,
+            "children_ages": children_ages or [],
+            "child_profiles": child_profiles or [],
+            "infants_count": max(infants_count, 0),
+            "trip_note": trip_note,
+        },
+        language=language,
+    )
 
 
 async def build_personal_baggage_items_for_segments(
     segments: list[dict[str, str]],
     profile: dict,
+    trip_profile: dict,
     language: str,
-) -> set[str]:
+) -> dict[str, Any]:
     items: set[str] = set()
+    item_quantities: dict[str, int] = {}
     for segment in segments:
         data = await calculate_packing_data(
             segment["city"],
             segment["start_date"],
             segment["end_date"],
-            segment["trip_type"],
+            prepare_trip_profile_for_segment(trip_profile, segment["trip_type"]),
             segment["transport"],
             profile.get("gender", "unspecified"),
             bool(profile.get("traveling_with_pet")),
             bool(profile.get("has_allergies")),
-            False,
+            bool(profile.get("traveling_with_children")),
             language,
         )
         items.update(data["items"])
-    items.update(profile.get("always_include_items") or [])
-    return items
+        for item, quantity in (data.get("item_quantities") or {}).items():
+            item_quantities[item] = max(item_quantities.get(item, 0), int(quantity or 1))
+    for item in profile.get("always_include_items") or []:
+        items.add(item)
+        item_quantities[item] = max(item_quantities.get(item, 0), 1)
+    sorted_items = sorted(items)
+    return {
+        "items": sorted_items,
+        "item_quantities": item_quantities,
+        "item_categories": infer_item_categories(sorted_items, language),
+    }
 
 
 async def build_participant_baggage_payloads(
@@ -397,15 +659,16 @@ async def build_participant_baggage_payloads(
     participant_user_ids: list[int],
     segments: list[dict[str, str]],
     owner_overrides: dict,
+    trip_profile: dict,
     language: str,
-) -> dict[int, list[str]] | None:
+) -> dict[int, dict[str, Any]] | None:
     unique_participant_ids: list[int] = []
     for raw_value in participant_user_ids or []:
         try:
             parsed = int(raw_value)
         except (TypeError, ValueError):
             continue
-        if parsed <= 0 or parsed == current_user.id or parsed in unique_participant_ids:
+        if parsed <= 0 or (current_user and parsed == current_user.id) or parsed in unique_participant_ids:
             continue
         unique_participant_ids.append(parsed)
 
@@ -415,10 +678,13 @@ async def build_participant_baggage_payloads(
     if not current_user:
         return None
 
-    payloads: dict[int, list[str]] = {}
+    payloads: dict[int, dict[str, Any]] = {}
     owner_profile = build_runtime_packing_profile(current_user.packing_profile, owner_overrides)
-    payloads[current_user.id] = sorted(
-        await build_personal_baggage_items_for_segments(segments, owner_profile, language)
+    payloads[current_user.id] = await build_personal_baggage_items_for_segments(
+        segments,
+        owner_profile,
+        trip_profile,
+        language,
     )
 
     for participant_user_id in unique_participant_ids:
@@ -426,14 +692,57 @@ async def build_participant_baggage_payloads(
         if not participant_user:
             raise HTTPException(status_code=404, detail=f"Пользователь {participant_user_id} не найден")
         participant_profile = build_runtime_packing_profile(participant_user.packing_profile)
-        payloads[participant_user_id] = sorted(
-            await build_personal_baggage_items_for_segments(segments, participant_profile, language)
+        payloads[participant_user_id] = await build_personal_baggage_items_for_segments(
+            segments,
+            participant_profile,
+            trip_profile,
+            language,
         )
 
     return payloads
 
+
+async def ensure_default_baggage_for_participant(
+    db: AsyncSession,
+    checklist: models.Checklist,
+    user_id: int,
+    *,
+    items: list[str] | None = None,
+    item_quantities: dict[str, int] | None = None,
+    item_categories: dict[str, str] | None = None,
+) -> None:
+    existing_backpacks = await crud.get_backpacks_by_user(db, checklist.id, user_id)
+    if existing_backpacks:
+        return
+
+    default_kinds = get_default_baggage_kinds(getattr(checklist, "trip_profile", None))
+    await crud.create_user_backpack(
+        db,
+        checklist.id,
+        user_id,
+        kind=default_kinds[0] if default_kinds else "suitcase",
+        is_default=True,
+        items=items,
+        item_quantities=item_quantities,
+        item_categories=item_categories,
+    )
+
+    for extra_kind in default_kinds[1:]:
+        await crud.create_user_backpack(
+            db,
+            checklist.id,
+            user_id,
+            kind=extra_kind,
+            is_default=False,
+            items=[],
+            item_quantities={},
+        )
+
+
 class ChecklistResponse(schemas.ChecklistOut):
     daily_forecast: list[schemas.DailyForecast]
+
+ChecklistResponse.model_rebuild()
 
 class StatsResponse(BaseModel):
     total_trips: int
@@ -450,8 +759,11 @@ class ChecklistStateUpdate(BaseModel):
     added_items: Optional[List[str]] = None
     item_quantities: Optional[dict[str, int]] = None
     packed_quantities: Optional[dict[str, int]] = None
+    item_categories: Optional[dict[str, str]] = None
+    item_translations: Optional[dict[str, dict[str, str]]] = None
     is_public: Optional[bool] = None
     items: Optional[List[str]] = None
+    trip_profile: Optional[schemas.TripProfileData] = None
 
 class BackpackStateUpdate(BaseModel):
     checked_items: Optional[List[str]] = None
@@ -459,13 +771,85 @@ class BackpackStateUpdate(BaseModel):
     added_items: Optional[List[str]] = None
     item_quantities: Optional[dict[str, int]] = None
     packed_quantities: Optional[dict[str, int]] = None
+    item_categories: Optional[dict[str, str]] = None
+    item_translations: Optional[dict[str, dict[str, str]]] = None
     items: Optional[List[str]] = None
+
+
+class ItemLabelTranslationRequest(BaseModel):
+    text: str
+    source_lang: Optional[str] = "auto"
+    target_lang: str = "en"
 
 
 class BaggageTransferRequest(BaseModel):
     item: str
     source_backpack_id: Optional[int] = None
     target_backpack_id: int
+
+
+def infer_item_categories(items: list[str] | set[str] | None, language: str) -> dict[str, str]:
+    mapping = get_category_map(language)
+    fallback_category = "Misc" if language == "en" and "Misc" in mapping else "Прочее"
+    categorized: dict[str, str] = {}
+    for raw_item in items or []:
+        item = str(raw_item or "").strip()
+        if not item:
+            continue
+        category = next(
+            (cat for cat, keywords in mapping.items() if any(keyword.lower() in item.lower() for keyword in keywords)),
+            fallback_category,
+        )
+        categorized[item] = category
+    return categorized
+
+
+def _contains_cyrillic(text: str) -> bool:
+    return bool(re.search(r"[А-Яа-яЁё]", text or ""))
+
+
+def _guess_item_label_language(text: str) -> str:
+    value = str(text or "").strip()
+    if not value:
+        return "ru"
+    return "ru" if _contains_cyrillic(value) else "en"
+
+
+async def _translate_item_label_with_ai(text: str, source_lang: str, target_lang: str) -> str | None:
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    gemini_url = os.getenv("GEMINI_BASE_URL", "").strip() or DEFAULT_URL
+    source_name = "Russian" if source_lang == "ru" else "English"
+    target_name = "English" if target_lang == "en" else "Russian"
+    prompt = (
+        f"Translate this short travel packing item label from {source_name} to {target_name}.\n"
+        "Return only the translated label, no quotes, no explanations.\n"
+        "Keep it concise and natural for a packing checklist.\n"
+        f"Label: {text}"
+    )
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.1,
+            "maxOutputTokens": 80,
+            "topP": 0.9,
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(f"{gemini_url}?key={api_key}", json=payload)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            candidates = data.get("candidates", [])
+            answer = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "") if candidates else ""
+            cleaned = re.sub(r"\s+", " ", str(answer or "").strip()).strip("\"'` ")
+            return cleaned or None
+    except Exception:
+        return None
 
 class UserPrivacyUpdate(BaseModel):
     is_stats_public: bool
@@ -483,6 +867,37 @@ class VerifyEmailRequest(BaseModel):
 
 class ResendCodeRequest(BaseModel):
     email: str
+
+
+def _csv_env_values(name: str) -> set[str]:
+    return {item.strip() for item in os.getenv(name, "").split(",") if item.strip()}
+
+
+def _is_admin_user(user) -> bool:
+    if not user:
+        return False
+
+    admin_ids = _csv_env_values("ADMIN_USER_IDS")
+    admin_emails = {item.lower() for item in _csv_env_values("ADMIN_EMAILS")}
+    admin_usernames = {item.casefold() for item in _csv_env_values("ADMIN_USERNAMES")}
+
+    return (
+        str(getattr(user, "id", "")) in admin_ids
+        or str(getattr(user, "email", "") or "").lower() in admin_emails
+        or str(getattr(user, "username", "") or "").casefold() in admin_usernames
+    )
+
+
+def _build_user_out(user) -> schemas.UserOut:
+    user_out = schemas.UserOut.model_validate(user)
+    user_out.is_admin = _is_admin_user(user)
+    return user_out
+
+
+async def require_admin_user(user=Depends(require_current_user)):
+    if not _is_admin_user(user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Недостаточно прав")
+    return user
 
 @app.post("/auth/register", response_model=schemas.Token)
 async def register(data: schemas.UserCreate, db: AsyncSession = Depends(get_db)):
@@ -514,7 +929,7 @@ async def register(data: schemas.UserCreate, db: AsyncSession = Depends(get_db))
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "user": schemas.UserOut.model_validate(user),
+        "user": _build_user_out(user),
         "message": (
             f"Аккаунт создан, но письмо на {data.email} пока не отправлено. "
             "Проверьте SMTP-настройки сервера и нажмите 'Отправить ещё раз'."
@@ -638,7 +1053,7 @@ async def login(data: schemas.UserLogin, response: Response, db: AsyncSession = 
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "user": schemas.UserOut.model_validate(user),
+        "user": _build_user_out(user),
     }
 
 @app.post("/auth/verify-device-login", response_model=schemas.Token)
@@ -676,7 +1091,7 @@ async def verify_device_login(data: schemas.VerifyDeviceLogin, db: AsyncSession 
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "user": schemas.UserOut.model_validate(user),
+        "user": _build_user_out(user),
     }
 
 
@@ -686,7 +1101,7 @@ async def get_me(user=Depends(require_current_user), db: AsyncSession = Depends(
     followers = await crud.get_followers(db, user.id)
     following = await crud.get_following(db, user.id)
     
-    user_out = schemas.UserOut.model_validate(user)
+    user_out = _build_user_out(user)
     user_out.followers_count = len(followers)
     user_out.following_count = len(following)
     return user_out
@@ -705,7 +1120,7 @@ async def update_me(update_data: schemas.UserUpdate, user=Depends(require_curren
     followers = await crud.get_followers(db, user.id)
     following = await crud.get_following(db, user.id)
     
-    user_out = schemas.UserOut.model_validate(updated_user)
+    user_out = _build_user_out(updated_user)
     user_out.followers_count = len(followers)
     user_out.following_count = len(following)
     return user_out
@@ -737,7 +1152,7 @@ async def unlink_telegram(user=Depends(require_current_user), db: AsyncSession =
     followers = await crud.get_followers(db, user.id)
     following = await crud.get_following(db, user.id)
 
-    user_out = schemas.UserOut.model_validate(updated_user)
+    user_out = _build_user_out(updated_user)
     user_out.followers_count = len(followers)
     user_out.following_count = len(following)
     return user_out
@@ -764,7 +1179,7 @@ async def telegram_auth(data: schemas.TelegramAuth, db: AsyncSession = Depends(g
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "user": schemas.UserOut.model_validate(user),
+        "user": _build_user_out(user),
     }
 
 
@@ -778,7 +1193,7 @@ async def update_privacy(
     user.is_stats_public = privacy.is_stats_public
     await db.commit()
     await db.refresh(user)
-    return user
+    return _build_user_out(user)
 
 
 @app.patch("/auth/avatar", response_model=schemas.UserOut)
@@ -791,7 +1206,7 @@ async def update_avatar(
     user.avatar = data.avatar
     await db.commit()
     await db.refresh(user)
-    return user
+    return _build_user_out(user)
 
 
 @app.get("/users/search", response_model=List[schemas.UserSearchResult])
@@ -822,40 +1237,17 @@ async def get_public_profile(
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
 
-    # Получаем чеклисты
-    checklists = await crud.get_checklists_by_user_id(db, user.id)
-    public_checklists = [
-        schemas.ChecklistOut.model_validate(c) 
-        for c in checklists 
-        if c.is_public
+    # Получаем все чеклисты пользователя: и собственные, и совместные
+    all_checklists = await get_all_user_checklists(db, user.id)
+    visible_checklists = [
+        schemas.ChecklistOut.model_validate(c)
+        for c in all_checklists
+        if c.is_public or (current_user and is_checklist_participant(c, current_user.id))
     ]
 
     stats = None
     if user.is_stats_public:
-        # Считаем статистику для публичного профиля (только по публичным чеклистам? 
-        # Или полную, если user разрешил? Обычно полную, но флаг 'is_stats_public' это и значит)
-        
-        # Лучше считать полную статистику, раз пользователь разрешил её показывать
-        all_stats_checklists = await get_all_user_checklists(db, user.id)
-        cities, countries = await collect_location_stats(all_stats_checklists)
-        total_days = 0
-        trips_with_dates = 0
-        for checklist in all_stats_checklists:
-            if checklist.start_date and checklist.end_date:
-                days = (checklist.end_date - checklist.start_date).days + 1
-                if days > 0:
-                    total_days += days
-                    trips_with_dates += 1
-
-        stats = {
-            "total_trips": len(all_stats_checklists),
-            "total_days": total_days,
-            "average_trip_days": round(total_days / trips_with_dates) if trips_with_dates else 0,
-            "unique_cities": len(cities),
-            "unique_countries": len(countries),
-            "total_items": count_total_items_for_user(all_stats_checklists, user.id),
-            "upcoming_trips": sum(1 for c in all_stats_checklists if c.start_date and c.start_date > datetime.now().date())
-        }
+        stats = await build_stats_payload(all_checklists, user.id)
 
     followers = await crud.get_followers(db, user.id)
     following = await crud.get_following(db, user.id)
@@ -887,7 +1279,7 @@ async def get_public_profile(
         "is_following": is_following,
         "follow_status": follow_status,
         "stats": stats,
-        "checklists": public_checklists,
+        "checklists": visible_checklists,
         "reviews": [build_trip_review_payload(review) for review in public_reviews],
     }
 
@@ -1212,6 +1604,312 @@ async def get_all_user_checklists(db: AsyncSession, user_id: int):
     return list(all_checklists.values())
 
 
+def can_view_expenses(checklist: models.Checklist, user_id: int | None) -> bool:
+    if not checklist:
+        return False
+    if "expenses" not in (checklist.hidden_sections or []):
+        return True
+    return bool(user_id and is_checklist_participant(checklist, user_id))
+
+
+def can_view_itinerary(checklist: models.Checklist, user_id: int | None) -> bool:
+    if not checklist:
+        return False
+    if "itinerary" not in (checklist.hidden_sections or []):
+        return True
+    return bool(user_id and is_checklist_participant(checklist, user_id))
+
+
+def get_visible_expenses_for_viewer(checklist: models.Checklist, user_id: int | None) -> list[models.TripExpense]:
+    if not can_view_expenses(checklist, user_id):
+        return []
+    return sorted(
+        list(getattr(checklist, "expenses", None) or []),
+        key=lambda item: (
+            item.expense_date or date.min,
+            item.created_at or datetime.min,
+            item.id or 0,
+        ),
+        reverse=True,
+    )
+
+
+def build_expense_summary(
+    checklist: models.Checklist,
+    expenses: list[models.TripExpense] | None = None,
+    *,
+    expose_budget: bool = True,
+) -> schemas.TripExpenseSummary:
+    visible_expenses = list(expenses or [])
+    base_currency = normalize_currency(getattr(checklist, "expense_base_currency", None), "RUB")
+    total_spent = round(sum(float(expense.amount_base or 0) for expense in visible_expenses), 2)
+    by_category: dict[str, float] = {}
+    for expense in visible_expenses:
+        category = str(expense.category or "other").strip().lower() or "other"
+        by_category[category] = round(by_category.get(category, 0) + float(expense.amount_base or 0), 2)
+    budget_amount = getattr(checklist, "expense_budget_amount", None) if expose_budget else None
+    trip_profile = getattr(checklist, "trip_profile", None) or {}
+    expense_profile = trip_profile.get("expenses") if isinstance(trip_profile, dict) else {}
+    daily_budget_amount = (
+        expense_profile.get("daily_budget_amount")
+        if expose_budget and isinstance(expense_profile, dict)
+        else None
+    )
+    today = date.today()
+    today_spent = round(
+        sum(
+            float(expense.amount_base or 0)
+            for expense in visible_expenses
+            if expense.expense_date == today
+        ),
+        2,
+    )
+    remaining = round(float(budget_amount) - total_spent, 2) if budget_amount is not None else None
+    today_remaining = (
+        round(float(daily_budget_amount) - today_spent, 2)
+        if daily_budget_amount is not None
+        else None
+    )
+    return schemas.TripExpenseSummary(
+        budget_amount=budget_amount,
+        daily_budget_amount=daily_budget_amount,
+        base_currency=base_currency,
+        total_spent=total_spent,
+        remaining=remaining,
+        today_spent=today_spent,
+        today_remaining=today_remaining,
+        by_category=by_category,
+        expense_count=len(visible_expenses),
+    )
+
+
+async def build_expense_conversion(
+    amount: float,
+    currency: str,
+    base_currency: str,
+) -> dict[str, Any]:
+    converted = await convert_currency_amount(amount, currency, base_currency)
+    if not converted:
+        raise HTTPException(status_code=400, detail="Не удалось получить курс валюты")
+    return converted
+
+
+async def build_checklist_response_payload(
+    checklist: models.Checklist,
+    user_id: int | None = None,
+):
+    if not checklist:
+        return None
+
+    forecast = checklist.daily_forecast
+    if not forecast:
+        try:
+            forecast = await get_weather_forecast_data(
+                checklist.city,
+                checklist.start_date,
+                checklist.end_date,
+                language="ru",
+            )
+        except Exception:
+            forecast = []
+
+    visible_backpacks = [
+        backpack
+        for backpack in (checklist.backpacks or [])
+        if not is_backpack_hidden_for_viewer(backpack, checklist, user_id)
+    ]
+    expenses_visible = can_view_expenses(checklist, user_id)
+    itinerary_visible = can_view_itinerary(checklist, user_id)
+    visible_expenses = get_visible_expenses_for_viewer(checklist, user_id)
+    visible_hidden_sections = []
+    for section in checklist.hidden_sections or []:
+        if not section.startswith("backpack:"):
+            visible_hidden_sections.append(section)
+            continue
+        try:
+            backpack_id = int(section.split(":", 1)[1])
+        except (TypeError, ValueError):
+            continue
+        backpack = next((item for item in (checklist.backpacks or []) if item.id == backpack_id), None)
+        if backpack and not is_backpack_hidden_for_viewer(backpack, checklist, user_id):
+            visible_hidden_sections.append(section)
+
+    return ChecklistResponse(
+        slug=checklist.slug,
+        city=checklist.city,
+        start_date=checklist.start_date,
+        end_date=checklist.end_date,
+        items=checklist.items,
+        avg_temp=checklist.avg_temp,
+        conditions=checklist.conditions,
+        checked_items=checklist.checked_items or [],
+        removed_items=checklist.removed_items or [],
+        added_items=checklist.added_items or [],
+        item_quantities=checklist.item_quantities or {},
+        packed_quantities=checklist.packed_quantities or {},
+        item_categories=checklist.item_categories or {},
+        item_translations=checklist.item_translations or {},
+        tg_user_id=checklist.tg_user_id,
+        user_id=checklist.user_id,
+        is_public=getattr(checklist, "is_public", True),
+        origin_city=getattr(checklist, "origin_city", None),
+        transports=getattr(checklist, "transports", None),
+        trip_type=(checklist.trip_profile or {}).get("trip_type"),
+        trip_profile=checklist.trip_profile or {},
+        expense_budget_amount=getattr(checklist, "expense_budget_amount", None) if expenses_visible else None,
+        expense_base_currency=getattr(checklist, "expense_base_currency", "RUB") or "RUB",
+        daily_forecast=forecast,
+        events=(checklist.events or []) if itinerary_visible else [],
+        backpacks=visible_backpacks,
+        expenses=visible_expenses,
+        expense_summary=build_expense_summary(checklist, visible_expenses, expose_budget=expenses_visible),
+        reviews=[
+            build_trip_review_payload(review)
+            for review in sorted(checklist.reviews or [], key=lambda item: item.created_at or datetime.min, reverse=True)
+        ],
+        invite_token=checklist.invite_token if user_id and is_checklist_participant(checklist, user_id) else None,
+        hidden_sections=visible_hidden_sections,
+    )
+
+
+async def build_stats_payload(checklists, user_id: int):
+    total_trips = len(checklists)
+    total_days = 0
+    trips_with_dates = 0
+    upcoming = 0
+    today = datetime.now().date()
+    cities, countries = await collect_location_stats(checklists)
+
+    for checklist in checklists:
+        if checklist.start_date and checklist.end_date:
+            days = (checklist.end_date - checklist.start_date).days + 1
+            if days > 0:
+                total_days += days
+                trips_with_dates += 1
+
+        if checklist.start_date and checklist.start_date > today:
+            upcoming += 1
+
+    return {
+        "total_trips": total_trips,
+        "total_days": total_days,
+        "average_trip_days": round(total_days / trips_with_dates) if trips_with_dates else 0,
+        "unique_cities": len(cities),
+        "unique_countries": len(countries),
+        "total_items": count_total_items_for_user(checklists, user_id),
+        "upcoming_trips": upcoming,
+    }
+
+
+def build_feedback_stats_payload(checklists):
+    removed_counts = {}
+    added_counts = {}
+
+    for checklist in checklists:
+        for item in (checklist.removed_items or []):
+            removed_counts[item] = removed_counts.get(item, 0) + 1
+        for item in (checklist.added_items or []):
+            added_counts[item] = added_counts.get(item, 0) + 1
+
+    top_removed = sorted(removed_counts.items(), key=lambda x: -x[1])[:10]
+    top_added = sorted(added_counts.items(), key=lambda x: -x[1])[:10]
+
+    return {
+        "top_removed": [{"item": key, "count": value} for key, value in top_removed],
+        "top_added": [{"item": key, "count": value} for key, value in top_added],
+    }
+
+
+def build_follow_request_payloads(requests):
+    result = []
+    for req in requests:
+        from_user_out = schemas.UserOut.model_validate(req.from_user)
+        result.append(schemas.FollowRequestOut(
+            id=req.id,
+            from_user=from_user_out,
+            status=req.status,
+            created_at=req.created_at
+        ))
+    return result
+
+
+def build_subscription_payloads(followers, following):
+    following_ids = {user.id for user in following}
+
+    enriched_followers = []
+    for follower in followers:
+        follower_out = schemas.UserOut.model_validate(follower)
+        follower_out.is_following = follower.id in following_ids
+        enriched_followers.append(follower_out)
+
+    enriched_following = []
+    for followed_user in following:
+        followed_user_out = schemas.UserOut.model_validate(followed_user)
+        followed_user_out.is_following = True
+        enriched_following.append(followed_user_out)
+
+    return enriched_followers, enriched_following
+
+
+@app.get("/my-profile-bundle", response_model=dict)
+async def get_my_profile_bundle(
+    user=Depends(require_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    checklists = await get_all_user_checklists(db, user.id)
+    followers = await crud.get_followers(db, user.id)
+    following = await crud.get_following(db, user.id)
+    follow_requests = await crud.get_pending_follow_requests(db, user.id)
+    reviews = await crud.get_trip_reviews_by_user_id(db, user.id)
+
+    stats, achievements = await asyncio.gather(
+        build_stats_payload(checklists, user.id),
+        compute_achievements(checklists),
+    )
+    feedback = build_feedback_stats_payload(checklists)
+    enriched_followers, enriched_following = build_subscription_payloads(followers, following)
+
+    return {
+        "checklists": [schemas.ChecklistOut.model_validate(checklist) for checklist in checklists],
+        "stats": stats,
+        "achievements": achievements,
+        "feedback": feedback,
+        "reviews": [build_trip_review_payload(review) for review in reviews],
+        "followers": enriched_followers,
+        "following": enriched_following,
+        "followRequests": build_follow_request_payloads(follow_requests),
+    }
+
+
+@app.get("/tma/bootstrap", response_model=dict)
+async def get_tma_bootstrap(
+    slug: Optional[str] = Query(default=None),
+    user=Depends(require_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    checklists = await get_all_user_checklists(db, user.id)
+    selected_checklist = None
+
+    if slug:
+        selected_checklist = next((item for item in checklists if item.slug == slug), None)
+
+    if not selected_checklist and checklists:
+        selected_checklist = sorted(
+            checklists,
+            key=lambda item: (
+                item.start_date or date.max,
+                item.end_date or date.max,
+                item.id,
+            ),
+        )[0]
+
+    return {
+        "checklists": [schemas.ChecklistOut.model_validate(checklist) for checklist in checklists],
+        "selected_slug": selected_checklist.slug if selected_checklist else "",
+        "checklist": await build_checklist_response_payload(selected_checklist, user.id) if selected_checklist else None,
+    }
+
+
 @app.get("/my-achievements")
 async def get_my_achievements(
     user=Depends(require_current_user),
@@ -1231,23 +1929,7 @@ async def get_my_feedback_stats(
 ):
     """Статистика предпочтений: что чаще удаляют/добавляют (включая совместные)"""
     checklists = await get_all_user_checklists(db, user.id)
-
-    removed_counts = {}
-    added_counts = {}
-
-    for c in checklists:
-        for item in (c.removed_items or []):
-            removed_counts[item] = removed_counts.get(item, 0) + 1
-        for item in (c.added_items or []):
-            added_counts[item] = added_counts.get(item, 0) + 1
-
-    top_removed = sorted(removed_counts.items(), key=lambda x: -x[1])[:10]
-    top_added = sorted(added_counts.items(), key=lambda x: -x[1])[:10]
-
-    return {
-        "top_removed": [{"item": k, "count": v} for k, v in top_removed],
-        "top_added": [{"item": k, "count": v} for k, v in top_added],
-    }
+    return build_feedback_stats_payload(checklists)
 
 
 @app.get("/my-stats", response_model=StatsResponse)
@@ -1257,35 +1939,7 @@ async def get_my_stats(
 ):
     """Статистика путешествий пользователя (включая совместные)"""
     checklists = await get_all_user_checklists(db, user.id)
-    
-    total_trips = len(checklists)
-    total_days = 0
-    trips_with_dates = 0
-    upcoming = 0
-    today = datetime.now().date()
-    cities, countries = await collect_location_stats(checklists)
-    
-    for c in checklists:
-        # Дни
-        if c.start_date and c.end_date:
-            days = (c.end_date - c.start_date).days + 1
-            if days > 0:
-                total_days += days
-                trips_with_dates += 1
-
-        # Предстоящие
-        if c.start_date and c.start_date > today:
-            upcoming += 1
-	            
-    return {
-        "total_trips": total_trips,
-        "total_days": total_days,
-        "average_trip_days": round(total_days / trips_with_dates) if trips_with_dates else 0,
-        "unique_cities": len(cities),
-        "unique_countries": len(countries),
-        "total_items": count_total_items_for_user(checklists, user.id),
-        "upcoming_trips": upcoming
-    }
+    return await build_stats_payload(checklists, user.id)
 
 
 # === Feature: Calendar Export (.ics) ===
@@ -1360,6 +2014,7 @@ _CURATED = {
     "Milan": ["Milan Cathedral","Galleria Vittorio Emanuele II","Santa Maria delle Grazie","Sforza Castle","Pinacoteca di Brera","La Scala","Navigli","San Siro","Basilica of Sant'Ambrogio","Piazza del Duomo, Milan","Quadrilatero della moda","Cimitero Monumentale di Milano","Pinacoteca Ambrosiana","Arco della Pace","Piazza Mercanti"],
     "Munich": ["Marienplatz","Nymphenburg Palace","Englischer Garten","BMW Welt","Frauenkirche, Munich","Deutsches Museum","Viktualienmarkt","Munich Residenz","Allianz Arena","Hofbräuhaus","Alte Pinakothek","Olympiapark, Munich","Asamkirche","St. Peter's Church, Munich","Karlsplatz"],
     "Florence": ["Florence Cathedral","Uffizi","Ponte Vecchio","Palazzo Pitti","Piazzale Michelangelo","Galleria dell'Accademia","Palazzo Vecchio","Piazza della Signoria","Boboli Gardens","Basilica of Santa Croce, Florence","Basilica of San Lorenzo, Florence","Bargello","Baptistery of Saint John (Florence)","Basilica di Santa Maria Novella","Piazza della Repubblica, Florence"],
+    "Geneva": ["Jet d'Eau","St. Pierre Cathedral","Palace of Nations","Place du Bourg-de-Four","Broken Chair","Patek Philippe Museum","Reformation Wall","Bains des Pâquis","Parc des Bastions","Museum of Art and History, Geneva","Brunswick Monument","Jardin Anglais","Conservatory and Botanical Garden of the City of Geneva","Tavel House","Île Rousseau"],
     "Edinburgh": ["Edinburgh Castle","Royal Mile","Arthur's Seat","Holyrood Palace","Scott Monument","Calton Hill","National Museum of Scotland","St Giles' Cathedral","Princes Street","Edinburgh Old Town","Greyfriars Kirkyard","Royal Botanic Garden Edinburgh","Camera Obscura, Edinburgh","Edinburgh Zoo","Dean Village"],
     "Copenhagen": ["Tivoli Gardens","The Little Mermaid (statue)","Nyhavn","Amalienborg","Christiansborg Palace","Rosenborg Castle","Strøget","Christiania (district)","Round Tower (Copenhagen)","National Museum of Denmark","Church of Our Saviour, Copenhagen","Ny Carlsberg Glyptotek","Frederiksberg Garden","Kastellet, Copenhagen","Copenhagen Opera House"],
     "Oslo": ["Oslo Opera House","Vigeland sculpture park","Viking Ship Museum (Oslo)","Akershus Fortress","Holmenkollbakken","Munch Museum","Oslo City Hall","Royal Palace, Oslo","Aker Brygge","Karl Johans gate","Norsk Folkemuseum","Bygdøy","Oslo Cathedral","National Gallery (Oslo)","Fram Museum"],
@@ -1427,6 +2082,7 @@ _CURATED_CITY_ALIASES = {
     "стокгольм": "Stockholm",
     "токио": "Tokyo",
     "флоренция": "Florence",
+    "женева": "Geneva",
     "хельсинки": "Helsinki",
     "чикаго": "Chicago",
     "эдинбург": "Edinburgh",
@@ -1635,19 +2291,40 @@ def _extract_google_maps_cid(link: str | None) -> str:
         return ""
 
 
+def _normalize_attraction_key(value: str | None) -> str:
+    return re.sub(r"\s+", " ", str(value or "").casefold()).strip()
+
+
+def _is_admin_attraction_image(attraction: dict | None) -> bool:
+    if not isinstance(attraction, dict):
+        return False
+    return attraction.get("image_source") == "admin" or attraction.get("admin_image") is True
+
+
+def _attraction_matches_target(attraction: dict, target_name: str, target_link: str | None) -> bool:
+    current_link = str((attraction or {}).get("link") or "").strip()
+    current_cid = _extract_google_maps_cid(current_link)
+    target_cid = _extract_google_maps_cid(target_link)
+    if current_cid and target_cid and current_cid == target_cid:
+        return True
+    if current_link and target_link and current_link == target_link:
+        return True
+    return _normalize_attraction_key((attraction or {}).get("name")) == _normalize_attraction_key(target_name)
+
+
 def _cached_attractions_need_google_refresh(attractions: list[dict]) -> bool:
     if not attractions:
         return True
 
-    has_google_photo = False
+    has_preferred_photo = False
     for attraction in attractions:
         image = str((attraction or {}).get("image") or "").strip()
         if not image:
             return True
-        if _is_google_place_photo(image):
-            has_google_photo = True
+        if _is_google_place_photo(image) or _is_admin_attraction_image(attraction):
+            has_preferred_photo = True
 
-    return not has_google_photo
+    return not has_preferred_photo
 
 
 def _cached_attractions_need_name_refresh(attractions: list[dict], lang: str) -> bool:
@@ -1664,6 +2341,41 @@ _COMMERCIAL_ATTRACTION_RE = re.compile(
     r"экскурс|тур(ы|ы\b|а\b)?|круиз|билет|прогулк|корабл|лодк)",
     re.IGNORECASE,
 )
+_NON_ATTRACTION_EVENT_RE = re.compile(
+    r"(murder|kidnapp|death of|assassination|biography|"
+    r"убийств|похищени|биографи|смерть|казнь|теракт|нападени|война|битва)",
+    re.IGNORECASE,
+)
+_ATTRACTION_NAME_HINT_RE = re.compile(
+    r"(museum|palace|castle|bridge|cathedral|church|square|park|tower|temple|"
+    r"fort|fortress|monastery|basilica|garden|gate|opera|theatre|mosque|market|"
+    r"музе|дворец|замок|мост|собор|церков|площад|парк|башн|храм|крепост|монастыр|"
+    r"базилик|сад|ворот|театр|мечет|рынок|набереж|фонтан|галере|усадьб|арк)",
+    re.IGNORECASE,
+)
+
+
+def _is_obviously_non_attraction_name(name: str | None) -> bool:
+    raw_name = str(name or "").strip()
+    if not raw_name:
+        return True
+
+    if _NON_ATTRACTION_EVENT_RE.search(raw_name):
+        return True
+
+    if _ATTRACTION_NAME_HINT_RE.search(raw_name):
+        return False
+
+    if "," in raw_name:
+        left, right = [part.strip() for part in raw_name.split(",", 1)]
+        if left and right:
+            left_words = [word for word in re.split(r"[\s-]+", left) if word]
+            right_words = [word for word in re.split(r"[\s-]+", right) if word]
+            if 1 <= len(left_words) <= 3 and 1 <= len(right_words) <= 3:
+                if all(re.fullmatch(r"[A-Za-zА-Яа-яЁё.'’]+", word) for word in left_words + right_words):
+                    return True
+
+    return False
 
 
 def _sanitize_attractions(attractions: list[dict], limit: int) -> tuple[list[dict], bool]:
@@ -1683,6 +2395,9 @@ def _sanitize_attractions(attractions: list[dict], limit: int) -> tuple[list[dic
             continue
 
         if _COMMERCIAL_ATTRACTION_RE.search(name):
+            changed = True
+            continue
+        if _is_obviously_non_attraction_name(name):
             changed = True
             continue
 
@@ -1712,6 +2427,8 @@ def _merge_attractions(primary: list[dict], secondary: list[dict], limit: int) -
                 continue
             if _COMMERCIAL_ATTRACTION_RE.search(name):
                 continue
+            if _is_obviously_non_attraction_name(name):
+                continue
 
             seen_names.add(normalized_name)
             merged.append(attraction)
@@ -1733,7 +2450,7 @@ def _finalize_attractions(attractions: list[dict], limit: int) -> list[dict]:
         image = str((attraction or {}).get("image") or "").strip()
         normalized_name = re.sub(r"\s+", " ", name.casefold()).strip()
 
-        if not name or _COMMERCIAL_ATTRACTION_RE.search(name):
+        if not name or _COMMERCIAL_ATTRACTION_RE.search(name) or _is_obviously_non_attraction_name(name):
             continue
         if normalized_name and normalized_name in seen_names:
             continue
@@ -1771,6 +2488,9 @@ async def _restore_google_images_from_cache(
     )
     cached_variants = rows.scalars().all()
 
+    admin_by_cid: dict[str, dict[str, str]] = {}
+    admin_by_link: dict[str, dict[str, str]] = {}
+    admin_by_name: dict[str, dict[str, str]] = {}
     google_by_link: dict[str, str] = {}
     google_by_name: dict[str, str] = {}
     for variant in cached_variants:
@@ -1778,10 +2498,27 @@ async def _restore_google_images_from_cache(
             continue
         for item in variant.data:
             image = str((item or {}).get("image") or "").strip()
+            if not image:
+                continue
             if not _is_google_attraction_image(image):
+                if not _is_admin_attraction_image(item):
+                    continue
+                link = str((item or {}).get("link") or "").strip()
+                cid = _extract_google_maps_cid(link)
+                name = _normalize_attraction_key((item or {}).get("name"))
+                admin_payload = {
+                    "image": image,
+                    "image_position": str((item or {}).get("image_position") or "center center"),
+                }
+                if cid and cid not in admin_by_cid:
+                    admin_by_cid[cid] = admin_payload
+                if link and link not in admin_by_link:
+                    admin_by_link[link] = admin_payload
+                if name and name not in admin_by_name:
+                    admin_by_name[name] = admin_payload
                 continue
             link = str((item or {}).get("link") or "").strip()
-            name = re.sub(r"\s+", " ", str((item or {}).get("name") or "").casefold()).strip()
+            name = _normalize_attraction_key((item or {}).get("name"))
             if link and link not in google_by_link:
                 google_by_link[link] = image
             if name and name not in google_by_name:
@@ -1792,15 +2529,32 @@ async def _restore_google_images_from_cache(
     for attraction in attractions:
         next_item = dict(attraction)
         current_image = str(attraction.get("image") or "").strip()
-        if _is_google_attraction_image(current_image):
+        if _is_admin_attraction_image(attraction):
             updated_items.append(next_item)
             continue
 
         link = str(attraction.get("link") or "").strip()
-        name_key = re.sub(r"\s+", " ", str(attraction.get("name") or "").casefold()).strip()
-        replacement = google_by_link.get(link) or google_by_name.get(name_key)
-        if replacement and replacement != current_image:
+        cid = _extract_google_maps_cid(link)
+        name_key = _normalize_attraction_key(attraction.get("name"))
+        admin_replacement = admin_by_cid.get(cid) or admin_by_link.get(link) or admin_by_name.get(name_key)
+        if not admin_replacement and _is_google_attraction_image(current_image):
+            updated_items.append(next_item)
+            continue
+        replacement = (
+            admin_replacement.get("image")
+            if admin_replacement
+            else google_by_link.get(link) or google_by_name.get(name_key)
+        )
+        replacement_position = admin_replacement.get("image_position") if admin_replacement else None
+        if replacement and (
+            replacement != current_image
+            or (replacement_position and next_item.get("image_position") != replacement_position)
+        ):
             next_item["image"] = replacement
+            if admin_replacement:
+                next_item["image_position"] = replacement_position or "center center"
+                next_item["image_source"] = "admin"
+                next_item["admin_image"] = True
             changed = True
         updated_items.append(next_item)
 
@@ -1865,6 +2619,85 @@ def _build_google_places_headers(rapidapi_key: str, field_mask: str) -> dict[str
         "Content-Type": "application/json",
         "X-Goog-FieldMask": field_mask,
     }
+
+
+def _build_restaurant_search_query(city_name: str, question: str, language: str) -> str:
+    normalized_question = re.sub(r"\s+", " ", str(question or "").strip())
+    if not normalized_question:
+        return f"best restaurants in {city_name}"
+
+    has_food_signal = bool(
+        re.search(
+            r"(ресторан|кафе|бар|где\s+поесть|покушать|поужинать|пообедать|завтрак|ужин|обед|"
+            r"restaurant|cafe|bar|eat|food|breakfast|lunch|dinner)",
+            normalized_question,
+            re.IGNORECASE,
+        )
+    )
+    if not has_food_signal:
+        return f"best restaurants in {city_name}"
+
+    if language == "ru":
+        return f"{normalized_question} {city_name}"
+    return f"{normalized_question} in {city_name}"
+
+
+async def _search_restaurants_for_assistant(
+    city: str,
+    question: str,
+    language: str,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    rapidapi_key = os.getenv("RAPIDAPI_KEY", "").strip()
+    city_name = city.split(",")[0].strip()
+    if not rapidapi_key or not city_name:
+        return []
+
+    payload = {
+        "textQuery": _build_restaurant_search_query(city_name, question, language),
+        "languageCode": language if language in {"ru", "en"} else "ru",
+        "maxResultCount": max(1, min(limit, 8)),
+    }
+    headers = _build_google_places_headers(
+        rapidapi_key,
+        "places.displayName,places.formattedAddress,places.rating,places.userRatingCount,"
+        "places.googleMapsUri,places.priceLevel,places.primaryTypeDisplayName",
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.post(
+                "https://google-map-places-new-v2.p.rapidapi.com/v1/places:searchText",
+                json=payload,
+                headers=headers,
+            )
+        if response.status_code != 200:
+            print(f"[Assistant restaurants] Google Places returned {response.status_code}: {response.text[:200]}")
+            return []
+
+        places = response.json().get("places", []) or []
+        results: list[dict[str, Any]] = []
+        for place in places[:limit]:
+            if not isinstance(place, dict):
+                continue
+            name = str(((place.get("displayName") or {}).get("text")) or "").strip()
+            if not name:
+                continue
+            results.append(
+                {
+                    "name": name,
+                    "address": str(place.get("formattedAddress") or "").strip() or None,
+                    "rating": place.get("rating"),
+                    "reviews_count": place.get("userRatingCount"),
+                    "price_level": str(place.get("priceLevel") or "").strip() or None,
+                    "type_label": str(((place.get("primaryTypeDisplayName") or {}).get("text")) or "").strip() or None,
+                    "link": str(place.get("googleMapsUri") or "").strip() or None,
+                }
+            )
+        return results
+    except Exception as exc:
+        print(f"[Assistant restaurants] search failed: {exc}")
+        return []
 
 
 async def _search_wikipedia_title(
@@ -1932,14 +2765,22 @@ async def _localize_attraction_names_with_wikipedia(
                 current_name,
             ):
                 localized_name = await _search_wikipedia_title(query, "ru", client)
-                if localized_name and not _needs_ru_attraction_name_localization(localized_name, "ru"):
+                if (
+                    localized_name
+                    and not _needs_ru_attraction_name_localization(localized_name, "ru")
+                    and not _is_obviously_non_attraction_name(localized_name)
+                ):
                     break
             ATTRACTION_NAME_CACHE[cache_key] = localized_name or ""
 
         if localized_name == "":
             localized_name = None
 
-        if localized_name and not _needs_ru_attraction_name_localization(localized_name, "ru"):
+        if (
+            localized_name
+            and not _needs_ru_attraction_name_localization(localized_name, "ru")
+            and not _is_obviously_non_attraction_name(localized_name)
+        ):
             next_item["name"] = localized_name
             changed = localized_name != current_name or changed
 
@@ -2048,7 +2889,7 @@ async def _hydrate_google_photos_for_final_attractions(
     for attraction in attractions:
         next_item = dict(attraction)
         current_image = str(attraction.get("image") or "").strip()
-        if _is_google_attraction_image(current_image):
+        if _is_admin_attraction_image(attraction) or _is_google_attraction_image(current_image):
             updated_items.append(next_item)
             continue
 
@@ -2139,7 +2980,7 @@ async def get_attractions(
     cache_key = f"{city_name}_{lang}_{limit}".lower()
     merge_limit = max(limit * 2, limit)
     rapidapi_key = os.getenv("RAPIDAPI_KEY", "").strip()
-    curated_results = _build_curated_attractions(city_name, merge_limit) if lang == "en" else []
+    curated_results = _build_curated_attractions(city_name, merge_limit)
     
     # 1. Поиск в БД (Кэш)
     cached_obj = await crud.get_city_attractions(db, cache_key)
@@ -2324,7 +3165,7 @@ async def get_attractions(
             }
             headers = _build_google_places_headers(
                 rapidapi_key,
-                "places.displayName,places.rating,places.googleMapsUri,places.userRatingCount,places.photos",
+                "places.displayName,places.rating,places.googleMapsUri,places.userRatingCount,places.photos,places.location,places.priceLevel,places.primaryTypeDisplayName,places.types",
             )
             photo_ref_by_link: dict[str, str] = {}
 
@@ -2343,7 +3184,7 @@ async def get_attractions(
                     name = p.get("displayName", {}).get("text", "")
                     if not name:
                         continue
-                    
+
                     maps_url = p.get("googleMapsUri", f"https://www.google.com/maps/search/?api=1&query={url_quote(name + ', ' + city_name)}")
 
                     photos = p.get("photos", [])
@@ -2356,6 +3197,11 @@ async def get_attractions(
                         "name": name,
                         "image": None,
                         "link": maps_url,
+                        "lat": (p.get("location") or {}).get("latitude"),
+                        "lng": (p.get("location") or {}).get("longitude"),
+                        "rating": p.get("rating"),
+                        "price_level": str(p.get("priceLevel") or "").strip() or None,
+                        "place_type": (p.get("primaryTypeDisplayName") or {}).get("text") or ((p.get("types") or [None])[0]),
                     })
 
             if results:
@@ -2394,8 +3240,181 @@ async def get_attractions(
         return await return_fallback_results()
 
 
+def _validate_admin_attraction_image_url(image_url: str) -> str:
+    normalized = str(image_url or "").strip()
+    if normalized.startswith("data:image/"):
+        return normalized
+    try:
+        parsed = urlparse(normalized)
+    except Exception:
+        parsed = None
+    if not parsed or parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="Нужна прямая http/https ссылка на картинку")
+    return normalized
+
+
+_ATTRACTION_IMAGE_POSITIONS = {
+    "center center",
+    "top center",
+    "bottom center",
+    "center left",
+    "center right",
+    "top left",
+    "top right",
+    "bottom left",
+    "bottom right",
+}
+
+
+def _validate_admin_attraction_image_position(position: str | None) -> str:
+    normalized = re.sub(r"\s+", " ", str(position or "center center").strip().lower())
+    if normalized not in _ATTRACTION_IMAGE_POSITIONS:
+        raise HTTPException(status_code=400, detail="Некорректная область отображения картинки")
+    return normalized
+
+
+@app.get("/attractions/image-proxy")
+async def proxy_attraction_image(url: str = Query(...)):
+    """Проксирование внешней картинки, чтобы её можно было безопасно кадрировать в браузере."""
+    normalized_url = _validate_admin_attraction_image_url(url)
+    if normalized_url.startswith("data:image/"):
+        raise HTTPException(status_code=400, detail="Data URL не нужно проксировать")
+
+    try:
+        async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
+            response = await client.get(
+                normalized_url,
+                headers={"User-Agent": "Luggify/1.0"},
+            )
+    except Exception:
+        raise HTTPException(status_code=502, detail="Не удалось загрузить картинку по ссылке")
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=404, detail="Картинка по ссылке недоступна")
+
+    content_type = str(response.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Ссылка должна вести прямо на файл изображения")
+
+    content = response.content
+    if len(content) > 12 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Картинка слишком большая")
+
+    return Response(
+        content=content,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+def _apply_admin_attraction_image_override(
+    attractions: list[dict],
+    payload: schemas.AttractionImageUpdate,
+    image_url: str,
+    image_position: str,
+    admin_user_id: int,
+) -> tuple[list[dict], bool]:
+    updated: list[dict] = []
+    changed = False
+    updated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+    for attraction in attractions or []:
+        next_item = dict(attraction or {})
+        if _attraction_matches_target(next_item, payload.attraction_name, payload.attraction_link):
+            if (
+                next_item.get("image") != image_url
+                or next_item.get("image_position") != image_position
+                or next_item.get("image_source") != "admin"
+            ):
+                next_item["image"] = image_url
+                next_item["image_position"] = image_position
+                next_item["image_source"] = "admin"
+                next_item["admin_image"] = True
+                next_item["admin_image_updated_at"] = updated_at
+                next_item["admin_image_updated_by"] = admin_user_id
+                changed = True
+        updated.append(next_item)
+
+    return updated, changed
+
+
+@app.patch("/attractions/image")
+async def update_attraction_image(
+    payload: schemas.AttractionImageUpdate,
+    admin_user=Depends(require_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Админская замена картинки достопримечательности в общем DB-кэше."""
+    image_url = _validate_admin_attraction_image_url(payload.image)
+    image_position = _validate_admin_attraction_image_position(payload.image_position)
+    city_name = payload.city.split(",")[0].strip()
+    if not city_name:
+        raise HTTPException(status_code=400, detail="Город не указан")
+    cache_key = f"{city_name}_{payload.lang}_{payload.limit}".lower()
+    normalized_city = city_name.strip().lower()
+
+    rows = await db.execute(
+        select(models.CityAttraction).where(models.CityAttraction.city_name.like(f"{normalized_city}_%"))
+    )
+    cached_variants = rows.scalars().all()
+    if not cached_variants:
+        raise HTTPException(status_code=404, detail="Кэш достопримечательностей для города ещё не создан")
+
+    updated_keys: list[str] = []
+    for variant in cached_variants:
+        next_data, changed = _apply_admin_attraction_image_override(
+            variant.data or [],
+            payload,
+            image_url,
+            image_position,
+            admin_user.id,
+        )
+        if changed:
+            variant.data = next_data
+            updated_keys.append(variant.city_name)
+
+    if not updated_keys:
+        raise HTTPException(status_code=404, detail="Достопримечательность не найдена в кэше")
+
+    await db.commit()
+
+    current_cache = await crud.get_city_attractions(db, cache_key)
+    if current_cache:
+        return {"attractions": current_cache.data, "updated_cache_keys": updated_keys}
+
+    return {"attractions": cached_variants[0].data, "updated_cache_keys": updated_keys}
+
+
 # === Feature: Flight Search (Travelpayouts) ===
 TRAVELPAYOUTS_TOKEN = os.getenv("TRAVELPAYOUTS_TOKEN", "")
+AIRLINE_NAME_CACHE: dict[str, str] = {}
+AIRLINE_NAME_CACHE_UPDATED = 0
+AIRLINE_NAME_CACHE_TTL = 86400  # 24 hours
+
+
+async def get_airline_name_map(client: httpx.AsyncClient) -> dict[str, str]:
+    global AIRLINE_NAME_CACHE, AIRLINE_NAME_CACHE_UPDATED
+    if AIRLINE_NAME_CACHE and time.time() - AIRLINE_NAME_CACHE_UPDATED < AIRLINE_NAME_CACHE_TTL:
+        return AIRLINE_NAME_CACHE
+
+    try:
+        response = await client.get("https://api.travelpayouts.com/data/ru/airlines.json")
+        if response.status_code == 200:
+            payload = response.json() or []
+            AIRLINE_NAME_CACHE = {
+                str(item.get("code", "")).upper(): (
+                    item.get("name")
+                    or (item.get("name_translations") or {}).get("en")
+                    or str(item.get("code", "")).upper()
+                )
+                for item in payload
+                if item.get("code")
+            }
+            AIRLINE_NAME_CACHE_UPDATED = time.time()
+    except Exception as e:
+        print(f"Airline names error: {e}")
+
+    return AIRLINE_NAME_CACHE
 
 @app.get("/flights/search")
 async def search_flights(
@@ -2403,6 +3422,10 @@ async def search_flights(
     date: str = Query(None, description="YYYY-MM-DD departure"),
     return_date: str = Query(None, description="YYYY-MM-DD return"),
     origin: str = Query(None, description="Origin city name"),
+    adults: int = Query(1, description="Number of adults"),
+    children: int = Query(0, description="Number of children 2-11"),
+    infants: int = Query(0, description="Number of infants 0-1"),
+    trip_class: str = Query("0", description="0 economy, 1 business, 2 first"),
 ):
     """Поиск дешёвых авиабилетов через Travelpayouts API"""
     if not TRAVELPAYOUTS_TOKEN:
@@ -2432,50 +3455,112 @@ async def search_flights(
                 if origin_resp.status_code == 200 and origin_resp.json():
                     origin_code = origin_resp.json()[0].get("code", "")
 
-            # Search cheap flights
-            params = {
-                "destination": dest_code,
-                "token": TRAVELPAYOUTS_TOKEN,
-                "currency": "rub",
-                "limit": 10,
-            }
-            def format_date_for_url(d_str: str) -> str:
-                if not d_str or len(d_str) < 10: return ""
-                parts = d_str.split("-")
-                return f"{parts[2]}{parts[1]}"
+            normalized_adults = max(int(adults or 1), 1)
+            normalized_children = max(int(children or 0), 0)
+            normalized_infants = max(int(infants or 0), 0)
+            max_seated = 9
+            seated_total = normalized_adults + normalized_children
+            if seated_total > max_seated:
+                overflow = seated_total - max_seated
+                normalized_children = max(normalized_children - overflow, 0)
+            if normalized_infants > normalized_adults:
+                extra_infants = normalized_infants - normalized_adults
+                normalized_infants = normalized_adults
+                normalized_children = min(max_seated - normalized_adults, normalized_children + extra_infants)
+            normalized_trip_class = str(trip_class if str(trip_class) in {"0", "1", "2"} else "0")
 
-            url_depart = format_date_for_url(date)
-            url_return = format_date_for_url(return_date)
+            def build_aviasales_link(origin_iata: str, destination_iata: str, depart_date: str | None, arrive_back_date: str | None) -> str:
+                query_params = {
+                    "origin_iata": origin_iata or "",
+                    "destination_iata": destination_iata or "",
+                    "adults": str(normalized_adults),
+                    "children": str(normalized_children),
+                    "infants": str(normalized_infants),
+                    "trip_class": normalized_trip_class,
+                    "depart_date": depart_date or "",
+                    "currency": "rub",
+                    "oneway": "false" if arrive_back_date else "true",
+                    "language": "ru",
+                    "with_request": "true",
+                }
+                if TRAVELPAYOUTS_MARKER:
+                    query_params["marker"] = TRAVELPAYOUTS_MARKER
+                if arrive_back_date:
+                    query_params["return_date"] = arrive_back_date
+                filtered_params = {key: value for key, value in query_params.items() if value not in {"", None}}
+                return str(httpx.URL("https://www.aviasales.ru/search", params=filtered_params))
 
-            generic_link = f"https://www.aviasales.ru/search/{origin_code}{url_depart}{dest_code}{url_return}1"
+            can_use_single_offer_link = normalized_trip_class == "0" and normalized_adults == 1 and normalized_children == 0 and normalized_infants == 0
+
+            def build_aviasales_offer_link(raw_link: str | None, fallback_link: str) -> str:
+                if not can_use_single_offer_link:
+                    return fallback_link
+                if not raw_link:
+                    return fallback_link
+                link = str(raw_link).strip()
+                if not link:
+                    return fallback_link
+                if link.startswith("http://") or link.startswith("https://"):
+                    return link
+                if link.startswith("/"):
+                    return f"https://www.aviasales.ru{link}"
+                return f"https://www.aviasales.ru/{link}"
+
+            generic_link = build_aviasales_link(origin_code, dest_code, date, return_date)
+            outbound_search_link = build_aviasales_link(origin_code, dest_code, date, None)
+            inbound_search_link = build_aviasales_link(dest_code, origin_code, return_date, None) if return_date and origin_code else ""
+            airline_names = await get_airline_name_map(client)
 
             # Helper: выбрать лучший рейс — приоритет прямым (без пересадок)
             def pick_best_flights(raw_flights, f_origin_default, f_dest_default, flight_type):
                 if not raw_flights:
                     return []
-                
+                filtered_flights = []
+                for raw_flight in raw_flights:
+                    raw_trip_class = raw_flight.get("trip_class")
+                    if raw_trip_class is None:
+                        if normalized_trip_class == "0":
+                            filtered_flights.append(raw_flight)
+                        continue
+                    if str(raw_trip_class) == normalized_trip_class:
+                        filtered_flights.append(raw_flight)
+
+                if not filtered_flights:
+                    return []
+
                 parsed = []
-                for f in raw_flights:
+                for f in filtered_flights:
                     f_origin = f.get("origin", f_origin_default)
                     f_dest = f.get("destination", f_dest_default)
-                    
-                    api_link = f.get("link")
-                    if api_link:
-                        link = f"https://www.aviasales.ru{api_link}"
-                    else:
-                        link = f"https://www.aviasales.ru/search/{f_origin}{url_depart}{f_dest}{url_return}1"
+                    f_origin_airport = f.get("origin_airport") or ""
+                    f_dest_airport = f.get("destination_airport") or ""
+                    origin_label = f_origin_airport or f_origin
+                    destination_label = f_dest_airport or f_dest
+
+                    segment_return_date = None
+                    fallback_link = build_aviasales_link(
+                        f_origin,
+                        f_dest,
+                        date if flight_type == "outbound" else return_date,
+                        segment_return_date,
+                    )
                     
                     duration = f.get("duration_to") or f.get("duration") or 0
                     
                     parsed.append({
                         "price": f.get("price") or f.get("value") or 999999,
                         "airline": f.get("airline"),
+                        "airline_name": airline_names.get((f.get("airline") or "").upper(), f.get("airline")),
                         "departure_at": f.get("departure_at"),
                         "origin": f_origin,
                         "destination": f_dest,
+                        "origin_airport": f_origin_airport,
+                        "destination_airport": f_dest_airport,
+                        "origin_label": origin_label,
+                        "destination_label": destination_label,
                         "transfers": f.get("transfers", 0),
                         "duration": duration,
-                        "link": link,
+                        "link": build_aviasales_offer_link(f.get("link"), fallback_link),
                         "type": flight_type,
                     })
                 
@@ -2536,39 +3621,16 @@ async def search_flights(
                         inbound = pick_best_flights(raw, dest_code, inbound_dest or "", "inbound")
                 except Exception: pass
 
-            return {"flights": outbound + inbound, "destination_code": dest_code, "generic_link": generic_link}
+            return {
+                "flights": outbound + inbound,
+                "destination_code": dest_code,
+                "generic_link": generic_link,
+                "outbound_link": outbound_search_link,
+                "inbound_link": inbound_search_link,
+            }
     except Exception as e:
         print(f"Flights error: {e}")
         return {"flights": []}
-
-
-# === Currency Exchange Rates (free, no API key) ===
-
-EXCHANGE_RATES = {}  # currency -> RUB rate
-EXCHANGE_RATES_UPDATED = 0
-EXCHANGE_RATES_TTL = 86400  # 24 часа
-
-async def get_rub_rate(currency: str) -> float:
-    """Получить курс валюты к RUB. Бесплатный API, без ключа."""
-    global EXCHANGE_RATES, EXCHANGE_RATES_UPDATED
-    if currency == "RUB":
-        return 1.0
-    if EXCHANGE_RATES and time.time() - EXCHANGE_RATES_UPDATED < EXCHANGE_RATES_TTL:
-        return EXCHANGE_RATES.get(currency, 0)
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get("https://open.er-api.com/v6/latest/RUB")
-            if resp.status_code == 200:
-                data = resp.json()
-                rates = data.get("rates", {})
-                # rates содержит: сколько единиц валюты в 1 RUB
-                # Нам нужно наоборот: сколько RUB в 1 единице валюты
-                EXCHANGE_RATES = {cur: 1.0/rate for cur, rate in rates.items() if rate > 0}
-                EXCHANGE_RATES_UPDATED = time.time()
-                print(f"Exchange rates updated: EUR={EXCHANGE_RATES.get('EUR', '?'):.1f}₽, USD={EXCHANGE_RATES.get('USD', '?'):.1f}₽")
-    except Exception as e:
-        print(f"Exchange rates error: {e}")
-    return EXCHANGE_RATES.get(currency, 0)
 
 
 # === Feature: Hotel Search (RapidAPI Booking.com - ntd119/booking-com18) ===
@@ -2577,6 +3639,7 @@ RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
 HOTELS_LOCATION_CACHE = {}  # key: city_name_lower -> locationId (permanent, city IDs don't change)
 HOTELS_CACHE = {}  # key: (city, check_in, check_out) -> (data, timestamp)
 HOTELS_CACHE_TTL = 604800  # 7 дней — экономим запросы (530/мес, ~265 поисков)
+HOTELS_CACHE_VERSION = "rooms_v2"
 
 @app.get("/hotels/search")
 async def search_hotels(
@@ -2585,8 +3648,13 @@ async def search_hotels(
     check_out: str = Query(None, description="YYYY-MM-DD"),
     price_min: int = Query(None, description="Min price per night in RUB"),
     price_max: int = Query(None, description="Max price per night in RUB"),
+    review_score: int = Query(None, description="Min review score"),
+    min_bedrooms: int = Query(None, description="Min bedroom count"),
     adults: int = Query(2, description="Number of adults"),
     children_ages: str = Query(None, description="Comma-separated children ages"),
+    rooms: int = Query(1, description="Number of hotel rooms"),
+    currency: str = Query("RUB", description="Display currency"),
+    locale: str = Query("ru", description="Booking locale"),
 ):
     """Поиск отелей через RapidAPI booking-com18 (ntd119) — с фото, ценами, рейтингом"""
     # Используем полное имя города (напр. "Paris, France") для точного поиска
@@ -2615,6 +3683,94 @@ async def search_hotels(
 
     t_check_in = d_in.strftime("%Y-%m-%d")
     t_check_out = d_out.strftime("%Y-%m-%d")
+    normalized_adults = max(int(adults or 1), 1)
+    normalized_currency = str(currency or "RUB").upper()
+    if normalized_currency not in {"RUB", "USD", "EUR"}:
+        normalized_currency = "RUB"
+    normalized_locale = str(locale or "ru").lower()
+    if normalized_locale not in {"ru", "en-us", "en"}:
+        normalized_locale = "ru"
+    normalized_hotel_children_ages = []
+    if children_ages:
+        for raw_age in children_ages.split(","):
+            try:
+                age = int(raw_age.strip())
+            except (TypeError, ValueError):
+                continue
+            if 0 <= age <= 17:
+                normalized_hotel_children_ages.append(age)
+    total_hotel_guests = max(normalized_adults + len(normalized_hotel_children_ages), 1)
+    try:
+        requested_rooms = int(rooms or 1)
+    except (TypeError, ValueError):
+        requested_rooms = 1
+    normalized_rooms = min(max(requested_rooms, 1), min(total_hotel_guests, 8))
+    normalized_review_score = max(min(int(review_score or 0), 10), 0)
+    normalized_min_bedrooms = max(min(int(min_bedrooms or 0), 6), 0)
+    normalized_price_min = max(int(price_min or 0), 0)
+    normalized_price_max = max(int(price_max or 0), 0)
+    if normalized_price_max and normalized_price_min and normalized_price_min > normalized_price_max:
+        normalized_price_min, normalized_price_max = normalized_price_max, normalized_price_min
+
+    def build_accommodation_unit_plan(adults_count: int, child_ages: list[int], units_count: int):
+        group_count = min(max(int(units_count or 1), 1), min(max(adults_count + len(child_ages), 1), 8))
+        groups = [{"adults": 0, "children_ages": []} for _ in range(group_count)]
+
+        def pick_target_index(prefer_adult_host: bool = False) -> int:
+            best_index = 0
+            for index, group in enumerate(groups):
+                best_group = groups[best_index]
+                group_guests = group["adults"] + len(group["children_ages"])
+                best_guests = best_group["adults"] + len(best_group["children_ages"])
+                if group_guests != best_guests:
+                    if group_guests < best_guests:
+                        best_index = index
+                    continue
+                if prefer_adult_host and group["adults"] != best_group["adults"]:
+                    if group["adults"] > best_group["adults"]:
+                        best_index = index
+                    continue
+                if len(group["children_ages"]) != len(best_group["children_ages"]):
+                    if len(group["children_ages"]) < len(best_group["children_ages"]):
+                        best_index = index
+                    continue
+                if index < best_index:
+                    best_index = index
+            return best_index
+
+        for _ in range(max(adults_count, 1)):
+            groups[pick_target_index(False)]["adults"] += 1
+
+        for age in child_ages:
+            groups[pick_target_index(True)]["children_ages"].append(age)
+
+        for group in groups:
+            if group["adults"] > 0 or not group["children_ages"]:
+                continue
+            donor_index = next((index for index, candidate in enumerate(groups) if candidate["adults"] > 1), None)
+            if donor_index is not None:
+                groups[donor_index]["adults"] -= 1
+                group["adults"] += 1
+
+        normalized_groups = []
+        for group in groups:
+            normalized_groups.append({
+                "adults": group["adults"],
+                "children_ages": sorted(group["children_ages"]),
+                "total_guests": group["adults"] + len(group["children_ages"]),
+            })
+
+        representative_group = max(
+            normalized_groups,
+            key=lambda group: (group["total_guests"], group["adults"], len(group["children_ages"])),
+        )
+
+        return {
+            "unit_count": group_count,
+            "total_guests": max(adults_count + len(child_ages), 1),
+            "groups": normalized_groups,
+            "representative_group": representative_group,
+        }
 
     # Кол-во ночей для расчёта цены за ночь
     num_nights = max((d_out - d_in).days, 1)
@@ -2632,11 +3788,36 @@ async def search_hotels(
 
     if is_russia:
         print(f"Hotels search: {city_name} is in Russia. Routing to ru_widgets.")
-        
+        placement = build_accommodation_unit_plan(
+            normalized_adults,
+            normalized_hotel_children_ages,
+            normalized_rooms,
+        )
+        placement_group = placement["representative_group"]
+        placement_adults = max(int(placement_group.get("adults", 0) or 0), 1)
+        placement_children_ages = [
+            int(age)
+            for age in placement_group.get("children_ages", [])
+            if isinstance(age, int)
+        ]
+        placement_children_query = ",".join(str(age) for age in placement_children_ages)
+
         # Sutochno: прямая ссылка в SPA поисковик
-        sutochno_target = f"https://sutochno.ru/front/searchapp/search?guests_adults={adults}&occupied={t_check_in};{t_check_out}&term={url_quote(city_short)}"
-        if children_ages:
-            sutochno_target += f"&guests_childrens={children_ages}"
+        sutochno_target = (
+            f"https://sutochno.ru/front/searchapp/search"
+            f"?guests_adults={placement_adults}"
+            f"&occupied={t_check_in};{t_check_out}"
+            f"&term={url_quote(city_short)}"
+        )
+        if placement_children_query:
+            sutochno_target += f"&guests_childrens={placement_children_query}"
+        if normalized_review_score > 0:
+            sutochno_target += f"&review_score={normalized_review_score}"
+        if normalized_min_bedrooms > 0:
+            sutochno_target += f"&separate_bedrooms={normalized_min_bedrooms}"
+        if normalized_price_max > 0 or normalized_price_min > 0:
+            sutochno_price_max = normalized_price_max if normalized_price_max > 0 else 999999
+            sutochno_target += f"&price={normalized_price_min},{sutochno_price_max}"
         
         # Ostrovok: хардкодим ID популярных городов, чтобы гарантировать идеальный предзаполненный поиск
         ostrovok_map = {
@@ -2659,15 +3840,27 @@ async def search_hotels(
 
         o_dates = f"{d_in.strftime('%d.%m.%Y')}-{d_out.strftime('%d.%m.%Y')}"
         
-        o_guests = str(adults)
-        if children_ages:
-            o_guests += f"and{children_ages.replace(',', '.')}"
+        o_guests = str(placement_adults)
+        if placement_children_query:
+            o_guests += f"and{placement_children_query.replace(',', '.')}"
+        if normalized_min_bedrooms > 0:
+            max_bedrooms = max(normalized_min_bedrooms, 6)
+            bedroom_values = ".".join(str(value) for value in range(normalized_min_bedrooms, max_bedrooms + 1))
+        else:
+            bedroom_values = ""
 
         o_data = ostrovok_map.get(c_lower)
         if o_data:
             ostrovok_target = f"https://ostrovok.ru/hotel/{o_data['slug']}/?q={o_data['id']}&dates={o_dates}&guests={o_guests}"
         else:
             ostrovok_target = f"https://ostrovok.ru/?q={url_quote(city_short)}&dates={o_dates}&guests={o_guests}"
+        if normalized_review_score > 0:
+            ostrovok_target += f"&reviews_rating={normalized_review_score}"
+        if bedroom_values:
+            ostrovok_target += f"&bedrooms={bedroom_values}"
+        if normalized_price_max > 0 or normalized_price_min > 0:
+            ostrovok_price_max = normalized_price_max if normalized_price_max > 0 else 999999
+            ostrovok_target += f"&price={normalized_price_min}-{ostrovok_price_max}"
         
         if TRAVELPAYOUTS_MARKER:
             ostrovok_link = f"https://tp.media/r?marker={TRAVELPAYOUTS_MARKER}&p=7038&u={url_quote(ostrovok_target)}&campaign_id=459"
@@ -2680,6 +3873,7 @@ async def search_hotels(
             "provider": "ru_widgets",
             "hotels": [],
             "num_nights": num_nights,
+            "placement": placement,
             "links": {
                 "ostrovok": ostrovok_link,
                 "sutochno": sutochno_link
@@ -2695,6 +3889,9 @@ async def search_hotels(
                     "name": f"Grand Hotel {city_name}",
                     "stars": 5,
                     "price_per_night": 12500,
+                    "price_rub": 12500,
+                    "price_usd": 135,
+                    "currency": "RUB",
                     "rating": 9.2,
                     "image": None,
                     "review_word": "Превосходно",
@@ -2704,6 +3901,9 @@ async def search_hotels(
                     "name": f"City Center Apartments",
                     "stars": 4,
                     "price_per_night": 4500,
+                    "price_rub": 4500,
+                    "price_usd": 49,
+                    "currency": "RUB",
                     "rating": 8.7,
                     "image": None,
                     "review_word": "Отлично",
@@ -2713,6 +3913,9 @@ async def search_hotels(
                     "name": f"Budget Hostel {city_name}",
                     "stars": 2,
                     "price_per_night": 1200,
+                    "price_rub": 1200,
+                    "price_usd": 13,
+                    "currency": "RUB",
                     "rating": 7.5,
                     "image": None,
                     "review_word": "Хорошо",
@@ -2722,10 +3925,20 @@ async def search_hotels(
             "error": "RAPIDAPI_KEY not configured. Showing mock data."
         }
 
-    print(f"Hotels search: city='{city_name}', dates={t_check_in}→{t_check_out}, nights={num_nights}")
+    print(f"Hotels search: city='{city_name}', dates={t_check_in}→{t_check_out}, nights={num_nights}, rooms={normalized_rooms}")
 
     # Проверяем кеш
-    cache_key = (city_name.lower(), t_check_in, t_check_out)
+    cache_key = (
+        HOTELS_CACHE_VERSION,
+        city_name.lower(),
+        t_check_in,
+        t_check_out,
+        normalized_adults,
+        ",".join(str(age) for age in normalized_hotel_children_ages),
+        normalized_rooms,
+        normalized_currency,
+        normalized_locale,
+    )
     if cache_key in HOTELS_CACHE:
         cached_data, cached_at = HOTELS_CACHE[cache_key]
         if time.time() - cached_at < HOTELS_CACHE_TTL:
@@ -2778,18 +3991,24 @@ async def search_hotels(
                 HOTELS_LOCATION_CACHE[city_key] = location_id
 
             # 2. Ищем отели
+            search_params = {
+                "locationId": location_id,
+                "checkinDate": t_check_in,
+                "checkoutDate": t_check_out,
+                "adults": str(normalized_adults),
+                "rooms": str(normalized_rooms),
+                "currency": normalized_currency,
+                "locale": normalized_locale,
+                "sort": "popularity",
+            }
+            if normalized_hotel_children_ages:
+                search_params["children"] = str(len(normalized_hotel_children_ages))
+                search_params["childrenAges"] = ",".join(str(age) for age in normalized_hotel_children_ages)
+
             search_resp = await client.get(
                 "https://booking-com18.p.rapidapi.com/stays/search",
                 headers=headers,
-                params={
-                    "locationId": location_id,
-                    "checkinDate": t_check_in,
-                    "checkoutDate": t_check_out,
-                    "adults": "1",
-                    "currency": "RUB",
-                    "locale": "ru",
-                    "sort": "review_score",
-                }
+                params=search_params
             )
 
             if search_resp.status_code != 200:
@@ -2802,10 +4021,71 @@ async def search_hotels(
                 # Попробуем альтернативную структуру
                 results = search_data.get("result", [])
 
+            airport_keywords = ("airport", "aeroport", "aéroport", "аэропорт", "palexpo", "terminal")
+            wants_airport_area = any(keyword in c_lower for keyword in airport_keywords)
+
+            def extract_distance_km(raw_hotel: dict) -> float | None:
+                distance_keys = (
+                    "distance",
+                    "distanceToCenter",
+                    "distanceFromCenter",
+                    "distanceToCC",
+                    "distance_to_cc",
+                    "distance_to_center",
+                )
+                for key in distance_keys:
+                    raw_value = raw_hotel.get(key)
+                    if raw_value is None:
+                        continue
+                    if isinstance(raw_value, (int, float)):
+                        return float(raw_value)
+                    if isinstance(raw_value, dict):
+                        for nested_key in ("value", "distance", "km"):
+                            nested_value = raw_value.get(nested_key)
+                            if isinstance(nested_value, (int, float)):
+                                return float(nested_value)
+                    match = re.search(r"(\d+(?:[.,]\d+)?)\s*(km|км)", str(raw_value).lower())
+                    if match:
+                        return float(match.group(1).replace(",", "."))
+                return None
+
+            def is_airport_area(raw_hotel: dict, hotel_name: str) -> bool:
+                haystack_parts = [
+                    hotel_name,
+                    raw_hotel.get("address", ""),
+                    raw_hotel.get("district", ""),
+                    raw_hotel.get("wishlistName", ""),
+                    raw_hotel.get("location", ""),
+                ]
+                haystack = " ".join(str(part or "").lower() for part in haystack_parts)
+                return any(keyword in haystack for keyword in airport_keywords)
+
+            def is_hotel_available(raw_hotel: dict, price_value) -> bool:
+                if not price_value:
+                    return False
+                unavailable_markers = (
+                    "soldout",
+                    "isSoldOut",
+                    "is_sold_out",
+                    "isClosed",
+                    "is_closed",
+                    "isUnavailable",
+                    "is_unavailable",
+                )
+                if any(bool(raw_hotel.get(key)) for key in unavailable_markers):
+                    return False
+                false_availability_keys = ("available", "isAvailable", "is_available", "hasAvailability", "has_availability")
+                for key in false_availability_keys:
+                    if key in raw_hotel and raw_hotel.get(key) is False:
+                        return False
+                return True
+
             hotels = []
             for h in results:  # парсим все ~20 результатов для качественной сортировки
                 # Данные на верхнем уровне (реальная структура API)
                 name = h.get("name", "")
+                distance_km = extract_distance_km(h)
+                airport_area = is_airport_area(h, name)
 
                 # Фото — API возвращает square60, заменяем на square600 для качества
                 photo_urls = h.get("photoUrls", [])
@@ -2827,20 +4107,41 @@ async def search_hotels(
                 total_price = gross_price.get("value")
                 price = round(total_price / num_nights, 2) if total_price else None
                 currency = gross_price.get("currency", "EUR")
+                if not is_hotel_available(h, price):
+                    continue
 
                 # Ссылка — самый надежный вариант это поиск по точному имени отеля,
                 # Booking.com отлично его понимает и открывает страницу отеля или показывает его на первом месте (без 404)
                 name_encoded = url_quote(name)
-                link = f"https://www.booking.com/searchresults.html?ss={name_encoded}&checkin={t_check_in}&checkout={t_check_out}&group_adults=1"
+                booking_children_query = ""
+                if normalized_hotel_children_ages:
+                    booking_children_query = (
+                        f"&group_children={len(normalized_hotel_children_ages)}"
+                        + "".join(f"&age={age}" for age in normalized_hotel_children_ages)
+                    )
+                link = (
+                    f"https://www.booking.com/searchresults.html?ss={name_encoded}"
+                    f"&checkin={t_check_in}&checkout={t_check_out}"
+                    f"&group_adults={normalized_adults}{booking_children_query}&no_rooms={normalized_rooms}"
+                )
 
                 # Конвертируем цену в рубли
                 price_rub = None
+                price_usd = None
                 if price and currency and currency != "RUB":
                     rub_rate = await get_rub_rate(currency)
                     if rub_rate > 0:
                         price_rub = round(price * rub_rate)
                 elif price and currency == "RUB":
                     price_rub = round(price)
+                if price:
+                    if currency == "USD":
+                        price_usd = round(price)
+                    else:
+                        rub_value = price_rub
+                        usd_rate = await get_rub_rate("USD")
+                        if rub_value and usd_rate > 0:
+                            price_usd = round(rub_value / usd_rate)
 
                 if name:
                     hotels.append({
@@ -2848,10 +4149,13 @@ async def search_hotels(
                         "stars": int(stars) if stars else 0,
                         "price_per_night": round(price) if price else None,
                         "price_rub": price_rub,
+                        "price_usd": price_usd,
                         "currency": currency,
                         "rating": review_score,
                         "review_word": review_word,
                         "review_count": review_count,
+                        "distance_km": distance_km,
+                        "airport_area": airport_area,
                         "image": image,
                         "link": link,
                     })
@@ -2859,13 +4163,30 @@ async def search_hotels(
             # --- Качественная фильтрация и сортировка ---
             # 1. Убираем отели с рейтингом ниже 6.0 ("Bad", "Poor")
             hotels = [h for h in hotels if not h["rating"] or h["rating"] >= 6.0]
-            # 2. Сортируем: сначала с отзывами и высоким рейтингом
-            #    (без рейтинга уходят вниз)
-            hotels.sort(key=lambda x: (
-                x["rating"] is not None,      # с рейтингом — вперёд
-                x["rating"] or 0,              # выше рейтинг — выше
-                x["review_count"] or 0,        # больше отзывов — выше
-            ), reverse=True)
+            # 2. Сортируем как городскую подборку: сначала не аэропорт,
+            #    затем ближе к центру, потом рейтинг и отзывы.
+            def hotel_sort_key(hotel: dict):
+                distance = hotel.get("distance_km")
+                if distance is None:
+                    distance_bucket = 1
+                elif distance <= 2.5:
+                    distance_bucket = 0
+                elif distance <= 6:
+                    distance_bucket = 1
+                elif distance <= 10:
+                    distance_bucket = 2
+                else:
+                    distance_bucket = 3
+                airport_penalty = 0 if wants_airport_area or not hotel.get("airport_area") else 1
+                return (
+                    airport_penalty,
+                    distance_bucket,
+                    -(hotel.get("rating") or 0),
+                    -(hotel.get("review_count") or 0),
+                    hotel.get("price_rub") or 10**9,
+                )
+
+            hotels.sort(key=hotel_sort_key)
             # 3. Берём топ-10
             hotels = hotels[:10]
 
@@ -3299,12 +4620,12 @@ async def calculate_packing_data(
     city: str,
     start_date_str: str,
     end_date_str: str,
-    trip_type: str,
+    trip_profile: dict | None,
     transport: str,
     gender: str,
     traveling_with_pet: bool,
     has_allergies: bool,
-    has_chronic_diseases: bool,
+    traveling_with_children: bool,
     language: str = "ru"
 ):
     # 1. Geocoding
@@ -3428,7 +4749,6 @@ async def calculate_packing_data(
     daily_forecast = []
     temps = []
     conditions = set()
-    wmo_codes = set()
     humidities = []
     uv_indices = []
     wind_speeds = []
@@ -3449,202 +4769,49 @@ async def calculate_packing_data(
         ))
         temps.append((item["temp_min"] + item["temp_max"]) / 2)
         conditions.add(item["condition"])
-        wmo_codes.add(item["weathercode"])
         if item["humidity"]: humidities.append(item["humidity"])
         if item["uv_index"]: uv_indices.append(item["uv_index"])
         if item["wind_speed"]: wind_speeds.append(item["wind_speed"])
 
     avg_temp = round(sum(temps) / len(temps), 1) if temps else None
-    
+
     # Calculate trip duration
-    start_dt_date = start_dt if isinstance(start_dt, type(start_dt)) else start_dt
-    end_dt_date = end_dt if isinstance(end_dt, type(end_dt)) else end_dt
     try:
         trip_days = (end_dt.date() - start_dt.date()).days + 1
     except:
         trip_days = (end_dt - start_dt).days + 1
     trip_days = max(trip_days, 1)
-    
-    # Items Generation
-    items = set()
-
-    # ========== BASE ESSENTIALS (always included) ==========
-    items.update([
-        get_item("underwear", language),
-        get_item("socks", language),
-        get_item("pajamas", language),
-        get_item("towel", language),
-        get_item("copies_docs", language),
-    ])
-    
-    # Base hygiene (always)
-    items.update([
-        get_item("toothbrush", language),
-        get_item("deodorant", language),
-        get_item("soap", language),
-        get_item("shampoo", language),
-        get_item("hairbrush", language),
-        get_item("sanitizer", language),
-        get_item("tissues", language),
-    ])
-    
-    # Base tech (always)
-    items.update([
-        get_item("phone", language),
-        get_item("charger", language),
-        get_item("headphones", language),
-    ])
-    
-    # Base pharmacy (always)
-    items.update([
-        get_item("painkillers", language),
-        get_item("plasters", language),
-        get_item("activated_charcoal", language),
-    ])
-
-    # ========== DURATION-BASED QUANTITIES ==========
-    if trip_days > 7:
-        items.add(get_item("laundry_bag", language))
-        items.add(get_item("packing_cubes", language))
-    if trip_days > 3:
-        items.add(get_item("dry_shampoo", language))
-
-    # ========== WEATHER-BASED ITEMS ==========
-    if hums := [h for h in humidities if h > 80]:
-         items.add(get_item("styling", language))
-    if uvs := [u for u in uv_indices if u > 5]:
-         items.update([get_item("sunscreen_50", language), get_item("hat", language), get_item("sunglasses", language)])
-    if winds := [w for w in wind_speeds if w > 30]:
-         items.update([get_item("windbreaker", language), get_item("chapstick", language), get_item("scarf_buff", language)])
-
-    if any("swim" in c.lower() or "купание" in c.lower() for c in conditions) or country in ["TH", "ES", "GR", "IT", "TR", "EG"]:
-        items.add(get_item("swimsuit", language))
-    if any("mountain" in c.lower() or "гора" in c.lower() for c in conditions):
-        items.update([get_item("trekking_shoes", language), get_item("first_aid_kit", language), get_item("thermos", language), get_item("map_compass", language)])
-
-    # ========== HEALTH CONDITIONS ==========
-    if has_allergies:
-        items.update([get_item("antihistamine", language), get_item("allergies_list", language)])
-    if has_chronic_diseases:
-        items.update([get_item("meds_personal", language), get_item("meds_regular", language), get_item("med_report", language)])
-
-    # ========== GENDER ITEMS ==========
-    if gender == "female":
-        items.update([get_item("makeup", language), get_item("hygiene_fem", language), get_item("makeup_remover", language), get_item("cotton_pads", language), get_item("nail_kit", language)])
-        if avg_temp and avg_temp > 15:
-            items.add(get_item("dress", language))
-    elif gender == "male":
-        items.add(get_item("shaving_kit", language))
-
-    # ========== TRANSPORT ITEMS ==========
-    if transport == "plane":
-        items.update([get_item("neck_pillow", language), get_item("earplugs", language), get_item("powerbank_hand", language), get_item("liquids_bag", language), get_item("eye_mask", language)])
-    elif transport == "train":
-        items.update([get_item("slippers_train", language), get_item("mug", language), get_item("powerbank", language), get_item("clothes_train", language), get_item("wipes", language), get_item("eye_mask", language)])
-    elif transport == "car":
-        items.update([get_item("license", language), get_item("car_charger", language), get_item("snacks_water", language), get_item("playlist", language), get_item("sunglasses_driver", language)])
-    elif transport == "bus":
-        items.update([get_item("neck_pillow", language), get_item("earplugs", language), get_item("snacks_water", language), get_item("wipes", language), get_item("eye_mask", language)])
-
-    # ========== TEMPERATURE-BASED CLOTHING ==========
     min_temp = min(daily_data[d]["temp_min"] for d in daily_data) if daily_data else 15
     max_temp = max(daily_data[d]["temp_max"] for d in daily_data) if daily_data else 20
-    
-    if min_temp < -10:
-        # Extreme cold
-        items.update([get_item("jacket_warm", language), get_item("hat", language), get_item("scarf", language), get_item("gloves", language), get_item("thermo", language), get_item("boots_winter", language), get_item("socks_warm", language), get_item("hand_cream", language), get_item("chapstick", language)])
-    elif min_temp < 0:
-        # Cold
-        items.update([get_item("jacket_warm", language), get_item("hat", language), get_item("scarf", language), get_item("gloves", language), get_item("thermo", language), get_item("boots_winter", language), get_item("socks_warm", language)])
-    elif min_temp < 10:
-        # Cool
-        items.update([get_item("jacket_light", language), get_item("sweater", language), get_item("jeans", language), get_item("sneakers", language), get_item("hoodie", language)])
-    elif min_temp < 18:
-        # Mild
-        items.update([get_item("tshirt", language), get_item("jeans", language), get_item("sneakers", language), get_item("jacket_light", language), get_item("long_sleeve", language)])
-    else:
-        # Warm
-        items.update([get_item("tshirt", language), get_item("shorts", language), get_item("cap", language), get_item("shoes_light", language)])
-    
-    # Rain gear
-    if any("rain" in c.lower() or "дождь" in c.lower() or "ливень" in c.lower() or "морось" in c.lower() for c in conditions):
-        items.update([get_item("raincoat", language), get_item("umbrella", language)])
-    if max_temp > 22:
-        items.update([get_item("sunglasses", language), get_item("cap", language), get_item("sunscreen", language)])
-    if max_temp > 20:
-        items.add(get_item("water_bottle", language))
-    
-    # Temperature range is large (>15°C difference) — need layers
-    if daily_data and (max_temp - min_temp) > 15:
-        items.update([get_item("hoodie", language), get_item("long_sleeve", language)])
-        
-    # ========== PET ITEMS ==========
-    if traveling_with_pet:
-        items.update([get_item("vet_passport", language), get_item("pet_food", language), get_item("pet_bowl", language), get_item("leash", language), get_item("pet_pads", language), get_item("pet_toy", language)])
-
-    # ========== TRIP TYPE ITEMS ==========
-    if trip_type == "business":
-        items.update([get_item("suit", language), get_item("shirts", language), get_item("shoes_formal", language), get_item("laptop", language), get_item("business_cards", language), get_item("perfume", language)])
-    elif trip_type == "active":
-        items.update([get_item("sportswear", language), get_item("sneakers", language), get_item("backpack_walk", language), get_item("water_bottle", language), get_item("first_aid_kit", language), get_item("motion_sickness", language)])
-    elif trip_type == "beach":
-        items.update([get_item("swimsuit", language), get_item("pareo", language), get_item("flipflops", language), get_item("beach_towel", language), get_item("after_sun", language), get_item("beach_bag", language), get_item("sunscreen_50", language)])
-    elif trip_type == "winter":
-        items.update([get_item("ski_suit", language), get_item("thermo", language), get_item("fleece", language), get_item("mittens", language), get_item("goggles", language), get_item("wind_cream", language), get_item("hand_cream", language), get_item("chapstick", language)])
-    elif trip_type == "family":
-        items.update([get_item("baby_food", language), get_item("diapers", language), get_item("baby_wipes", language), get_item("stroller", language), get_item("kids_toys", language), get_item("kids_clothes", language), get_item("child_meds", language), get_item("baby_sunscreen", language), get_item("sippy_cup", language), get_item("snacks_water", language)])
-    elif trip_type == "romantic":
-        items.update([get_item("fancy_outfit", language), get_item("perfume", language)])
-        if gender == "female":
-            items.update([get_item("heels", language), get_item("jewelry", language)])
-    elif trip_type == "camping":
-        items.update([get_item("tent", language), get_item("sleeping_bag", language), get_item("sleeping_pad", language), get_item("camp_stove", language), get_item("camping_cookware", language), get_item("multitool", language), get_item("matches", language), get_item("headlamp", language), get_item("bug_net", language), get_item("trash_bags", language), get_item("rope", language), get_item("dry_bag", language), get_item("flashlight", language), get_item("first_aid_kit", language)])
-    elif trip_type == "city_break":
-        items.update([get_item("comfy_shoes", language), get_item("city_backpack", language), get_item("portable_charger", language), get_item("guidebook", language), get_item("camera", language)])
-
-    # ========== REGIONAL RECOMMENDATIONS ==========
-    # Tropical countries — insect protection
-    tropical_countries = ["TH", "VN", "KH", "LA", "MM", "ID", "MY", "PH", "IN", "LK", "MV", "BR", "CO", "MX", "CR", "CU", "KE", "TZ", "NG"]
-    if country in tropical_countries:
-        items.update([get_item("insect_spray", language), get_item("bite_cream", language), get_item("diarrhea_meds", language), get_item("sunscreen_50", language)])
-
-    # Muslim / conservative regions — modest clothing
-    conservative_countries = ["SA", "AE", "QA", "OM", "KW", "BH", "IR", "EG", "JO", "MA"]
-    if country in conservative_countries:
-        items.update([get_item("closed_clothing", language), get_item("head_covering", language)])
-
-    # Asian temples
-    temple_countries = ["TH", "KH", "LA", "MM", "IN", "LK", "JP", "CN"]
-    if country in temple_countries:
-        items.add(get_item("closed_clothing", language))
-
-    # Non-slavic countries — phrasebook
-    non_russian_speaking = country not in ["RU", "BY", "KZ", "KG", "UA", "MD"]
-    if non_russian_speaking and country:
-        items.add(get_item("phrasebook", language))
-
-    # 110V countries — voltage converter
-    voltage_110_countries = ["US", "CA", "MX", "JP", "CO", "BR", "CU"]
-    if country in voltage_110_countries:
-        items.add(get_item("converter_110v", language))
-
-    # Visa/Adapter logic
-    visa_countries = ["FR", "DE", "IT", "ES", "GB", "US", "CN", "JP", "TR", "EG", "TH", "IN", "AU", "NZ", "BR", "CA"]
-    if country in visa_countries:
-        items.add(get_item("visa", language))
-    
-    adapter_countries = ["US", "GB", "AU", "JP", "CN", "CH", "IN", "BR", "ZA"]
-    if country in adapter_countries:
-        items.add(get_item("adapter", language))
+    recommendation_bundle = build_packing_recommendations(
+        language=language,
+        trip_days=trip_days,
+        avg_temp=avg_temp,
+        min_temp=min_temp,
+        max_temp=max_temp,
+        conditions=conditions,
+        humidities=humidities,
+        uv_indices=uv_indices,
+        wind_speeds=wind_speeds,
+        country=country,
+        transport=transport,
+        gender=gender,
+        traveling_with_pet=traveling_with_pet,
+        has_allergies=has_allergies,
+        traveling_with_children=traveling_with_children,
+        trip_profile=trip_profile,
+    )
 
     return {
-        "items": items,
+        "items": recommendation_bundle["items"],
+        "item_quantities": recommendation_bundle["item_quantities"],
         "avg_temp": avg_temp,
         "conditions": list(conditions),
         "daily_forecast": daily_forecast,
         "country": country,
         "start_date": start_dt.date(),
-        "end_date": end_dt.date()
+        "end_date": end_dt.date(),
+        "trip_profile": recommendation_bundle["trip_profile"],
     }
 
 async def create_checklist_from_items(
@@ -3656,18 +4823,24 @@ async def create_checklist_from_items(
     avg_temp,
     conditions,
     daily_forecast,
+    item_quantities=None,
+    trip_profile=None,
     user_id=None,
     language="ru",
     origin_city="",
     transports=None,
-    participant_baggage_payloads: dict[int, list[str]] | None = None,
+    participant_baggage_payloads: dict[int, dict[str, Any]] | None = None,
 ):
     # Categorization logic
     mapping = get_category_map(language)
     categories = {k: [] for k in mapping.keys()}
+    fallback_category = "Misc" if language == "en" and "Misc" in categories else "Прочее"
     
     # Always add essentials
     items.update([get_item("passport", language), get_item("insurance", language), get_item("money", language), get_item("tickets", language), get_item("booking", language)])
+    normalized_quantities = dict(item_quantities or {})
+    for item in items:
+        normalized_quantities[item] = max(int(normalized_quantities.get(item, 1) or 1), 1)
     
     for item in items:
         found = False
@@ -3677,7 +4850,7 @@ async def create_checklist_from_items(
                 found = True
                 break
         if not found:
-            categories["Прочее"].append(item)
+            categories[fallback_category].append(item)
 
     for k in categories:
         categories[k] = list(sorted(set(categories[k])))
@@ -3685,6 +4858,7 @@ async def create_checklist_from_items(
     all_items = []
     for k, v in categories.items():
         all_items.extend(v)
+    item_categories = infer_item_categories(all_items, language)
 
     checklist_data = schemas.ChecklistCreate(
         city=city,
@@ -3693,47 +4867,30 @@ async def create_checklist_from_items(
         items=[] if participant_baggage_payloads else all_items,
         avg_temp=avg_temp,
         conditions=sorted(list(conditions)),
+        item_quantities={} if participant_baggage_payloads else normalized_quantities,
+        item_categories={} if participant_baggage_payloads else item_categories,
         daily_forecast=[schemas.DailyForecast(**d) if isinstance(d, dict) else d for d in daily_forecast] if daily_forecast else None,
         user_id=user_id,
         origin_city=origin_city or None,
         transports=transports,
+        trip_type=(trip_profile or {}).get("trip_type"),
+        trip_profile=schemas.TripProfileData(**(trip_profile or {})),
     )
     checklist = await crud.create_checklist(db, checklist_data)
 
     if participant_baggage_payloads:
-        for participant_user_id, participant_items in participant_baggage_payloads.items():
-            await crud.create_user_backpack(
+        for participant_user_id, participant_payload in participant_baggage_payloads.items():
+            await ensure_default_baggage_for_participant(
                 db,
-                checklist.id,
+                checklist,
                 participant_user_id,
-                items=participant_items,
+                items=participant_payload.get("items"),
+                item_quantities=participant_payload.get("item_quantities"),
+                item_categories=participant_payload.get("item_categories"),
             )
         checklist = await crud.get_checklist_by_slug(db, checklist.slug)
     
-    # Return ChecklistResponse with daily_forecast
-    return ChecklistResponse(
-        slug=checklist.slug,
-        city=checklist.city,
-        start_date=checklist.start_date,
-        end_date=checklist.end_date,
-        items=checklist.items or [],
-        avg_temp=checklist.avg_temp,
-        conditions=checklist.conditions,
-        checked_items=checklist.checked_items,
-        removed_items=checklist.removed_items,
-        added_items=checklist.added_items,
-        tg_user_id=checklist.tg_user_id,
-        user_id=checklist.user_id,
-        is_public=getattr(checklist, 'is_public', True),
-        origin_city=checklist.origin_city,
-        transports=checklist.transports,
-        daily_forecast=daily_forecast,
-        hidden_sections=checklist.hidden_sections or [],
-        invite_token=checklist.invite_token,
-        backpacks=checklist.backpacks or [],
-        events=checklist.events or [],
-        reviews=[],
-    )
+    return await build_checklist_response_payload(checklist, user_id)
 
 # ==================== AI ASSISTANT ====================
 
@@ -3744,12 +4901,111 @@ class AIAskRequest(BaseModel):
     start_date: str = ""
     end_date: str = ""
     avg_temp: Optional[float] = None
-    trip_type: str = "vacation"
+    trip_type: str = "city_break"
+    trip_profile: Optional[Dict[str, Any]] = None
 
-@app.post("/ai/ask")
+
+class ChecklistAssistantAskRequest(BaseModel):
+    question: str
+    language: str = "ru"
+
+
+def _serialize_forecast_context(forecast: list[Any] | None) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for entry in forecast or []:
+        if isinstance(entry, dict):
+            serialized.append(
+                {
+                    "date": entry.get("date"),
+                    "condition": entry.get("condition"),
+                    "temp_min": entry.get("temp_min"),
+                    "temp_max": entry.get("temp_max"),
+                    "source": entry.get("source"),
+                }
+            )
+            continue
+        serialized.append(
+            {
+                "date": getattr(entry, "date", None),
+                "condition": getattr(entry, "condition", None),
+                "temp_min": getattr(entry, "temp_min", None),
+                "temp_max": getattr(entry, "temp_max", None),
+                "source": getattr(entry, "source", None),
+            }
+        )
+    return serialized
+
+
+def _serialize_itinerary_events(events: list[Any] | None) -> list[dict[str, Any]]:
+    serialized: list[dict[str, Any]] = []
+    for event in events or []:
+        serialized.append(
+            {
+                "event_id": getattr(event, "id", None),
+                "event_date": getattr(event, "event_date", None),
+                "time": getattr(event, "time", None),
+                "title": getattr(event, "title", None),
+                "address": getattr(event, "address", None),
+                "description": getattr(event, "description", None),
+            }
+        )
+    return serialized
+
+
+async def _get_cached_attractions_for_assistant(
+    db: AsyncSession,
+    city: str,
+    language: str,
+    limit: int = 14,
+) -> list[dict[str, Any]]:
+    city_name = city.split(",")[0].strip().lower()
+    if not city_name:
+        return []
+
+    result = await db.execute(
+        select(models.CityAttraction)
+        .where(models.CityAttraction.city_name.like(f"{city_name}_{language}_%"))
+        .order_by(models.CityAttraction.updated_at.desc())
+        .limit(1)
+    )
+    cached = result.scalar_one_or_none()
+    if not cached or not isinstance(cached.data, list):
+        return []
+
+    attractions: list[dict[str, Any]] = []
+    for attraction in cached.data[:limit]:
+        if not isinstance(attraction, dict):
+            continue
+        attractions.append(
+            {
+                "name": attraction.get("name"),
+                "address": attraction.get("address"),
+                "description": attraction.get("description"),
+                "lat": attraction.get("lat"),
+                "lng": attraction.get("lng"),
+                "rating": attraction.get("rating"),
+                "price_level": attraction.get("price_level"),
+                "place_type": attraction.get("place_type") or attraction.get("type"),
+                "link": attraction.get("link"),
+                "image": attraction.get("image"),
+                "image_position": attraction.get("image_position"),
+            }
+        )
+    return attractions
+
+@app.post("/ai/ask", response_model=schemas.AssistantAskResponse)
 async def ai_ask(data: AIAskRequest):
     """AI-ассистент для путешествий"""
     from ai_service import ask_travel_ai
+    trip_context = build_ad_hoc_trip_context(
+        city=data.city,
+        start_date=data.start_date,
+        end_date=data.end_date,
+        avg_temp=data.avg_temp,
+        trip_type=data.trip_type,
+        trip_profile=data.trip_profile,
+        language=data.language,
+    )
     result = await ask_travel_ai(
         city=data.city,
         question=data.question,
@@ -3758,14 +5014,719 @@ async def ai_ask(data: AIAskRequest):
         end_date=data.end_date,
         avg_temp=data.avg_temp,
         trip_type=data.trip_type,
+        trip_profile=data.trip_profile,
+        trip_context=trip_context,
     )
     return result
+
+
+@app.post("/checklists/{slug}/assistant/ask", response_model=schemas.AssistantAskResponse)
+async def checklist_assistant_ask(
+    slug: str,
+    data: ChecklistAssistantAskRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[models.User] = Depends(get_current_user),
+):
+    """AI-ассистент с контекстом конкретной поездки."""
+    from ai_service import ask_travel_ai
+
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+
+    if not checklist.is_public and not (current_user and is_checklist_participant(checklist, current_user.id)):
+        raise HTTPException(status_code=403, detail="Нет доступа к этой поездке")
+
+    forecast = checklist.daily_forecast
+    if not forecast:
+        try:
+            forecast = await get_weather_forecast_data(
+                checklist.city,
+                checklist.start_date,
+                checklist.end_date,
+                language=data.language,
+            )
+        except Exception:
+            forecast = []
+
+    trip_context = build_trip_context(
+        checklist,
+        viewer_user_id=current_user.id if current_user else None,
+        language=data.language,
+        forecast=forecast,
+        cached_attractions=await _get_cached_attractions_for_assistant(db, checklist.city, data.language),
+    )
+    result = await ask_travel_ai(
+        city=checklist.city,
+        question=data.question,
+        language=data.language,
+        trip_context=trip_context,
+    )
+    return result
+
+
+@app.post("/checklists/{slug}/assistant/apply-plan", response_model=schemas.AssistantPlanApplyResponse)
+async def checklist_assistant_apply_plan(
+    slug: str,
+    payload: schemas.AssistantPlanApplyRequest,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    if not is_checklist_participant(checklist, user.id):
+        raise HTTPException(status_code=403, detail="Нет доступа к этому чеклисту")
+
+    try:
+        apply_result = await apply_plan_proposals_to_checklist(db, checklist, payload.proposals)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    updated_checklist = await crud.get_checklist_by_slug(db, slug)
+    return {
+        "applied_count": apply_result["applied_count"],
+        "created_event_ids": apply_result["created_event_ids"],
+        "checklist": await build_checklist_response_payload(updated_checklist, user.id),
+    }
+
+
+def _sorted_events_with_coordinates(checklist: models.Checklist) -> list[models.ItineraryEvent]:
+    events = [
+        event for event in (checklist.events or [])
+        if getattr(event, "lat", None) is not None and getattr(event, "lng", None) is not None
+    ]
+    return sorted(
+        events,
+        key=lambda event: (
+            event.event_date or date.max,
+            event.time or "99:99",
+            event.id or 0,
+        ),
+    )
+
+
+def parse_time_to_minutes(value: str | None) -> int | None:
+    normalized = str(value or "").strip()
+    match = re.match(r"^(\d{2}):(\d{2})$", normalized)
+    if not match:
+        return None
+    hours = int(match.group(1))
+    minutes = int(match.group(2))
+    if hours > 23 or minutes > 59:
+        return None
+    return hours * 60 + minutes
+
+
+def _pick_restaurant_anchor(
+    checklist: models.Checklist,
+    payload: schemas.AssistantRestaurantSearchRequest,
+) -> models.ItineraryEvent | None:
+    events = _sorted_events_with_coordinates(checklist)
+    if not events:
+        return None
+    if payload.anchor_event_id:
+        for event in events:
+            if event.id == payload.anchor_event_id:
+                return event
+    if payload.event_date:
+        same_day = [event for event in events if event.event_date == payload.event_date]
+        if same_day:
+            target_minutes = parse_time_to_minutes(_normalize_event_time(payload.time))
+            normalized_meal = str(payload.meal_type or payload.day_part or "").strip().lower()
+            if target_minutes is not None:
+                before = [
+                    event for event in same_day
+                    if parse_time_to_minutes(event.time) is not None and parse_time_to_minutes(event.time) <= target_minutes
+                ]
+                if before:
+                    return before[-1]
+                if normalized_meal in {"breakfast", "morning", "завтрак", "утро"}:
+                    return same_day[0]
+            return same_day[-1]
+        return None
+    return events[-1]
+
+
+async def _resolve_location_coordinates(location_name: str) -> tuple[float, float] | None:
+    normalized_location = re.sub(r"\s+", " ", location_name or "").strip()
+    if not normalized_location:
+        return None
+    cache_key = normalized_location.casefold()
+    if cache_key in LOCATION_COORDS_CACHE:
+        return LOCATION_COORDS_CACHE[cache_key]
+    headers = {"User-Agent": "Luggify/1.0 (travel route planning app)"}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                NOMINATIM_URL,
+                params={
+                    "q": normalized_location,
+                    "format": "json",
+                    "limit": 1,
+                    "addressdetails": 1,
+                },
+                headers=headers,
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data:
+                lat = float(data[0]["lat"])
+                lng = float(data[0]["lon"])
+                LOCATION_COORDS_CACHE[cache_key] = (lat, lng)
+                return LOCATION_COORDS_CACHE[cache_key]
+    except Exception:
+        pass
+    LOCATION_COORDS_CACHE[cache_key] = None
+    return None
+
+
+def _default_food_time(day_part: str | None) -> str | None:
+    normalized = str(day_part or "").strip().lower()
+    if normalized in {"morning", "breakfast", "утро", "завтрак"}:
+        return "09:00"
+    if normalized in {"evening", "dinner", "вечер", "ужин"}:
+        return "19:00"
+    if normalized in {"day", "afternoon", "lunch", "день", "обед"}:
+        return "13:00"
+    return None
+
+
+def _normalize_event_time(value: str | None) -> str | None:
+    normalized = str(value or "").strip()
+    return normalized if re.match(r"^\d{2}:\d{2}$", normalized) else None
+
+
+@app.post("/checklists/{slug}/assistant/restaurant-options", response_model=schemas.AssistantRestaurantOptionsResponse)
+async def checklist_assistant_restaurant_options(
+    slug: str,
+    payload: schemas.AssistantRestaurantSearchRequest,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    if not is_checklist_participant(checklist, user.id):
+        raise HTTPException(status_code=403, detail="Нет доступа к этому чеклисту")
+
+    anchor = _pick_restaurant_anchor(checklist, payload)
+    lat = payload.lat
+    lng = payload.lng
+    event_date = payload.event_date
+    if anchor:
+        lat = lat if lat is not None else anchor.lat
+        lng = lng if lng is not None else anchor.lng
+        event_date = event_date or anchor.event_date
+    if lat is None or lng is None:
+        city_coords = await _resolve_location_coordinates(checklist.city)
+        if city_coords:
+            lat, lng = city_coords
+    if lat is None or lng is None:
+        return {
+            "options": [],
+            "anchor_event_id": None,
+            "anchor_title": None,
+            "event_date": event_date or checklist.start_date,
+            "time": _normalize_event_time(payload.time),
+            "day_part": payload.day_part or "day",
+            "provider": "geoapify",
+            "attribution": "Geoapify",
+            "configured": bool(os.getenv("GEOAPIFY_API_KEY", "").strip()),
+            "message": "Добавьте точку с координатами в маршрут, чтобы искать места рядом.",
+        }
+
+    try:
+        result = await search_nearby_restaurants(
+            lat=float(lat),
+            lng=float(lng),
+            language=payload.language,
+            radius_meters=payload.radius_meters,
+            limit=payload.limit,
+            meal_type=payload.meal_type,
+        )
+    except httpx.HTTPError as exc:
+        print(f"[Geoapify restaurants] search failed: {exc}")
+        raise HTTPException(status_code=502, detail="Не удалось получить варианты ресторанов")
+
+    used_place_names = {
+        str(event.title or "").strip().casefold()
+        for event in (checklist.events or [])
+        if str(getattr(event, "event_type", "") or "").lower() == "food" and str(event.title or "").strip()
+    }
+    options = [
+        option for option in (result.get("options") or [])
+        if str(option.get("name") or "").strip().casefold() not in used_place_names
+    ]
+    message = None
+    if not result.get("configured"):
+        message = "GEOAPIFY_API_KEY не настроен. Добавьте ключ, чтобы искать рестораны рядом."
+    elif not options:
+        message = "Рядом не нашлось уверенных вариантов. Можно попробовать увеличить радиус."
+
+    return {
+        "options": options,
+        "anchor_event_id": anchor.id if anchor else None,
+        "anchor_title": anchor.title if anchor else None,
+        "event_date": event_date or checklist.start_date,
+        "time": _normalize_event_time(payload.time),
+        "day_part": payload.day_part or "day",
+        "provider": result.get("provider") or "geoapify",
+        "attribution": result.get("attribution"),
+        "configured": bool(result.get("configured", True)),
+        "message": message,
+    }
+
+
+@app.post("/checklists/{slug}/assistant/apply-restaurant", response_model=schemas.AssistantRestaurantApplyResponse)
+async def checklist_assistant_apply_restaurant(
+    slug: str,
+    payload: schemas.AssistantRestaurantApplyRequest,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    if not is_checklist_participant(checklist, user.id):
+        raise HTTPException(status_code=403, detail="Нет доступа к этому чеклисту")
+    if payload.event_date < checklist.start_date or payload.event_date > checklist.end_date:
+        raise HTTPException(status_code=400, detail="Дата события вне диапазона поездки")
+
+    anchor = _pick_restaurant_anchor(
+        checklist,
+        schemas.AssistantRestaurantSearchRequest(
+            anchor_event_id=payload.anchor_event_id,
+            event_date=payload.event_date,
+        ),
+    )
+    distance_km = None
+    if anchor and anchor.lat is not None and anchor.lng is not None:
+        distance_km = haversine_distance_km(
+            (float(anchor.lat), float(anchor.lng)),
+            (float(payload.option.lat), float(payload.option.lng)),
+        )
+
+    created_event = await crud.create_itinerary_event(
+        db,
+        checklist.id,
+        schemas.ItineraryEventCreate(
+            event_date=payload.event_date,
+            time=_normalize_event_time(payload.time) or _default_food_time(payload.day_part),
+            title=payload.option.name.strip(),
+            description=payload.option.description,
+            address=payload.option.address,
+            lat=payload.option.lat,
+            lng=payload.option.lng,
+            place_source=payload.option.source or "geoapify",
+            duration_minutes=75,
+            travel_buffer_minutes=estimate_travel_buffer_minutes(distance_km),
+            event_type="food",
+            meta={
+                "day_part": payload.day_part or "day",
+                "source": "restaurant_choice",
+                "anchor_event_id": payload.anchor_event_id,
+                "map_url": payload.option.map_url,
+                "category": payload.option.category,
+                "distance_meters": payload.option.distance_meters,
+                "provider": payload.option.source or "geoapify",
+                "provider_attribution": "Geoapify | OpenStreetMap contributors",
+                "place_meta": payload.option.meta or {},
+            },
+        ),
+    )
+    updated_checklist = await crud.get_checklist_by_slug(db, slug)
+    return {
+        "created_event_id": created_event.id,
+        "checklist": await build_checklist_response_payload(updated_checklist, user.id),
+    }
+
+
+@app.post("/checklists/{slug}/assistant/apply-event-changes", response_model=schemas.AssistantEventChangesApplyResponse)
+async def checklist_assistant_apply_event_changes(
+    slug: str,
+    payload: schemas.AssistantEventChangesApplyRequest,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    if not is_checklist_participant(checklist, user.id):
+        raise HTTPException(status_code=403, detail="Нет доступа к этому чеклисту")
+
+    checklist_event_ids = {event.id for event in (checklist.events or [])}
+    created_event_ids: list[int] = []
+    updated_event_ids: list[int] = []
+    deleted_event_ids: list[int] = []
+    applied_count = 0
+
+    for proposal in payload.proposals:
+        if proposal.action == "create":
+            if not proposal.event_date or not proposal.title:
+                raise HTTPException(status_code=400, detail="Для нового события нужны дата и название")
+            created = await crud.create_itinerary_event(
+                db,
+                checklist.id,
+                schemas.ItineraryEventCreate(
+                    event_date=proposal.event_date,
+                    time=proposal.time,
+                    title=proposal.title,
+                    description=proposal.description,
+                    address=proposal.address,
+                    event_type="custom",
+                    meta={"source": "assistant_event_change", "reason": proposal.reason},
+                ),
+            )
+            created_event_ids.append(created.id)
+            applied_count += 1
+            continue
+
+        if proposal.target_event_id not in checklist_event_ids:
+            raise HTTPException(status_code=400, detail="Предложение ссылается на событие вне этого маршрута")
+        if proposal.action == "delete":
+            deleted = await crud.delete_itinerary_event(db, proposal.target_event_id)
+            if deleted:
+                deleted_event_ids.append(proposal.target_event_id)
+                applied_count += 1
+            continue
+
+        event_update = schemas.ItineraryEventUpdate(
+            event_date=proposal.event_date,
+            time=proposal.time,
+            title=proposal.title,
+            description=proposal.description,
+            address=proposal.address,
+        )
+        updated = await crud.update_itinerary_event(db, proposal.target_event_id, event_update)
+        if updated:
+            updated_event_ids.append(proposal.target_event_id)
+            applied_count += 1
+
+    updated_checklist = await crud.get_checklist_by_slug(db, slug)
+    return {
+        "applied_count": applied_count,
+        "created_event_ids": created_event_ids,
+        "updated_event_ids": updated_event_ids,
+        "deleted_event_ids": deleted_event_ids,
+        "checklist": await build_checklist_response_payload(updated_checklist, user.id),
+    }
+
+
+@app.post("/checklists/{slug}/assistant/apply-packing-recommendations", response_model=schemas.AssistantPackingApplyResponse)
+async def checklist_assistant_apply_packing_recommendations(
+    slug: str,
+    payload: schemas.AssistantPackingApplyRequest,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    from packing_apply import apply_packing_recommendations
+
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    if not is_checklist_participant(checklist, user.id):
+        raise HTTPException(status_code=403, detail="Нет доступа к этому чеклисту")
+
+    result = await apply_packing_recommendations(
+        db,
+        checklist,
+        payload.recommendations,
+        actor_user_id=user.id,
+        language=payload.language,
+    )
+    return {
+        "applied_count": result["applied_count"],
+        "actions": result["actions"],
+        "skipped": result["skipped"],
+        "checklist": await build_checklist_response_payload(result["checklist"], user.id),
+    }
+
+
+@app.post("/checklists/{slug}/assistant/apply-expenses", response_model=schemas.AssistantExpenseApplyResponse)
+async def checklist_assistant_apply_expenses(
+    slug: str,
+    payload: schemas.AssistantExpenseApplyRequest,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    if not is_checklist_participant(checklist, user.id):
+        raise HTTPException(status_code=403, detail="Нет доступа к этому чеклисту")
+
+    applied_count = 0
+    created_expense_ids: list[int] = []
+    for proposal in payload.proposals:
+        if proposal.action in {"set_budget", "set_daily_budget"}:
+            if proposal.base_currency:
+                checklist.expense_base_currency = normalize_currency(proposal.base_currency, checklist.expense_base_currency or "RUB")
+            if proposal.budget_amount is not None:
+                checklist.expense_budget_amount = float(proposal.budget_amount)
+            if proposal.daily_budget_amount is not None:
+                trip_profile = dict(checklist.trip_profile or {})
+                expense_profile = dict(trip_profile.get("expenses") or {})
+                expense_profile["daily_budget_amount"] = float(proposal.daily_budget_amount)
+                trip_profile["expenses"] = expense_profile
+                checklist.trip_profile = trip_profile
+            applied_count += 1
+            continue
+
+        if proposal.action == "create" and proposal.title and proposal.amount is not None:
+            base_currency = normalize_currency(checklist.expense_base_currency, "RUB")
+            currency = normalize_currency(proposal.currency, base_currency)
+            conversion = await build_expense_conversion(float(proposal.amount), currency, base_currency)
+            expense = await crud.create_trip_expense(
+                db,
+                checklist.id,
+                schemas.TripExpenseCreate(
+                    expense_date=proposal.expense_date,
+                    title=proposal.title,
+                    category=proposal.category or "other",
+                    amount=float(proposal.amount),
+                    currency=currency,
+                    note=proposal.note,
+                ),
+                created_by_user_id=user.id,
+                amount_base=float(conversion["amount"]),
+                base_currency=base_currency,
+                fx_rate=float(conversion["rate"]),
+                fx_rate_date=str(conversion.get("rate_date") or ""),
+                fx_provider=str(conversion.get("provider") or ""),
+            )
+            created_expense_ids.append(expense.id)
+            applied_count += 1
+
+    await db.commit()
+    updated_checklist = await crud.get_checklist_by_slug(db, slug)
+    return {
+        "applied_count": applied_count,
+        "created_expense_ids": created_expense_ids,
+        "checklist": await build_checklist_response_payload(updated_checklist, user.id),
+    }
+
+
+@app.get("/checklists/{slug}/expenses", response_model=schemas.TripExpenseListResponse)
+async def get_checklist_expenses(
+    slug: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[models.User] = Depends(get_current_user),
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    viewer_id = current_user.id if current_user else None
+    if not checklist.is_public and not (viewer_id and is_checklist_participant(checklist, viewer_id)):
+        raise HTTPException(status_code=403, detail="Нет доступа к этому чеклисту")
+
+    visible_expenses = get_visible_expenses_for_viewer(checklist, viewer_id)
+    expenses_visible = can_view_expenses(checklist, viewer_id)
+    return {
+        "expenses": visible_expenses,
+        "summary": build_expense_summary(checklist, visible_expenses, expose_budget=expenses_visible),
+        "checklist": await build_checklist_response_payload(checklist, viewer_id),
+    }
+
+
+@app.patch("/checklists/{slug}/expenses/settings", response_model=schemas.TripExpenseListResponse)
+async def update_expense_settings(
+    slug: str,
+    payload: schemas.TripExpenseSettingsUpdate,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    if not is_checklist_participant(checklist, user.id):
+        raise HTTPException(status_code=403, detail="Нет доступа к этому чеклисту")
+
+    next_base_currency = normalize_currency(payload.base_currency, checklist.expense_base_currency or "RUB")
+    if payload.budget_amount is not None:
+        checklist.expense_budget_amount = float(payload.budget_amount)
+    if payload.daily_budget_amount is not None:
+        trip_profile = dict(checklist.trip_profile or {})
+        expense_profile = dict(trip_profile.get("expenses") or {})
+        expense_profile["daily_budget_amount"] = float(payload.daily_budget_amount)
+        trip_profile["expenses"] = expense_profile
+        checklist.trip_profile = trip_profile
+    if next_base_currency != (checklist.expense_base_currency or "RUB"):
+        checklist.expense_base_currency = next_base_currency
+        for expense in checklist.expenses or []:
+            conversion = await build_expense_conversion(expense.amount, expense.currency, next_base_currency)
+            expense.amount_base = float(conversion["amount"])
+            expense.base_currency = next_base_currency
+            expense.fx_rate = float(conversion["rate"])
+            expense.fx_rate_date = str(conversion.get("rate_date") or "")
+            expense.fx_provider = str(conversion.get("provider") or "")
+    await db.commit()
+    await db.refresh(checklist)
+    visible_expenses = get_visible_expenses_for_viewer(checklist, user.id)
+    return {
+        "expenses": visible_expenses,
+        "summary": build_expense_summary(checklist, visible_expenses),
+        "checklist": await build_checklist_response_payload(checklist, user.id),
+    }
+
+
+@app.post("/checklists/{slug}/expenses", response_model=schemas.TripExpenseListResponse)
+async def create_checklist_expense(
+    slug: str,
+    payload: schemas.TripExpenseCreate,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    checklist = await crud.get_checklist_by_slug(db, slug)
+    if not checklist:
+        raise HTTPException(status_code=404, detail="Чеклист не найден")
+    if not is_checklist_participant(checklist, user.id):
+        raise HTTPException(status_code=403, detail="Нет доступа к этому чеклисту")
+
+    base_currency = normalize_currency(checklist.expense_base_currency, "RUB")
+    currency = normalize_currency(payload.currency, base_currency)
+    conversion = await build_expense_conversion(payload.amount, currency, base_currency)
+    expense_data = payload.model_copy(update={"currency": currency})
+    await crud.create_trip_expense(
+        db,
+        checklist.id,
+        expense_data,
+        created_by_user_id=user.id,
+        amount_base=float(conversion["amount"]),
+        base_currency=base_currency,
+        fx_rate=float(conversion["rate"]),
+        fx_rate_date=str(conversion.get("rate_date") or ""),
+        fx_provider=str(conversion.get("provider") or ""),
+    )
+    updated_checklist = await crud.get_checklist_by_slug(db, slug)
+    visible_expenses = get_visible_expenses_for_viewer(updated_checklist, user.id)
+    return {
+        "expenses": visible_expenses,
+        "summary": build_expense_summary(updated_checklist, visible_expenses),
+        "checklist": await build_checklist_response_payload(updated_checklist, user.id),
+    }
+
+
+@app.patch("/expenses/{expense_id}", response_model=schemas.TripExpenseListResponse)
+async def update_checklist_expense(
+    expense_id: int,
+    payload: schemas.TripExpenseUpdate,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    expense = await crud.get_expense_by_id(db, expense_id)
+    if not expense:
+        raise HTTPException(status_code=404, detail="Трата не найдена")
+    checklist = await crud.get_checklist_by_id(db, expense.checklist_id)
+    if not checklist or not is_checklist_participant(checklist, user.id):
+        raise HTTPException(status_code=403, detail="Нет доступа к этому чеклисту")
+
+    amount = payload.amount if payload.amount is not None else expense.amount
+    currency = normalize_currency(payload.currency, expense.currency)
+    base_currency = normalize_currency(checklist.expense_base_currency, "RUB")
+    conversion = None
+    if payload.amount is not None or payload.currency is not None or expense.base_currency != base_currency:
+        conversion = await build_expense_conversion(amount, currency, base_currency)
+    update_payload = payload.model_copy(update={"currency": currency}) if payload.currency is not None else payload
+    await crud.update_trip_expense(
+        db,
+        expense,
+        update_payload,
+        amount_base=float(conversion["amount"]) if conversion else None,
+        base_currency=base_currency if conversion else None,
+        fx_rate=float(conversion["rate"]) if conversion else None,
+        fx_rate_date=str(conversion.get("rate_date") or "") if conversion else None,
+        fx_provider=str(conversion.get("provider") or "") if conversion else None,
+    )
+    updated_checklist = await crud.get_checklist_by_id(db, checklist.id)
+    visible_expenses = get_visible_expenses_for_viewer(updated_checklist, user.id)
+    return {
+        "expenses": visible_expenses,
+        "summary": build_expense_summary(updated_checklist, visible_expenses),
+        "checklist": await build_checklist_response_payload(updated_checklist, user.id),
+    }
+
+
+@app.delete("/expenses/{expense_id}", response_model=schemas.TripExpenseListResponse)
+async def delete_checklist_expense(
+    expense_id: int,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(require_current_user),
+):
+    expense = await crud.get_expense_by_id(db, expense_id)
+    if not expense:
+        raise HTTPException(status_code=404, detail="Трата не найдена")
+    checklist = await crud.get_checklist_by_id(db, expense.checklist_id)
+    if not checklist or not is_checklist_participant(checklist, user.id):
+        raise HTTPException(status_code=403, detail="Нет доступа к этому чеклисту")
+    await crud.delete_trip_expense(db, expense)
+    updated_checklist = await crud.get_checklist_by_id(db, checklist.id)
+    visible_expenses = get_visible_expenses_for_viewer(updated_checklist, user.id)
+    return {
+        "expenses": visible_expenses,
+        "summary": build_expense_summary(updated_checklist, visible_expenses),
+        "checklist": await build_checklist_response_payload(updated_checklist, user.id),
+    }
 
 @app.get("/ai/suggestions")
 async def ai_suggestions(language: str = "ru"):
     """Получить предложенные вопросы для AI-чата"""
     from ai_service import get_suggestions
     return {"suggestions": get_suggestions(language)}
+
+
+@app.post("/translate-item-label")
+async def translate_item_label(payload: ItemLabelTranslationRequest):
+    text = re.sub(r"\s+", " ", str(payload.text or "").strip())
+    if not text:
+        raise HTTPException(status_code=400, detail="Text is required")
+
+    target_lang = (payload.target_lang or "en").strip().lower()
+    if target_lang not in {"ru", "en"}:
+        raise HTTPException(status_code=400, detail="Unsupported target language")
+
+    source_lang = (payload.source_lang or "auto").strip().lower()
+    if source_lang == "auto":
+        source_lang = _guess_item_label_language(text)
+    if source_lang not in {"ru", "en"}:
+        source_lang = _guess_item_label_language(text)
+
+    if source_lang == target_lang:
+        return {
+            "text": text,
+            "translated_text": text,
+            "source_lang": source_lang,
+            "target_lang": target_lang,
+            "provider": "identity",
+        }
+
+    known_translation = translate_known_item_label(text, target_lang)
+    if known_translation:
+        return {
+            "text": text,
+            "translated_text": known_translation,
+            "source_lang": source_lang,
+            "target_lang": target_lang,
+            "provider": "dictionary",
+        }
+
+    translated_text = await _translate_item_label_with_ai(text, source_lang, target_lang)
+    if translated_text:
+        return {
+            "text": text,
+            "translated_text": translated_text,
+            "source_lang": source_lang,
+            "target_lang": target_lang,
+            "provider": "ai",
+        }
+
+    return {
+        "text": text,
+        "translated_text": text,
+        "source_lang": source_lang,
+        "target_lang": target_lang,
+        "provider": "fallback",
+    }
 
 @app.post("/generate-packing-list", response_model=ChecklistResponse)
 async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db), current_user=Depends(get_current_user)):
@@ -3776,9 +5737,23 @@ async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db),
         "trip_type": req.trip_type,
         "transport": req.transport,
     }]
+    resolved_trip_profile = await resolve_request_trip_profile(
+        trip_type=req.trip_type,
+        trip_activities=req.trip_activities,
+        accommodation_type=req.accommodation_type,
+        laundry_access=req.laundry_access,
+        packing_style=req.packing_style,
+        baggage_format=req.baggage_format,
+        adults=req.adults,
+        children_ages=req.children_ages,
+        child_profiles=req.child_profiles,
+        infants_count=req.infants_count,
+        trip_note=req.trip_note,
+        language=req.language,
+    )
     data = await calculate_packing_data(
-        req.city, req.start_date, req.end_date, req.trip_type, req.transport,
-        req.gender, req.traveling_with_pet, req.has_allergies, req.has_chronic_diseases, req.language
+        req.city, req.start_date, req.end_date, resolved_trip_profile, req.transport,
+        req.gender, req.traveling_with_pet, req.has_allergies, req.traveling_with_children or bool(req.children_ages) or bool(req.infants_count), req.language
     )
     participant_baggage_payloads = await build_participant_baggage_payloads(
         db=db,
@@ -3789,13 +5764,17 @@ async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db),
             "gender": req.gender,
             "traveling_with_pet": req.traveling_with_pet,
             "has_allergies": req.has_allergies,
+            "traveling_with_children": req.traveling_with_children or bool(req.children_ages) or bool(req.infants_count),
         },
+        trip_profile=resolved_trip_profile,
         language=req.language,
     )
     return await create_checklist_from_items(
         db, data["items"], req.city, data["start_date"], data["end_date"],
         data["avg_temp"], data["conditions"], data["daily_forecast"],
-        current_user.id if current_user else None,
+        item_quantities=data.get("item_quantities"),
+        trip_profile=data.get("trip_profile"),
+        user_id=current_user.id if current_user else None,
         language=req.language,
         origin_city=req.origin_city,
         transports=[req.transport] if req.transport else None,
@@ -3805,21 +5784,42 @@ async def generate_list(req: PackingRequest, db: AsyncSession = Depends(get_db),
 @app.post("/generate-multi-city", response_model=ChecklistResponse)
 async def generate_multi_city(req: MultiCityPackingRequest, db: AsyncSession = Depends(get_db), current_user=Depends(get_current_user)):
     all_items = set()
+    all_item_quantities = {}
     all_forecast = []
     temps = []
     conditions = set()
     cities = []
-    
+
     transports = []
-    
+    resolved_trip_profile = await resolve_request_trip_profile(
+        trip_type=req.segments[0].trip_type if req.segments else "city_break",
+        trip_activities=req.trip_activities,
+        accommodation_type=req.accommodation_type,
+        laundry_access=req.laundry_access,
+        packing_style=req.packing_style,
+        baggage_format=req.baggage_format,
+        adults=req.adults,
+        children_ages=req.children_ages,
+        child_profiles=req.child_profiles,
+        infants_count=req.infants_count,
+        trip_note=req.trip_note,
+        language=req.language,
+    )
+
     for seg in req.segments:
         cities.append(seg.city.split(",")[0])
         transports.append(seg.transport)
         data = await calculate_packing_data(
-            seg.city, seg.start_date, seg.end_date, seg.trip_type, seg.transport,
-            req.gender, req.traveling_with_pet, req.has_allergies, req.has_chronic_diseases, req.language
+            seg.city,
+            seg.start_date,
+            seg.end_date,
+            prepare_trip_profile_for_segment(resolved_trip_profile, seg.trip_type),
+            seg.transport,
+            req.gender, req.traveling_with_pet, req.has_allergies, req.traveling_with_children or bool(req.children_ages) or bool(req.infants_count), req.language
         )
         all_items.update(data["items"])
+        for item, quantity in (data.get("item_quantities") or {}).items():
+            all_item_quantities[item] = max(all_item_quantities.get(item, 0), int(quantity or 1))
         all_forecast.extend(data["daily_forecast"])
         if data["avg_temp"]: temps.append(data["avg_temp"])
         conditions.update(data["conditions"])
@@ -3855,14 +5855,18 @@ async def generate_multi_city(req: MultiCityPackingRequest, db: AsyncSession = D
             "gender": req.gender,
             "traveling_with_pet": req.traveling_with_pet,
             "has_allergies": req.has_allergies,
+            "traveling_with_children": req.traveling_with_children or bool(req.children_ages) or bool(req.infants_count),
         },
+        trip_profile=resolved_trip_profile,
         language=req.language,
     )
     
     return await create_checklist_from_items(
         db, all_items, display_city, min_date, max_date,
         avg_temp, list(conditions), all_forecast,
-        current_user.id if current_user else None,
+        item_quantities=all_item_quantities,
+        trip_profile=resolved_trip_profile,
+        user_id=current_user.id if current_user else None,
         language=req.language,
         origin_city=req.origin_city,
         transports=transports,
@@ -3898,97 +5902,8 @@ async def get_checklist(
     if not checklist:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
 
-    # If daily_forecast is saved in DB, use it. Otherwise try to fetch fresh one (optional fallback)
-    forecast = checklist.daily_forecast
-    if not forecast:
-        # Fallback to fresh fetch if missing (for legacy checklists)
-        try:
-            forecast = await get_weather_forecast_data(checklist.city, checklist.start_date, checklist.end_date, language="ru")
-        except:
-            forecast = []
-    
     viewer_id = user.id if user else None
-    visible_backpacks = [
-        backpack
-        for backpack in (checklist.backpacks or [])
-        if not is_backpack_hidden_for_viewer(backpack, checklist, viewer_id)
-    ]
-    visible_hidden_sections = []
-    for section in checklist.hidden_sections or []:
-        if not section.startswith("backpack:"):
-            visible_hidden_sections.append(section)
-            continue
-        try:
-            backpack_id = int(section.split(":", 1)[1])
-        except (TypeError, ValueError):
-            continue
-        backpack = next((item for item in (checklist.backpacks or []) if item.id == backpack_id), None)
-        if backpack and not is_backpack_hidden_for_viewer(backpack, checklist, viewer_id):
-            visible_hidden_sections.append(section)
-
-    return ChecklistResponse(
-        slug=checklist.slug,
-        city=checklist.city,
-        start_date=checklist.start_date,
-        end_date=checklist.end_date,
-        items=checklist.items,
-        avg_temp=checklist.avg_temp,
-        conditions=checklist.conditions,
-        checked_items=checklist.checked_items or [],
-        removed_items=checklist.removed_items or [],
-        added_items=checklist.added_items or [],
-        tg_user_id=checklist.tg_user_id,
-        user_id=checklist.user_id,
-        is_public=getattr(checklist, 'is_public', True),
-        origin_city=getattr(checklist, 'origin_city', None),
-        transports=getattr(checklist, 'transports', None),
-        daily_forecast=forecast,
-        events=checklist.events or [],
-        backpacks=visible_backpacks,
-        reviews=[build_trip_review_payload(review) for review in sorted(checklist.reviews or [], key=lambda item: item.created_at or datetime.min, reverse=True)],
-        invite_token=checklist.invite_token if viewer_id and is_checklist_participant(checklist, viewer_id) else None,
-        hidden_sections=visible_hidden_sections,
-    )
-
-    # Категории для чеклиста (для фронта)
-    # --- Распределение по категориям (копия логики из generate_list) ---
-    mapping = {
-        "Важное": ["Паспорт", "Медицинская страховка", "Деньги/карта", "Виза", "Билеты", "Бронь отеля", "Водительское удостоверение/СТС", "Ветпаспорт"],
-        "Документы": ["Список аллергенов", "Медзаключение", "Личные рецепты"],
-        "Одежда": ["куртка", "пуховик", "Термобельё", "Шапка", "Шарф", "Перчатки", "ботинки", "носки", "Свитер", "толстовка", "Джинсы", "брюки", "Кроссовки", "кофта", "свитшот", "Футболки", "Шорты", "платья", "Панама", "кепка", "очки", "Обувь", "Дождевик", "Зонт", "Купальник", "плавки", "туника", "парео", "Шлёпанцы", "Костюм", "Рубашки", "блузки", "Туфли", "юбка"],
-        "Гигиена": ["Зубная", "Паста", "Дезодорант", "Мыло", "Расчёска", "Косметика", "макияж", "Влажные салфетки", "Бритвенный набор", "Антиперспирант"],
-        "Техника": ["Телефон", "Зарядка", "Пауэрбанк", "Power bank", "Переходник", "Ноутбук", "Наушники"],
-        "Аптечка": ["лекарства", "Пластыри", "Обезболивающее", "Антигистаминные"],
-        "Прочее": ["Бутылка", "Термос", "рюкзак", "Сумка", "Крем", "Снеки", "Плейлист", "Подушка", "Беруши", "маска", "Жидкости", "Тапочки", "Кружка", "Миска", "Поводок", "переноска", "Пелёнки", "пакеты", "Игрушка", "Визитки"]
-    }
-
-    # Инициализация
-    categories = {k: [] for k in mapping.keys()}
-
-    for item in checklist.items:
-        found = False
-        for cat, keywords in mapping.items():
-            if any(k.lower() in item.lower() for k in keywords):
-                categories[cat].append(item)
-                found = True
-                break
-        
-        if not found:
-            categories["Прочее"].append(item)
-    # Убираем дубли
-    for k in categories:
-        categories[k] = list(dict.fromkeys(categories[k]))
-
-    return {
-        "slug": checklist.slug,
-        "city": checklist.city,
-        "start_date": checklist.start_date,
-        "end_date": checklist.end_date,
-        "items": checklist.items,
-        "items_by_category": categories,
-        "avg_temp": checklist.avg_temp,
-        "conditions": checklist.conditions,
-    }
+    return await build_checklist_response_payload(checklist, viewer_id)
 
 @app.post("/checklists/{slug}/review", response_model=schemas.TripReviewOut)
 async def create_or_update_trip_review(
@@ -4004,21 +5919,21 @@ async def create_or_update_trip_review(
         raise HTTPException(status_code=403, detail="Только участник поездки может оставить отзыв")
     if checklist.end_date and checklist.end_date > date.today():
         raise HTTPException(status_code=400, detail="Оставить отзыв можно после завершения поездки")
-    if payload.photo and not (payload.photo.startswith("data:image") or payload.photo.startswith("http")):
-        raise HTTPException(status_code=400, detail="Поддерживаются только изображения или ссылки на них")
+    normalized_photos = _normalize_trip_review_photos(payload.photo, payload.photos)
+    encoded_photos = _encode_trip_review_photos(normalized_photos)
 
     review = await crud.get_trip_review_by_user_and_checklist(db, user.id, checklist.id)
     if review:
         review.rating = payload.rating
         review.text = payload.text.strip()
-        review.photo = payload.photo
+        review.photo = encoded_photos
     else:
         review = models.TripReview(
             checklist_id=checklist.id,
             user_id=user.id,
             rating=payload.rating,
             text=payload.text.strip(),
-            photo=payload.photo,
+            photo=encoded_photos,
         )
         db.add(review)
 
@@ -4067,12 +5982,32 @@ async def run_ai_checklist_command(
     if not is_checklist_participant(checklist, user.id):
         raise HTTPException(status_code=403, detail="Нет доступа к этому чеклисту")
 
+    forecast = checklist.daily_forecast
+    if not forecast:
+        try:
+            forecast = await get_weather_forecast_data(
+                checklist.city,
+                checklist.start_date,
+                checklist.end_date,
+                language=payload.language,
+            )
+        except Exception:
+            forecast = []
+    trip_context = build_trip_context(
+        checklist,
+        viewer_user_id=user.id,
+        language=payload.language,
+        forecast=forecast,
+        cached_attractions=await _get_cached_attractions_for_assistant(db, checklist.city, payload.language),
+    )
     result = await execute_checklist_ai_command(
         db=db,
         checklist=checklist,
         command=payload.command,
         language=payload.language,
         actor_user_id=user.id,
+        command_context=payload.command_context,
+        trip_context=trip_context,
     )
     return {
         "applied": result["applied"],
@@ -4080,6 +6015,7 @@ async def run_ai_checklist_command(
         "message": result["message"],
         "actions": result["actions"],
         "checklist": result["checklist"],
+        "command_context": result.get("command_context"),
     }
 
 
@@ -4104,7 +6040,10 @@ async def update_checklist_state(
         added_items=state.added_items,
         item_quantities=state.item_quantities,
         packed_quantities=state.packed_quantities,
+        item_categories=state.item_categories,
+        item_translations=state.item_translations,
         items=state.items,
+        trip_profile=state.trip_profile.model_dump(mode="json") if state.trip_profile else None,
     )
     if not updated:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
@@ -4220,6 +6159,7 @@ async def generate_invite_token(
 @app.post("/join/{invite_token}", response_model=schemas.ChecklistOut)
 async def join_shared_checklist(
     invite_token: str,
+    child_profile_id: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     user=Depends(require_current_user)
 ):
@@ -4227,9 +6167,18 @@ async def join_shared_checklist(
     if not checklist:
         raise HTTPException(status_code=404, detail="Неверная или устаревшая ссылка")
         
-    # Create backpack if not owner and not exist
-    if checklist.user_id != user.id:
-        await crud.create_user_backpack(db, checklist.id, user.id)
+    normalized_child_profile_id = (child_profile_id or "").strip() or None
+    if normalized_child_profile_id:
+        child_profile = get_trip_child_profile(checklist, normalized_child_profile_id)
+        if not child_profile:
+            raise HTTPException(status_code=400, detail="Ребёнок не найден в контексте поездки")
+        linked_user_id = get_child_profile_linked_user_id(child_profile)
+        if linked_user_id and linked_user_id != user.id:
+            raise HTTPException(status_code=409, detail="Этот детский профиль уже связан с другим участником")
+        await link_trip_child_profile_to_user(db, checklist, normalized_child_profile_id, user.id)
+        await ensure_default_baggage_for_participant(db, checklist, user.id)
+    elif checklist.user_id != user.id:
+        await ensure_default_baggage_for_participant(db, checklist, user.id)
         
     # Reload checklist to return fully loaded relationships
     await db.refresh(checklist)
@@ -4247,8 +6196,19 @@ async def create_baggage(
     if not checklist:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
 
+    child_profile_id = (payload.child_profile_id or "").strip() or None
     target_user_id = payload.user_id or user.id
-    if target_user_id != user.id:
+    if child_profile_id:
+        child_profile = get_trip_child_profile(checklist, child_profile_id)
+        linked_user_id = get_child_profile_linked_user_id(child_profile)
+        if checklist.user_id != user.id and linked_user_id != user.id:
+            raise HTTPException(status_code=403, detail="Детский багаж может создать только владелец чеклиста или связанный участник")
+        if not child_profile:
+            raise HTTPException(status_code=400, detail="Ребёнок не найден в контексте поездки")
+        target_user_id = linked_user_id or checklist.user_id or user.id
+        if linked_user_id:
+            child_profile_id = None
+    elif target_user_id != user.id:
         raise HTTPException(status_code=403, detail="Можно создавать багаж только себе")
 
     if not is_checklist_participant(checklist, target_user_id):
@@ -4260,6 +6220,7 @@ async def create_baggage(
         user_id=target_user_id,
         name=payload.name,
         kind=payload.kind,
+        child_profile_id=child_profile_id,
     )
     return baggage
 
@@ -4279,7 +6240,7 @@ async def update_baggage(
     if not checklist:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
 
-    if not can_manage_baggage(backpack, user.id):
+    if not can_manage_baggage(backpack, user.id, checklist):
         raise HTTPException(status_code=403, detail="Нет прав редактировать этот багаж")
 
     updated = await crud.update_baggage_meta(db, backpack_id, payload)
@@ -4302,7 +6263,7 @@ async def delete_baggage(
     if not checklist:
         raise HTTPException(status_code=404, detail="Чеклист не найден")
 
-    if not can_manage_baggage(backpack, user.id):
+    if not can_manage_baggage(backpack, user.id, checklist):
         raise HTTPException(status_code=403, detail="Нет прав удалять этот багаж")
 
     deleted_id, error_code = await crud.delete_baggage(db, backpack_id)
@@ -4349,6 +6310,8 @@ async def update_backpack_state(
             added_items=state.added_items,
             item_quantities=state.item_quantities,
             packed_quantities=state.packed_quantities,
+            item_categories=state.item_categories,
+            item_translations=state.item_translations,
             items=state.items
         )
     )
@@ -4400,19 +6363,25 @@ async def transfer_checklist_item(
     if payload.source_backpack_id is None:
         moved_quantity = max(1, get_map_quantity(checklist.item_quantities or {}, item, 1))
         moved_packed = max(0, get_map_quantity(checklist.packed_quantities or {}, item, 0))
+        moved_category = get_map_text(checklist.item_categories or {}, item)
+        moved_translation = dict((checklist.item_translations or {}).get(item) or {})
         checklist.items = [existing for existing in (checklist.items or []) if existing != item]
         checklist.checked_items = [existing for existing in (checklist.checked_items or []) if existing != item]
         checklist.removed_items = [existing for existing in (checklist.removed_items or []) if existing != item]
         checklist.item_quantities = set_map_quantity(checklist.item_quantities or {}, item, 0)
         checklist.packed_quantities = set_map_quantity(checklist.packed_quantities or {}, item, 0)
+        checklist.item_categories = set_map_text(checklist.item_categories or {}, item, None)
     else:
         moved_quantity = max(1, get_map_quantity(source_backpack.item_quantities or {}, item, 1))
         moved_packed = max(0, get_map_quantity(source_backpack.packed_quantities or {}, item, 0))
+        moved_category = get_map_text(source_backpack.item_categories or {}, item)
+        moved_translation = dict((source_backpack.item_translations or {}).get(item) or {})
         source_backpack.items = [existing for existing in (source_backpack.items or []) if existing != item]
         source_backpack.checked_items = [existing for existing in (source_backpack.checked_items or []) if existing != item]
         source_backpack.removed_items = [existing for existing in (source_backpack.removed_items or []) if existing != item]
         source_backpack.item_quantities = set_map_quantity(source_backpack.item_quantities or {}, item, 0)
         source_backpack.packed_quantities = set_map_quantity(source_backpack.packed_quantities or {}, item, 0)
+        source_backpack.item_categories = set_map_text(source_backpack.item_categories or {}, item, None)
         source_backpack.checked_items = rebuild_checked_items(
             source_backpack.items or [],
             source_backpack.item_quantities or {},
@@ -4432,6 +6401,15 @@ async def transfer_checklist_item(
         item,
         max(0, get_map_quantity(target_backpack.packed_quantities or {}, item, 0) + moved_packed),
     )
+    if moved_category and not get_map_text(target_backpack.item_categories or {}, item):
+        target_backpack.item_categories = set_map_text(target_backpack.item_categories or {}, item, moved_category)
+    if moved_translation:
+        target_translations = dict(target_backpack.item_translations or {})
+        target_translations[item] = {
+            **dict(target_translations.get(item) or {}),
+            **moved_translation,
+        }
+        target_backpack.item_translations = target_translations
     target_backpack.checked_items = rebuild_checked_items(
         target_backpack.items or [],
         target_backpack.item_quantities or {},
@@ -4461,7 +6439,7 @@ async def update_hidden_sections(
 
     changed_sections = current_hidden.symmetric_difference(requested_set)
     for section in changed_sections:
-        if section == "shared" or section == "backpacks" or section == "itinerary":
+        if section == "shared" or section == "backpacks" or section == "itinerary" or section == "expenses":
             if checklist.user_id != user.id:
                 raise HTTPException(status_code=403, detail="Только владелец чеклиста может менять видимость общего раздела")
             continue
@@ -4473,7 +6451,7 @@ async def update_hidden_sections(
             backpack = await crud.get_backpack_by_id(db, backpack_id)
             if not backpack or backpack.checklist_id != checklist.id:
                 raise HTTPException(status_code=404, detail="Багаж не найден")
-            if not can_manage_baggage(backpack, user.id):
+            if not can_manage_baggage(backpack, user.id, checklist):
                 raise HTTPException(status_code=403, detail="Только владелец багажа может менять его видимость")
             continue
         raise HTTPException(status_code=400, detail="Некорректный раздел")
@@ -4487,6 +6465,7 @@ async def update_hidden_sections(
 async def notify_invite(
     slug: str,
     target_user_id: int,
+    child_profile_id: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
     user=Depends(require_current_user)
 ):
@@ -4501,19 +6480,33 @@ async def notify_invite(
     if not target_user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
 
-    if is_checklist_participant(checklist, target_user_id):
+    normalized_child_profile_id = (child_profile_id or "").strip() or None
+    child_profile = None
+    if normalized_child_profile_id:
+        child_profile = get_trip_child_profile(checklist, normalized_child_profile_id)
+        if not child_profile:
+            raise HTTPException(status_code=400, detail="Ребёнок не найден в контексте поездки")
+        linked_user_id = get_child_profile_linked_user_id(child_profile)
+        if linked_user_id and linked_user_id != target_user_id:
+            raise HTTPException(status_code=409, detail="Этот детский профиль уже связан с другим участником")
+
+    if is_checklist_participant(checklist, target_user_id) and not normalized_child_profile_id:
         raise HTTPException(status_code=409, detail="Пользователь уже в чеклисте")
     
-    # Ensure participant baggage exists for direct collaborative checklist flow
-    existing_bp = await db.execute(
-        select(models.UserBackpack).where(
-            models.UserBackpack.checklist_id == checklist.id,
-            models.UserBackpack.user_id == target_user_id
+    if normalized_child_profile_id:
+        await link_trip_child_profile_to_user(db, checklist, normalized_child_profile_id, target_user_id)
+        await ensure_default_baggage_for_participant(db, checklist, target_user_id)
+    else:
+        existing_bp = await db.execute(
+            select(models.UserBackpack).where(
+                models.UserBackpack.checklist_id == checklist.id,
+                models.UserBackpack.user_id == target_user_id,
+                models.UserBackpack.child_profile_id.is_(None),
+            )
         )
-    )
-    if not existing_bp.scalar_one_or_none():
-        await crud.create_user_backpack(db, checklist.id, target_user_id)
-    
+        if not existing_bp.scalar_one_or_none():
+            await ensure_default_baggage_for_participant(db, checklist, target_user_id)
+
     # Generate invite token if not exists
     if not checklist.invite_token:
         await crud.generate_checklist_invite_token(db, slug)
@@ -4521,7 +6514,7 @@ async def notify_invite(
     
     # Create backpack for the owner if not exists
     if checklist.user_id == user.id:
-        await crud.create_user_backpack(db, checklist.id, user.id)
+        await ensure_default_baggage_for_participant(db, checklist, user.id)
     
     # Create notification for target user
     new_notif = models.Notification(
@@ -4530,7 +6523,10 @@ async def notify_invite(
         content=f"{user.username} пригласил(а) вас в чеклист {checklist.city}",
         link=f"/checklist/{slug}",
         is_read=False,
-        extra_data={"token": checklist.invite_token} if checklist.invite_token else None
+        extra_data={
+            "token": checklist.invite_token,
+            "child_profile_id": normalized_child_profile_id,
+        } if checklist.invite_token else None
     )
     db.add(new_notif)
     await db.commit()

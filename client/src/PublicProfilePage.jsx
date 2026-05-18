@@ -5,27 +5,21 @@ import NavbarUserSearch from "./NavbarUserSearch";
 import "./ProfilePage.css";
 import "./App.css";
 import { pluralizeWord } from "./i18n";
-import { ListIcon, LockIcon, TrophyIcon, UnlockIcon } from "./Icons";
+import { GlobeIcon, ListIcon, LockIcon, MoonIcon, SunIcon, TrophyIcon, UnlockIcon, UsersIcon } from "./Icons";
+import { API_URL, getChecklistItemCount, getChecklistTravelerCount, isChecklistShared, safeParseJson } from "./appUtils";
+import { translatePlaceLabel } from "./checklistLocalization";
+const PUBLIC_PROFILE_CACHE_TTL_MS = 10000;
+const publicProfileRequestCache = new Map();
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
-
-const safeParseJson = (value, fallback = null) => {
-    if (!value) return fallback;
-    try {
-        return JSON.parse(value);
-    } catch {
-        return fallback;
-    }
-};
-
-const getChecklistItemCount = (checklist) => {
-    const checklistItemsCount = Array.isArray(checklist?.items) ? checklist.items.length : 0;
-    const baggageCount = (checklist?.backpacks || []).reduce(
-        (sum, backpack) => sum + (Array.isArray(backpack.items) ? backpack.items.length : 0),
-        0
-    );
-    return checklistItemsCount + baggageCount;
-};
+const RANK_TIERS = [
+    { id: "novice", icon: "🌱", name_ru: "Новичок", name_en: "Novice", min: 0 },
+    { id: "scout", icon: "🧭", name_ru: "Разведчик", name_en: "Scout", min: 140 },
+    { id: "traveler", icon: "✈️", name_ru: "Путешественник", name_en: "Traveler", min: 320 },
+    { id: "navigator", icon: "🗺️", name_ru: "Навигатор", name_en: "Navigator", min: 580 },
+    { id: "pilgrim", icon: "🌍", name_ru: "Пилигрим", name_en: "Pilgrim", min: 900 },
+    { id: "trailblazer", icon: "🏔️", name_ru: "Первопроходец", name_en: "Trailblazer", min: 1300 },
+    { id: "legend", icon: "👑", name_ru: "Легенда", name_en: "Legend", min: 1700 },
+];
 
 const renderSocialIcon = (network) => {
     switch(network) {
@@ -56,6 +50,13 @@ const getSocialLabel = (network) => {
     return labels[network] || network;
 };
 
+const getReviewPhotos = (review) => {
+    if (Array.isArray(review?.photos) && review.photos.length > 0) {
+        return review.photos.filter(Boolean);
+    }
+    return review?.photo ? [review.photo] : [];
+};
+
 const getCountNoun = (count, key, lang = "ru") => {
     const forms = {
         checklists: { ru: ["чеклист", "чеклиста", "чеклистов"], en: ["list", "lists"] },
@@ -72,12 +73,138 @@ const getCountNoun = (count, key, lang = "ru") => {
     return pluralizeWord(count, value.ru, value.en, lang);
 };
 
-const getPublicTravelerBadge = (stats) => {
-    const totalTrips = Number(stats?.total_trips || 0);
-    if (totalTrips >= 15) return "Опытный турист";
-    if (totalTrips >= 8) return "Разведчик";
-    if (totalTrips >= 3) return "Путешественник";
-    return "Новичок";
+const getPublicProfileCacheKey = (username, token) => `${token || "__guest__"}:${username}`;
+
+const getCachedPublicProfile = (username, token) => {
+    const cacheKey = getPublicProfileCacheKey(username, token);
+    const cached = publicProfileRequestCache.get(cacheKey);
+    if (!cached?.data) return null;
+    if (Date.now() - cached.timestamp > PUBLIC_PROFILE_CACHE_TTL_MS) return null;
+    return cached.data;
+};
+
+const fetchPublicProfileCached = async ({ username, token }) => {
+    const cacheKey = getPublicProfileCacheKey(username, token);
+    const now = Date.now();
+    const cached = publicProfileRequestCache.get(cacheKey);
+
+    if (cached?.promise) {
+        return cached.promise;
+    }
+
+    if (cached?.data && now - cached.timestamp < PUBLIC_PROFILE_CACHE_TTL_MS) {
+        return cached.data;
+    }
+
+    const headers = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    const promise = fetch(`${API_URL}/users/${username}`, { headers })
+        .then((res) => {
+            if (!res.ok) {
+                if (res.status === 404) throw new Error("profile_not_found");
+                throw new Error("profile_load_failed");
+            }
+            return res.json();
+        })
+        .then((data) => {
+            publicProfileRequestCache.set(cacheKey, {
+                data,
+                timestamp: Date.now(),
+                promise: null,
+            });
+            return data;
+        })
+        .catch((error) => {
+            publicProfileRequestCache.delete(cacheKey);
+            throw error;
+        });
+
+    publicProfileRequestCache.set(cacheKey, {
+        data: cached?.data || null,
+        timestamp: cached?.timestamp || 0,
+        promise,
+    });
+
+    return promise;
+};
+
+const PublicProfileSkeleton = () => (
+    <div className="page-wrapper public-profile-shell">
+        <div className="profile-page public-profile-page">
+            <div className="profile-header">
+                <div className="profile-main-row profile-main-row-compact">
+                    <div className="profile-avatar-rail">
+                        <div className="skeleton-block profile-skeleton-avatar" />
+                    </div>
+
+                    <div className="profile-info-block">
+                        <div className="profile-title-strip">
+                            <div className="skeleton-block skeleton-text-xl" />
+                            <div className="skeleton-block skeleton-pill profile-skeleton-pill" />
+                        </div>
+                        <div className="skeleton-block skeleton-text-md" />
+                        <div className="profile-stats-panel profile-stats-panel-mobile">
+                            <div className="profile-stats-inline">
+                                {Array.from({ length: 3 }, (_, index) => (
+                                    <div key={index} className="profile-stat-chip profile-skeleton-stat-chip">
+                                        <div className="skeleton-block skeleton-text-lg" />
+                                        <div className="skeleton-block skeleton-text-xs" />
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                        <div className="profile-action-mt public-profile-action-row">
+                            <div className="skeleton-block skeleton-pill public-profile-skeleton-btn" />
+                            <div className="skeleton-block skeleton-pill public-profile-skeleton-btn" />
+                        </div>
+                    </div>
+
+                    <div className="profile-stats-panel profile-stats-panel-desktop">
+                        <div className="profile-stats-inline">
+                            {Array.from({ length: 3 }, (_, index) => (
+                                <div key={index} className="profile-stat-chip profile-skeleton-stat-chip">
+                                    <div className="skeleton-block skeleton-text-lg" />
+                                    <div className="skeleton-block skeleton-text-xs" />
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+
+                <div className="profile-hero-metrics">
+                    {Array.from({ length: 5 }, (_, index) => (
+                        <div key={index} className="profile-hero-metric profile-skeleton-metric-card">
+                            <div className="skeleton-block skeleton-text-lg" />
+                            <div className="skeleton-block skeleton-text-sm" />
+                        </div>
+                    ))}
+                </div>
+            </div>
+
+            <div className="profile-tabs public-profile-tabs profile-skeleton-tabs">
+                {Array.from({ length: 4 }, (_, index) => (
+                    <div key={index} className="skeleton-block skeleton-pill profile-skeleton-tab" />
+                ))}
+            </div>
+
+            <div className="checklists-grid">
+                {Array.from({ length: 4 }, (_, index) => (
+                    <div key={index} className="profile-loading-card public-profile-loading-card">
+                        <div className="skeleton-block skeleton-text-lg" />
+                        <div className="skeleton-block skeleton-text-sm" />
+                        <div className="skeleton-block skeleton-text-sm" />
+                        <div className="skeleton-block skeleton-pill profile-loading-pill" />
+                    </div>
+                ))}
+            </div>
+        </div>
+    </div>
+);
+
+const getStoredTheme = () => {
+    if (typeof window === "undefined") return "light";
+    return localStorage.getItem("theme") === "dark" ? "dark" : "light";
 };
 
 const PublicProfilePage = () => {
@@ -95,41 +222,59 @@ const PublicProfilePage = () => {
     const [profileInviteBusySlug, setProfileInviteBusySlug] = useState("");
     const [profileInviteSentSlugs, setProfileInviteSentSlugs] = useState([]);
     const [profileInviteError, setProfileInviteError] = useState("");
+    const [selectedReviewPhoto, setSelectedReviewPhoto] = useState("");
     
     // Auth context
     const token = localStorage.getItem("token");
+    const [lang, setLang] = useState(() => (localStorage.getItem("lang") === "en" ? "en" : "ru"));
+    const [theme, setTheme] = useState(getStoredTheme);
     const storedUser = localStorage.getItem("user");
     const currentUser = safeParseJson(storedUser, null);
     const isSelf = currentUser && currentUser.username === username;
 
     useEffect(() => {
+        localStorage.setItem("lang", lang);
+    }, [lang]);
+
+    useEffect(() => {
+        localStorage.setItem("theme", theme);
+        document.documentElement.setAttribute("data-theme", theme);
+    }, [theme]);
+
+    useEffect(() => {
         const fetchProfile = async () => {
             try {
-                const headers = {};
-                if (token) headers.Authorization = `Bearer ${token}`;
-                
-                const res = await fetch(`${API_URL}/users/${username}`, { headers });
-                if (!res.ok) {
-                    if (res.status === 404) throw new Error("Пользователь не найден");
-                    throw new Error("Ошибка загрузки профиля");
+                const cachedProfile = getCachedPublicProfile(username, token);
+                if (cachedProfile) {
+                    setProfile(cachedProfile);
+                    setLoading(false);
+                } else {
+                    setLoading(true);
                 }
-                const data = await res.json();
+
+                const data = await fetchPublicProfileCached({ username, token });
                 setProfile(data);
             } catch (e) {
-                setError(e.message);
+                if (e.message === "profile_not_found") {
+                    setError(lang === "en" ? "User not found" : "Пользователь не найден");
+                } else if (e.message === "profile_load_failed") {
+                    setError(lang === "en" ? "Failed to load profile" : "Ошибка загрузки профиля");
+                } else {
+                    setError(e.message);
+                }
             } finally {
                 setLoading(false);
             }
         };
         fetchProfile();
-    }, [username, token]);
+    }, [lang, username, token]);
 
     useEffect(() => {
         setActiveTab("checklists");
     }, [username]);
 
     useEffect(() => {
-        if (!profile || !canViewerSeeProfile(profile, currentUser?.username)) {
+        if (!profile || !canViewerSeeProfile(profile, currentUser?.username) || !["followers", "following"].includes(activeTab)) {
             setFollowers([]);
             setFollowing([]);
             return;
@@ -167,10 +312,10 @@ const PublicProfilePage = () => {
         return () => {
             isCancelled = true;
         };
-    }, [profile, username, token, currentUser?.username]);
+    }, [activeTab, profile, username, token, currentUser?.username]);
 
     useEffect(() => {
-        if (!token) {
+        if (!token || !profileInviteTarget) {
             setMyChecklists([]);
             return;
         }
@@ -195,11 +340,15 @@ const PublicProfilePage = () => {
         return () => {
             isCancelled = true;
         };
-    }, [token]);
+    }, [profileInviteTarget, token]);
 
     const formatDate = (iso) => {
         const d = new Date(iso);
-        return `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}.${d.getFullYear()}`;
+        return d.toLocaleDateString(lang === "en" ? "en-GB" : "ru-RU", {
+            day: "2-digit",
+            month: "2-digit",
+            year: "numeric",
+        });
     };
 
     const handleFollowToggle = async () => {
@@ -314,20 +463,20 @@ const PublicProfilePage = () => {
             }
 
             const data = await res.json().catch(() => null);
-            setProfileInviteError(data?.detail || "Не удалось отправить приглашение");
+            setProfileInviteError(data?.detail || (lang === "en" ? "Failed to send invitation" : "Не удалось отправить приглашение"));
         } catch (e) {
             console.error(e);
-            setProfileInviteError("Не удалось отправить приглашение");
+            setProfileInviteError(lang === "en" ? "Failed to send invitation" : "Не удалось отправить приглашение");
         } finally {
             setProfileInviteBusySlug("");
         }
     };
 
-    if (loading) return <div className="profile-loading">Загрузка...</div>;
+    if (loading && !profile) return <PublicProfileSkeleton />;
     if (error) return (
         <div className="profile-error">
             <h2>😕 {error}</h2>
-            <button className="action-btn" onClick={() => navigate("/")}>На главную</button>
+            <button className="action-btn" onClick={() => navigate("/")}>{lang === "en" ? "Back home" : "На главную"}</button>
         </div>
     );
 
@@ -337,29 +486,29 @@ const PublicProfilePage = () => {
         {
             key: "checklists",
             count: profile.checklists?.length || 0,
-            label: getCountNoun(profile.checklists?.length || 0, "checklists"),
+            label: getCountNoun(profile.checklists?.length || 0, "checklists", lang),
             onClick: () => setActiveTab("checklists"),
         },
         {
             key: "followers",
             count: profile.followers_count || 0,
-            label: getCountNoun(profile.followers_count || 0, "followers"),
+            label: getCountNoun(profile.followers_count || 0, "followers", lang),
             onClick: () => setActiveTab("followers"),
         },
         {
             key: "following",
             count: profile.following_count || 0,
-            label: getCountNoun(profile.following_count || 0, "following"),
+            label: getCountNoun(profile.following_count || 0, "following", lang),
             onClick: () => setActiveTab("following"),
         },
     ];
 
     const travelStatsCards = canSeeContent && profile.stats ? [
-        { key: "trips", value: profile.stats.total_trips, label: getCountNoun(profile.stats.total_trips, "trips") },
-        { key: "countries", value: profile.stats.unique_countries, label: getCountNoun(profile.stats.unique_countries, "countries") },
-        { key: "cities", value: profile.stats.unique_cities, label: getCountNoun(profile.stats.unique_cities, "cities") },
-        { key: "days", value: profile.stats.total_days, label: getCountNoun(profile.stats.total_days, "days") },
-        { key: "items", value: profile.stats.total_items || 0, label: getCountNoun(profile.stats.total_items || 0, "items") },
+        { key: "trips", value: profile.stats.total_trips, label: getCountNoun(profile.stats.total_trips, "trips", lang) },
+        { key: "countries", value: profile.stats.unique_countries, label: getCountNoun(profile.stats.unique_countries, "countries", lang) },
+        { key: "cities", value: profile.stats.unique_cities, label: getCountNoun(profile.stats.unique_cities, "cities", lang) },
+        { key: "days", value: profile.stats.total_days, label: getCountNoun(profile.stats.total_days, "days", lang) },
+        { key: "items", value: profile.stats.total_items || 0, label: getCountNoun(profile.stats.total_items || 0, "items", lang) },
     ] : [];
 
     const visibleSocialLinks = canSeeContent
@@ -382,14 +531,36 @@ const PublicProfilePage = () => {
         </div>
     );
 
-    const publicBadge = getPublicTravelerBadge(profile.stats);
+    const publicChecklistCount = (profile.checklists || []).filter((item) => item.is_public).length;
+    const collaborativeChecklistCount = (profile.checklists || []).filter((item) => isChecklistShared(item, profile.id)).length;
+    const reviewWithPhotoCount = (profile.reviews || []).filter((item) => getReviewPhotos(item).length > 0).length;
+    const followerCount = profile.followers_count || followers.length || 0;
+
+    const pointsBreakdown = [
+        (profile.checklists?.length || 0) * 35,
+        publicChecklistCount * 10,
+        (profile.reviews?.length || 0) * 45,
+        reviewWithPhotoCount * 20,
+        (profile.stats?.total_days || 0) * 3,
+        (profile.stats?.unique_countries || 0) * 18,
+        (profile.stats?.unique_cities || 0) * 8,
+        collaborativeChecklistCount * 12,
+        followerCount * 6,
+    ];
+
+    const currentRankPoints = pointsBreakdown.reduce((sum, points) => sum + points, 0);
+    const publicRank = RANK_TIERS.reduce((best, tier) => (
+        currentRankPoints >= tier.min ? tier : best
+    ), RANK_TIERS[0]);
 
     const getSubscriptionMeta = (person, mode) => {
         if (person?.bio) return person.bio;
         if (mode === "followers") {
-            return person?.is_following ? "Вы подписаны друг на друга" : "Подписан на пользователя";
+            return person?.is_following
+                ? (lang === "en" ? "You follow each other" : "Вы подписаны друг на друга")
+                : (lang === "en" ? "Follows this user" : "Подписан на пользователя");
         }
-        return "Вы подписаны";
+        return lang === "en" ? "You follow them" : "Вы подписаны";
     };
 
     return (
@@ -397,25 +568,77 @@ const PublicProfilePage = () => {
             {/* Full Navbar */}
             <nav className="navbar">
                 <div className="navbar-logo" onClick={() => navigate("/")}>
-                    <img src="/luggify-logo.svg" alt="" className="navbar-logo-mark" aria-hidden="true" />
+                    <img src={theme === "light" ? "/luggify-logo-light.svg" : "/luggify-logo.svg"} alt="" className="navbar-logo-mark" aria-hidden="true" />
                     <span className="navbar-logo-text">LUGGIFY</span>
                 </div>
                 <div className="navbar-center navbar-search-desktop">
                     <NavbarUserSearch
-                        lang="ru"
+                        lang={lang}
                         navigate={navigate}
                         currentUsername={currentUser?.username || ""}
                     />
                 </div>
                 <div className="navbar-user">
-                    <div className="navbar-search-mobile">
-                        <NavbarUserSearch
-                            lang="ru"
-                            navigate={navigate}
-                            currentUsername={currentUser?.username || ""}
-                            compact
-                        />
+                    <div className="navbar-locale-tools">
+                        <div className="locale-cluster">
+                            <div className="language-switcher" role="group" aria-label={lang === "en" ? "Language" : "Язык"}>
+                                <button className={`lang-btn ${lang === "ru" ? "active" : ""}`} onClick={() => setLang("ru")}>RU</button>
+                                <button className={`lang-btn ${lang === "en" ? "active" : ""}`} onClick={() => setLang("en")}>EN</button>
+                            </div>
+                            <div className="theme-switcher" role="group" aria-label={lang === "en" ? "Color theme" : "Цветовая тема"}>
+                                <button
+                                    className={`theme-btn ${theme === "light" ? "active" : ""}`}
+                                    onClick={() => setTheme("light")}
+                                    aria-label={lang === "en" ? "Light theme" : "Светлая тема"}
+                                    title={lang === "en" ? "Light theme" : "Светлая тема"}
+                                >
+                                    <SunIcon style={{ marginRight: 0 }} />
+                                </button>
+                                <button
+                                    className={`theme-btn ${theme === "dark" ? "active" : ""}`}
+                                    onClick={() => setTheme("dark")}
+                                    aria-label={lang === "en" ? "Dark theme" : "Тёмная тема"}
+                                    title={lang === "en" ? "Dark theme" : "Тёмная тема"}
+                                >
+                                    <MoonIcon style={{ marginRight: 0 }} />
+                                </button>
+                            </div>
+                        </div>
+                        <div className="navbar-mobile-quick-actions">
+                            <button
+                                className="navbar-mobile-utility-btn navbar-mobile-lang-btn"
+                                onClick={() => setLang((current) => (current === "ru" ? "en" : "ru"))}
+                                aria-label={lang === "en" ? "Switch language" : "Сменить язык"}
+                                title={lang === "en" ? "Switch language" : "Сменить язык"}
+                            >
+                                <GlobeIcon style={{ marginRight: 0 }} />
+                                <span>{lang.toUpperCase()}</span>
+                            </button>
+                            <button
+                                className="navbar-mobile-utility-btn"
+                                onClick={() => setTheme((current) => (current === "light" ? "dark" : "light"))}
+                                aria-label={theme === "light"
+                                    ? (lang === "en" ? "Switch to dark theme" : "Переключить на тёмную тему")
+                                    : (lang === "en" ? "Switch to light theme" : "Переключить на светлую тему")}
+                                title={theme === "light"
+                                    ? (lang === "en" ? "Switch to dark theme" : "Переключить на тёмную тему")
+                                    : (lang === "en" ? "Switch to light theme" : "Переключить на светлую тему")}
+                            >
+                                {theme === "light"
+                                    ? <SunIcon style={{ marginRight: 0 }} />
+                                    : <MoonIcon style={{ marginRight: 0 }} />}
+                            </button>
+                        </div>
+                        <div className="navbar-search-mobile">
+                            <NavbarUserSearch
+                                lang={lang}
+                                navigate={navigate}
+                                currentUsername={currentUser?.username || ""}
+                                compact
+                            />
+                        </div>
                     </div>
+                    <div className="navbar-primary-actions">
                     {currentUser ? (
                         <>
                             <div className="navbar-profile" onClick={() => navigate("/profile")}>
@@ -431,7 +654,7 @@ const PublicProfilePage = () => {
                             <button
                                 className="navbar-logout-btn icon-btn"
                                 onClick={handleLogout}
-                                title="Выйти"
+                                title={lang === "en" ? "Log out" : "Выйти"}
                             >
                                 <svg
                                     xmlns="http://www.w3.org/2000/svg"
@@ -451,8 +674,9 @@ const PublicProfilePage = () => {
                             </button>
                         </>
                     ) : (
-                        <button className="navbar-login-btn" onClick={() => setShowAuth(true)}>Войти</button>
+                        <button className="navbar-login-btn" onClick={() => setShowAuth(true)}>{lang === "en" ? "Log in" : "Войти"}</button>
                     )}
+                    </div>
                 </div>
             </nav>
 
@@ -468,12 +692,12 @@ const PublicProfilePage = () => {
                         <div className={`profile-main-row profile-main-row-compact${!canSeeContent ? " no-sidebar" : ""}`}>
                             <div className="profile-corner-actions public-profile-corner-actions">
                                 <span className={`profile-visibility-chip ${profile.is_stats_public ? "public" : "private"}`}>
-                                    {profile.is_stats_public ? "Открытый профиль" : "Закрытый профиль"}
+                                    {profile.is_stats_public ? (lang === "en" ? "Public profile" : "Открытый профиль") : (lang === "en" ? "Private profile" : "Закрытый профиль")}
                                 </span>
                                 <span
                                     className={`profile-corner-status-icon ${profile.is_stats_public ? "public" : "private"}`}
-                                    title={profile.is_stats_public ? "Открытый профиль" : "Закрытый профиль"}
-                                    aria-label={profile.is_stats_public ? "Открытый профиль" : "Закрытый профиль"}
+                                    title={profile.is_stats_public ? (lang === "en" ? "Public profile" : "Открытый профиль") : (lang === "en" ? "Private profile" : "Закрытый профиль")}
+                                    aria-label={profile.is_stats_public ? (lang === "en" ? "Public profile" : "Открытый профиль") : (lang === "en" ? "Private profile" : "Закрытый профиль")}
                                 >
                                     {profile.is_stats_public ? (
                                         <UnlockIcon style={{ width: "14px", height: "14px", marginRight: 0 }} />
@@ -493,8 +717,8 @@ const PublicProfilePage = () => {
                                     </div>
                                     <span
                                         className={`profile-avatar-status-icon ${profile.is_stats_public ? "public" : "private"}`}
-                                        title={profile.is_stats_public ? "Открытый профиль" : "Закрытый профиль"}
-                                        aria-label={profile.is_stats_public ? "Открытый профиль" : "Закрытый профиль"}
+                                        title={profile.is_stats_public ? (lang === "en" ? "Public profile" : "Открытый профиль") : (lang === "en" ? "Private profile" : "Закрытый профиль")}
+                                        aria-label={profile.is_stats_public ? (lang === "en" ? "Public profile" : "Открытый профиль") : (lang === "en" ? "Private profile" : "Закрытый профиль")}
                                     >
                                         {profile.is_stats_public ? (
                                             <UnlockIcon style={{ width: "12px", height: "12px", marginRight: 0 }} />
@@ -529,8 +753,8 @@ const PublicProfilePage = () => {
                                                 <h2>{profile.username}</h2>
                                                 <span
                                                     className={`profile-name-status-icon ${profile.is_stats_public ? "public" : "private"}`}
-                                                    title={profile.is_stats_public ? "Открытый профиль" : "Закрытый профиль"}
-                                                    aria-label={profile.is_stats_public ? "Открытый профиль" : "Закрытый профиль"}
+                                                    title={profile.is_stats_public ? (lang === "en" ? "Public profile" : "Открытый профиль") : (lang === "en" ? "Private profile" : "Закрытый профиль")}
+                                                    aria-label={profile.is_stats_public ? (lang === "en" ? "Public profile" : "Открытый профиль") : (lang === "en" ? "Private profile" : "Закрытый профиль")}
                                                 >
                                                     {profile.is_stats_public ? (
                                                         <UnlockIcon style={{ width: "14px", height: "14px", marginRight: 0 }} />
@@ -541,7 +765,7 @@ const PublicProfilePage = () => {
                                             </div>
                                             {canSeeContent && (
                                                 <span className="level-badge public-profile-badge">
-                                                    {publicBadge}
+                                                    {publicRank.icon} {lang === "en" ? publicRank.name_en : publicRank.name_ru}
                                                 </span>
                                             )}
                                         </div>
@@ -554,7 +778,7 @@ const PublicProfilePage = () => {
                                             ) : (
                                                 <div className="private-profile-notice">
                                                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
-                                                    <span>Это закрытый профиль</span>
+                                                    <span>{lang === "en" ? "This profile is private" : "Это закрытый профиль"}</span>
                                                 </div>
                                             )}
                                         </div>
@@ -572,17 +796,17 @@ const PublicProfilePage = () => {
                                                     onClick={handleFollowToggle}
                                                 >
                                                     {profile.follow_status === "following"
-                                                        ? "Отписаться"
+                                                        ? (lang === "en" ? "Unfollow" : "Отписаться")
                                                         : profile.follow_status === "requested"
-                                                            ? "Отменить запрос"
-                                                            : (!profile.is_stats_public ? "Отправить запрос" : "Подписаться")}
+                                                            ? (lang === "en" ? "Cancel request" : "Отменить запрос")
+                                                            : (!profile.is_stats_public ? (lang === "en" ? "Send request" : "Отправить запрос") : (lang === "en" ? "Follow" : "Подписаться"))}
                                                 </button>
                                                 <button
                                                     type="button"
                                                     className="action-btn secondary profile-follow-btn profile-follow-btn-public public-profile-invite-btn"
                                                     onClick={openProfileInviteModal}
                                                 >
-                                                    Пригласить
+                                                    {lang === "en" ? "Invite" : "Пригласить"}
                                                 </button>
                                             </div>
                                         )}
@@ -622,7 +846,7 @@ const PublicProfilePage = () => {
                                 >
                                     <span style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
                                         <ListIcon style={{ width: "18px", height: "18px", marginRight: "6px" }} />
-                                        Чеклисты
+                                        {lang === "en" ? "Checklists" : "Чеклисты"}
                                     </span>
                                 </button>
                                 <button
@@ -630,7 +854,7 @@ const PublicProfilePage = () => {
                                     onClick={() => setActiveTab("reviews")}
                                 >
                                     <span style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
-                                        ★ Отзывы
+                                        ★ {lang === "en" ? "Reviews" : "Отзывы"}
                                     </span>
                                 </button>
                                 <button
@@ -639,7 +863,7 @@ const PublicProfilePage = () => {
                                 >
                                     <span style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
                                         <TrophyIcon style={{ width: "18px", height: "18px", marginRight: "6px" }} />
-                                        Достижения и статистика
+                                        {lang === "en" ? "Achievements & stats" : "Достижения и статистика"}
                                     </span>
                                 </button>
                                 <button
@@ -647,7 +871,7 @@ const PublicProfilePage = () => {
                                     onClick={() => setActiveTab("followers")}
                                 >
                                     <span style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
-                                        Подписчики
+                                        {lang === "en" ? "Followers" : "Подписчики"}
                                     </span>
                                 </button>
                                 <button
@@ -655,7 +879,7 @@ const PublicProfilePage = () => {
                                     onClick={() => setActiveTab("following")}
                                 >
                                     <span style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
-                                        Подписки
+                                        {lang === "en" ? "Following" : "Подписки"}
                                     </span>
                                 </button>
                             </div>
@@ -664,32 +888,47 @@ const PublicProfilePage = () => {
                                 <div className="tab-content animations-fade">
                                     {profile.checklists.length === 0 ? (
                                         <div className="profile-empty-list public-profile-empty">
-                                            <p>Пользователь скрыл свои чеклисты или пока ничего не создал.</p>
+                                            <p>{lang === "en" ? "This user hid their checklists or has not created any yet." : "Пользователь скрыл свои чеклисты или пока ничего не создал."}</p>
                                         </div>
                                     ) : (
                                         <div className="checklists-grid">
-                                            {profile.checklists.map((cl) => (
-                                                <div
-                                                    key={cl.slug}
-                                                    className="checklist-preview-card"
-                                                    onClick={() => navigate(`/checklist/${cl.slug}`)}
-                                                >
-                                                    <div className="preview-city">
-                                                        <span className="preview-city-text">{cl.city}</span>
-                                                    </div>
-                                                    <div className="preview-dates">
-                                                        {formatDate(cl.start_date)} — {formatDate(cl.end_date)}
-                                                    </div>
-                                                    <div className="preview-items">
-                                                        {getChecklistItemCount(cl)} {getCountNoun(getChecklistItemCount(cl), "items", "ru")}
-                                                    </div>
-                                                    <div className="preview-temp-row">
-                                                        <div className="preview-temp">
-                                                            {cl.avg_temp > 0 ? "+" : ""}{Math.round(cl.avg_temp)}°C
+                                            {profile.checklists.map((cl) => {
+                                                const itemCount = getChecklistItemCount(cl);
+                                                const travelersCount = getChecklistTravelerCount(cl);
+                                                return (
+                                                    <div
+                                                        key={cl.slug}
+                                                        className="checklist-preview-card"
+                                                        onClick={() => navigate(`/checklist/${cl.slug}`)}
+                                                    >
+                                                        <div className="preview-city">
+                                                            <span className="preview-city-text">{translatePlaceLabel(cl.city, lang)}</span>
+                                                        </div>
+                                                        <div className="preview-dates">
+                                                            {formatDate(cl.start_date)} — {formatDate(cl.end_date)}
+                                                        </div>
+                                                        <div className="preview-meta-row">
+                                                            <div className="preview-items-badge">
+                                                                <span className="preview-items-badge-value">{itemCount}</span>
+                                                                <span className="preview-items-badge-label">
+                                                                    {getCountNoun(itemCount, "items", lang)}
+                                                                </span>
+                                                            </div>
+                                                            {travelersCount > 1 && (
+                                                                <span className="shared-badge" title={lang === "en" ? "People going on this trip" : "Людей в этой поездке"}>
+                                                                    <UsersIcon style={{ width: "14px", height: "14px", marginRight: 0 }} />
+                                                                    <span>{travelersCount}</span>
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        <div className="preview-temp-row">
+                                                            <div className="preview-temp">
+                                                                {cl.avg_temp > 0 ? "+" : ""}{Math.round(cl.avg_temp)}°C
+                                                            </div>
                                                         </div>
                                                     </div>
-                                                </div>
-                                            ))}
+                                                );
+                                            })}
                                         </div>
                                     )}
                                 </div>
@@ -706,23 +945,40 @@ const PublicProfilePage = () => {
                                                     onClick={() => review.checklist_slug && navigate(`/checklist/${review.checklist_slug}`)}
                                                 >
                                                     <div className="profile-review-meta">
-                                                        <div>
-                                                            <div className="profile-review-city">{review.checklist_city || "Поездка"}</div>
+                                                        <div className="profile-review-copy">
+                                                            <div className="profile-review-city">{translatePlaceLabel(review.checklist_city || (lang === "en" ? "Trip" : "Поездка"), lang)}</div>
+                                                            <div className="profile-review-rating">
+                                                                <span className="profile-review-stars">{"★".repeat(review.rating)}{"☆".repeat(5 - review.rating)}</span>
+                                                            </div>
                                                             <div className="profile-review-dates">
                                                                 {review.checklist_start_date && review.checklist_end_date
-                                                                    ? `${formatDate(review.checklist_start_date)} — ${formatDate(review.checklist_end_date)}`
+                                                                    ? (
+                                                                        <>
+                                                                            <span>{formatDate(review.checklist_start_date)}</span>
+                                                                            <span className="profile-review-dates-separator">—</span>
+                                                                            <span>{formatDate(review.checklist_end_date)}</span>
+                                                                        </>
+                                                                    )
                                                                     : ""}
                                                             </div>
                                                         </div>
-                                                        <div className="profile-review-rating">
-                                                            <strong>{review.rating}.0</strong>
-                                                            <span>{"★".repeat(review.rating)}{"☆".repeat(5 - review.rating)}</span>
-                                                        </div>
                                                     </div>
                                                     <p className="profile-review-text">{review.text}</p>
-                                                    {review.photo && (
-                                                        <div className="profile-review-photo">
-                                                            <img src={review.photo} alt="Trip review" />
+                                                    {getReviewPhotos(review).length > 0 && (
+                                                        <div className={`profile-review-photo-gallery photos-${Math.min(getReviewPhotos(review).length, 4)}`}>
+                                                            {getReviewPhotos(review).map((photo, index) => (
+                                                                <button
+                                                                    key={`${review.id}-${index}`}
+                                                                    type="button"
+                                                                    className="profile-review-photo"
+                                                                    onClick={(event) => {
+                                                                        event.stopPropagation();
+                                                                        setSelectedReviewPhoto(photo);
+                                                                    }}
+                                                                >
+                                                                    <img src={photo} alt={`Trip review ${index + 1}`} />
+                                                                </button>
+                                                            ))}
                                                         </div>
                                                     )}
                                                 </article>
@@ -730,7 +986,7 @@ const PublicProfilePage = () => {
                                         </div>
                                     ) : (
                                         <div className="profile-empty-list public-profile-empty">
-                                            <p>Пока нет опубликованных отзывов.</p>
+                                            <p>{lang === "en" ? "No published reviews yet." : "Пока нет опубликованных отзывов."}</p>
                                         </div>
                                     )}
                                 </div>
@@ -750,7 +1006,7 @@ const PublicProfilePage = () => {
                                     )}
                                     {(profile.bio || visibleSocialLinks.length > 0) && (
                                         <div className="public-profile-about-card">
-                                            <h3 className="profile-section-title public-profile-about-title">О профиле</h3>
+                                            <h3 className="profile-section-title public-profile-about-title">{lang === "en" ? "About profile" : "О профиле"}</h3>
                                             {profile.bio && <p className="profile-bio public-profile-about-bio">{profile.bio}</p>}
                                             {visibleSocialLinks.length > 0 && (
                                                 <div className="public-profile-socials">
@@ -777,7 +1033,7 @@ const PublicProfilePage = () => {
                                 <div className="tab-content animations-fade">
                                     {followers.length === 0 ? (
                                         <div className="profile-empty-list public-profile-empty">
-                                            <p>Пока нет подписчиков.</p>
+                                            <p>{lang === "en" ? "No followers yet." : "Пока нет подписчиков."}</p>
                                         </div>
                                     ) : (
                                         <div className="subscriptions-list">
@@ -800,7 +1056,7 @@ const PublicProfilePage = () => {
                                                             className="subscription-cta-btn primary"
                                                             onClick={() => navigate(person.username === currentUser?.username ? "/profile" : `/u/${person.username}`)}
                                                         >
-                                                            Открыть
+                                                            {lang === "en" ? "Open" : "Открыть"}
                                                         </button>
                                                     </div>
                                                 </div>
@@ -814,7 +1070,7 @@ const PublicProfilePage = () => {
                                 <div className="tab-content animations-fade">
                                     {following.length === 0 ? (
                                         <div className="profile-empty-list public-profile-empty">
-                                            <p>Пока нет подписок.</p>
+                                            <p>{lang === "en" ? "No following yet." : "Пока нет подписок."}</p>
                                         </div>
                                     ) : (
                                         <div className="subscriptions-list">
@@ -837,7 +1093,7 @@ const PublicProfilePage = () => {
                                                             className="subscription-cta-btn primary"
                                                             onClick={() => navigate(person.username === currentUser?.username ? "/profile" : `/u/${person.username}`)}
                                                         >
-                                                            Открыть
+                                                            {lang === "en" ? "Open" : "Открыть"}
                                                         </button>
                                                     </div>
                                                 </div>
@@ -856,9 +1112,9 @@ const PublicProfilePage = () => {
                     <div className="modal-content profile-checklist-invite-modal" onClick={(e) => e.stopPropagation()}>
                         <button className="modal-close" onClick={closeProfileInviteModal}>&times;</button>
                         <h3 className="profile-checklist-invite-title">
-                            Куда пригласить: {profileInviteTarget.username}
+                            {lang === "en" ? `Where to invite: ${profileInviteTarget.username}` : `Куда пригласить: ${profileInviteTarget.username}`}
                         </h3>
-                        <p className="invite-modal-desc">Выберите один из своих чеклистов, куда хотите пригласить пользователя.</p>
+                        <p className="invite-modal-desc">{lang === "en" ? "Choose one of your checklists to invite this user into." : "Выберите один из своих чеклистов, куда хотите пригласить пользователя."}</p>
 
                         {profileInviteError && (
                             <div className="profile-invite-error">{profileInviteError}</div>
@@ -866,7 +1122,7 @@ const PublicProfilePage = () => {
 
                         {inviteableChecklists.length === 0 ? (
                             <div className="profile-empty-list profile-invite-empty">
-                                <p>У вас пока нет своих чеклистов для приглашения.</p>
+                                <p>{lang === "en" ? "You do not have your own checklists to invite into yet." : "У вас пока нет своих чеклистов для приглашения."}</p>
                             </div>
                         ) : (
                             <div className="profile-invite-checklists">
@@ -881,7 +1137,7 @@ const PublicProfilePage = () => {
                                             className={`profile-invite-checklist ${disabled ? "disabled" : ""}`}
                                         >
                                             <div className="profile-invite-checklist-copy">
-                                                <strong>{checklist.city}</strong>
+                                                <strong>{translatePlaceLabel(checklist.city, lang)}</strong>
                                                 <span>
                                                     {formatDate(checklist.start_date)} — {formatDate(checklist.end_date)}
                                                 </span>
@@ -893,18 +1149,26 @@ const PublicProfilePage = () => {
                                                 onClick={() => handleInviteUserToChecklist(checklist)}
                                             >
                                                 {alreadyInChecklist
-                                                    ? "Уже в чеклисте"
+                                                    ? (lang === "en" ? "Already in list" : "Уже в чеклисте")
                                                     : inviteSent
-                                                        ? "Приглашение отправлено"
+                                                        ? (lang === "en" ? "Invite sent" : "Приглашение отправлено")
                                                         : profileInviteBusySlug === checklist.slug
                                                             ? "..."
-                                                            : "Пригласить"}
+                                                            : (lang === "en" ? "Invite" : "Пригласить")}
                                             </button>
                                         </div>
                                     );
                                 })}
                             </div>
                         )}
+                    </div>
+                </div>
+            )}
+
+            {selectedReviewPhoto && (
+                <div className="avatar-modal-overlay" onClick={() => setSelectedReviewPhoto("")}>
+                    <div className="avatar-modal-content media-lightbox-content" onClick={(event) => event.stopPropagation()}>
+                        <img src={selectedReviewPhoto} alt="Review Large" className="media-lightbox-img" />
                     </div>
                 </div>
             )}

@@ -1,10 +1,17 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import "./ProfilePage.css";
-import { TRANSLATIONS, pluralize, pluralizeWord } from "./i18n";
-import { EyeIcon, LockIcon, UnlockIcon, ListIcon, TrophyIcon, BarChartIcon, CheckCircleIcon, XCricleIcon, SparkleIcon, EditIcon } from "./Icons";
+import { TRANSLATIONS, pluralizeWord } from "./i18n";
+import { EyeIcon, LockIcon, UnlockIcon, ListIcon, TrophyIcon, BarChartIcon, CheckCircleIcon, XCricleIcon, SparkleIcon, EditIcon, UsersIcon } from "./Icons";
 import ConfirmDialog from "./ConfirmDialog";
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+import {
+    API_URL,
+    getChecklistItemCount,
+    getChecklistTravelerCount,
+    isChecklistShared,
+    safeParseJson,
+} from "./appUtils";
+import { translatePlaceLabel } from "./checklistLocalization";
 
 const RANK_TIERS = [
     { id: "novice", icon: "🌱", name_ru: "Новичок", name_en: "Novice", min: 0 },
@@ -16,44 +23,24 @@ const RANK_TIERS = [
     { id: "legend", icon: "👑", name_ru: "Легенда", name_en: "Legend", min: 1700 },
 ];
 
-const safeParseJson = (value, fallback = null) => {
-    if (!value) return fallback;
-    try {
-        return JSON.parse(value);
-    } catch {
-        return fallback;
-    }
-};
-
-const normalizeUserId = (value) => {
-    const numericValue = Number(value);
-    return Number.isFinite(numericValue) ? numericValue : value;
-};
-
-const isChecklistShared = (checklist, viewerUserId) => {
-    if (!checklist) return false;
-    const ownerId = normalizeUserId(checklist.user_id);
-    const viewerId = normalizeUserId(viewerUserId);
-    if (ownerId !== viewerId) return true;
-    return (checklist.backpacks || []).some((backpack) => normalizeUserId(backpack.user_id) !== ownerId);
-};
-
-const getChecklistItemCount = (checklist) => {
-    const checklistItemsCount = Array.isArray(checklist?.items) ? checklist.items.length : 0;
-    const baggageCount = (checklist?.backpacks || []).reduce(
-        (sum, backpack) => sum + (Array.isArray(backpack.items) ? backpack.items.length : 0),
-        0
-    );
-    return checklistItemsCount + baggageCount;
-};
-
-const PROFILE_BUNDLE_CACHE_TTL_MS = 2000;
+const PROFILE_BUNDLE_CACHE_TTL_MS = 10000;
+const PROFILE_BUNDLE_TIMEOUT_MS = 8000;
 const AVATAR_MAX_SIZE = 1600;
 const AVATAR_JPEG_QUALITY = 0.96;
 const profileBundleRequestCache = new Map();
 
-const fetchProfileBundleCached = async ({ token, username, failedToLoadChecklists }) => {
-    const cacheKey = `${token}:${username || "__self__"}`;
+const getProfileBundleCacheKey = (token, username) => `${token}:${username || "__self__"}`;
+
+const getCachedProfileBundle = ({ token, username }) => {
+    const cacheKey = getProfileBundleCacheKey(token, username);
+    const cached = profileBundleRequestCache.get(cacheKey);
+    if (!cached?.data) return null;
+    if (Date.now() - cached.timestamp > PROFILE_BUNDLE_CACHE_TTL_MS) return null;
+    return cached.data;
+};
+
+const fetchProfileBundleCached = async ({ token, username, failedToLoadChecklists, signal }) => {
+    const cacheKey = getProfileBundleCacheKey(token, username);
     const now = Date.now();
     const cached = profileBundleRequestCache.get(cacheKey);
 
@@ -67,48 +54,26 @@ const fetchProfileBundleCached = async ({ token, username, failedToLoadChecklist
 
     const promise = (async () => {
         const headers = { Authorization: `Bearer ${token}` };
+        const response = await fetch(`${API_URL}/my-profile-bundle`, { headers, signal });
 
-        const resCl = await fetch(`${API_URL}/my-checklists`, { headers });
-        if (resCl.status === 401) {
+        if (response.status === 401) {
             return { unauthorized: true };
         }
-        if (!resCl.ok) {
-            throw new Error(failedToLoadChecklists);
+        if (!response.ok) {
+            throw await readProfileApiError(response, failedToLoadChecklists);
         }
 
+        const payload = await response.json();
         const data = {
-            checklists: await resCl.json(),
-            stats: null,
-            achievements: null,
-            feedback: null,
-            reviews: [],
-            followers: [],
-            following: [],
-            followRequests: [],
+            checklists: payload?.checklists || [],
+            stats: payload?.stats || null,
+            achievements: payload?.achievements || null,
+            feedback: payload?.feedback || null,
+            reviews: payload?.reviews || [],
+            followers: username ? (payload?.followers || []) : [],
+            following: username ? (payload?.following || []) : [],
+            followRequests: username ? (payload?.followRequests || []) : [],
         };
-
-        const resStats = await fetch(`${API_URL}/my-stats`, { headers });
-        if (resStats.ok) data.stats = await resStats.json();
-
-        const resAch = await fetch(`${API_URL}/my-achievements`, { headers });
-        if (resAch.ok) data.achievements = await resAch.json();
-
-        const resFb = await fetch(`${API_URL}/my-feedback-stats`, { headers });
-        if (resFb.ok) data.feedback = await resFb.json();
-
-        const resReviews = await fetch(`${API_URL}/my-trip-reviews`, { headers });
-        if (resReviews.ok) data.reviews = await resReviews.json();
-
-        if (username) {
-            const resFollowers = await fetch(`${API_URL}/users/${username}/followers`, { headers });
-            if (resFollowers.ok) data.followers = await resFollowers.json();
-
-            const resFollowing = await fetch(`${API_URL}/users/${username}/following`, { headers });
-            if (resFollowing.ok) data.following = await resFollowing.json();
-
-            const resRequests = await fetch(`${API_URL}/follow-requests`, { headers });
-            if (resRequests.ok) data.followRequests = await resRequests.json();
-        }
 
         profileBundleRequestCache.set(cacheKey, {
             data,
@@ -130,6 +95,104 @@ const fetchProfileBundleCached = async ({ token, username, failedToLoadChecklist
 
     return promise;
 };
+
+const readProfileApiError = async (response, fallbackMessage) => {
+    try {
+        const payload = await response.json();
+        const message = payload?.detail || payload?.message || fallbackMessage;
+        const error = new Error(message);
+        error.status = response.status;
+        error.isServerError = response.status >= 500;
+        return error;
+    } catch {
+        const error = new Error(fallbackMessage);
+        error.status = response.status;
+        error.isServerError = response.status >= 500;
+        return error;
+    }
+};
+
+const fetchAuthorizedJson = async (path, token, { timeoutMs = PROFILE_BUNDLE_TIMEOUT_MS } = {}) => {
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+        const response = await fetch(`${API_URL}${path}`, {
+            headers: { Authorization: `Bearer ${token}` },
+            signal: controller.signal,
+        });
+
+        if (response.status === 401) {
+            return { unauthorized: true };
+        }
+
+        if (!response.ok) {
+            throw await readProfileApiError(response, `Request failed for ${path}`);
+        }
+
+        return { data: await response.json() };
+    } catch (error) {
+        if (error?.name === "AbortError") {
+            throw new Error(`Timeout while loading ${path}`);
+        }
+        throw error;
+    } finally {
+        window.clearTimeout(timeoutId);
+    }
+};
+
+const fetchProfileBundleFallback = async ({ token, username, failedToLoadChecklists }) => {
+    const requests = await Promise.allSettled([
+        fetchAuthorizedJson("/my-checklists", token),
+        fetchAuthorizedJson("/my-trip-reviews", token),
+        fetchAuthorizedJson("/my-stats", token),
+        fetchAuthorizedJson("/my-achievements", token),
+        fetchAuthorizedJson("/my-feedback-stats", token),
+        username ? fetchAuthorizedJson(`/users/${encodeURIComponent(username)}/followers`, token) : Promise.resolve({ data: [] }),
+        username ? fetchAuthorizedJson(`/users/${encodeURIComponent(username)}/following`, token) : Promise.resolve({ data: [] }),
+        fetchAuthorizedJson("/follow-requests", token),
+    ]);
+
+    const firstUnauthorized = requests.find((entry) => entry.status === "fulfilled" && entry.value?.unauthorized);
+    if (firstUnauthorized) {
+        return { unauthorized: true };
+    }
+
+    const checklistsResult = requests[0];
+    if (checklistsResult.status !== "fulfilled" || !checklistsResult.value?.data) {
+        throw new Error(failedToLoadChecklists);
+    }
+
+    const getData = (index, fallbackValue) => {
+        const entry = requests[index];
+        if (entry.status !== "fulfilled") return fallbackValue;
+        return entry.value?.data ?? fallbackValue;
+    };
+
+    return {
+        checklists: getData(0, []),
+        reviews: getData(1, []),
+        stats: getData(2, null),
+        achievements: getData(3, null),
+        feedback: getData(4, null),
+        followers: getData(5, []),
+        following: getData(6, []),
+        followRequests: getData(7, []),
+    };
+};
+
+const ProfileChecklistSkeleton = () => (
+    <div className="profile-loading-grid" aria-hidden="true">
+        {Array.from({ length: 4 }, (_, index) => (
+            <div key={index} className="profile-loading-card">
+                <div className="skeleton-block skeleton-text-lg" />
+                <div className="skeleton-block skeleton-text-sm" />
+                <div className="skeleton-block skeleton-text-sm" />
+                <div className="skeleton-block skeleton-pill profile-loading-pill" />
+            </div>
+        ))}
+    </div>
+);
 
 const getCountNoun = (count, key, lang) => {
     const forms = {
@@ -176,6 +239,13 @@ const getSocialLabel = (network) => {
     return labels[network] || network;
 };
 
+const getReviewPhotos = (review) => {
+    if (Array.isArray(review?.photos) && review.photos.length > 0) {
+        return review.photos.filter(Boolean);
+    }
+    return review?.photo ? [review.photo] : [];
+};
+
 const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
     const t = TRANSLATIONS[lang] || TRANSLATIONS.ru;
     const navigate = useNavigate();
@@ -183,7 +253,6 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
     const [reviews, setReviews] = useState([]);
     const [stats, setStats] = useState(null);
     const [achievements, setAchievements] = useState(null);
-    const [feedback, setFeedback] = useState(null);
     const [followers, setFollowers] = useState([]);
     const [following, setFollowing] = useState([]);
     const [followRequests, setFollowRequests] = useState([]);
@@ -204,6 +273,7 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
     const [profileInviteBusySlug, setProfileInviteBusySlug] = useState("");
     const [profileInviteSentSlugs, setProfileInviteSentSlugs] = useState([]);
     const [profileInviteError, setProfileInviteError] = useState("");
+    const [selectedReviewPhoto, setSelectedReviewPhoto] = useState("");
     const socialMenuRef = React.useRef(null);
     const bioInputRef = React.useRef(null);
     const confirmResolverRef = React.useRef(null);
@@ -238,20 +308,60 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
     const resizeBioTextarea = (element) => {
         if (!element) return;
         element.style.height = "auto";
-        element.style.height = `${Math.min(element.scrollHeight, 150)}px`;
+        element.style.height = `${element.scrollHeight}px`;
     };
 
     useEffect(() => {
-        if (!token) return;
+        if (!token) {
+            setLoading(false);
+            setError(lang === "en" ? "Session expired. Please sign in again." : "Сессия истекла. Войдите снова.");
+            return;
+        }
         let isCancelled = false;
 
         const fetchData = async () => {
             try {
-                const bundle = await fetchProfileBundleCached({
-                    token,
-                    username: profileUsername,
-                    failedToLoadChecklists: t.failedToLoadChecklists,
-                });
+                setError(null);
+                const cachedBundle = getCachedProfileBundle({ token, username: profileUsername });
+                if (cachedBundle) {
+                    if (isCancelled) return;
+                    setChecklists(cachedBundle.checklists || []);
+                    setStats(cachedBundle.stats);
+                    setAchievements(cachedBundle.achievements);
+                    setReviews(cachedBundle.reviews || []);
+                    setFollowers(cachedBundle.followers || []);
+                    setFollowing(cachedBundle.following || []);
+                    setFollowRequests(cachedBundle.followRequests || []);
+                    setLoading(false);
+                } else {
+                    setLoading(true);
+                }
+
+                let bundle;
+                try {
+                    const controller = new AbortController();
+                    const timeoutId = window.setTimeout(() => controller.abort(), PROFILE_BUNDLE_TIMEOUT_MS);
+                    try {
+                        bundle = await fetchProfileBundleCached({
+                            token,
+                            username: profileUsername,
+                            failedToLoadChecklists: t.failedToLoadChecklists,
+                            signal: controller.signal,
+                        });
+                    } finally {
+                        window.clearTimeout(timeoutId);
+                    }
+                } catch (bundleError) {
+                    if (bundleError?.isServerError) {
+                        throw bundleError;
+                    }
+                    console.warn("Profile bundle failed, switching to fallback requests:", bundleError);
+                    bundle = await fetchProfileBundleFallback({
+                        token,
+                        username: profileUsername,
+                        failedToLoadChecklists: t.failedToLoadChecklists,
+                    });
+                }
 
                 if (isCancelled) return;
 
@@ -263,7 +373,6 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                 setChecklists(bundle.checklists || []);
                 setStats(bundle.stats);
                 setAchievements(bundle.achievements);
-                setFeedback(bundle.feedback);
                 setReviews(bundle.reviews || []);
                 setFollowers(bundle.followers || []);
                 setFollowing(bundle.following || []);
@@ -284,7 +393,7 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
         return () => {
             isCancelled = true;
         };
-    }, [token, profileUsername, onLogout, t.failedToLoadChecklists]);
+    }, [lang, token, profileUsername, onLogout, t.failedToLoadChecklists]);
 
     useEffect(() => {
         setAvatar(user?.avatar || "");
@@ -682,7 +791,7 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
     const followerCount = followers.length;
     const publicChecklistCount = checklists.filter((item) => item.is_public).length;
     const collaborativeChecklistCount = checklists.filter((item) => isChecklistShared(item, user?.id)).length;
-    const reviewWithPhotoCount = reviews.filter((item) => item.photo).length;
+    const reviewWithPhotoCount = reviews.filter((item) => getReviewPhotos(item).length > 0).length;
 
     const pointsBreakdown = [
         {
@@ -1016,7 +1125,7 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                                     setBio(e.target.value);
                                     resizeBioTextarea(e.target);
                                 }} 
-                                rows={2}
+                                rows={1}
                                 placeholder="..."
                             />
 
@@ -1218,42 +1327,13 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                         </div>
                     )}
 
-                    {feedback && (feedback.top_removed.length > 0 || feedback.top_added.length > 0) && (
-                        <div className="feedback-section">
-                            <h3 className="profile-section-title" style={{display:'flex',alignItems:'center'}}><BarChartIcon /> {t.yourPreferences}</h3>
-                            <div className="feedback-columns">
-                                {feedback.top_added.length > 0 && (
-                                    <div className="feedback-col">
-                                        <h4 style={{display:'flex',alignItems:'center'}}><CheckCircleIcon style={{color:'var(--success)',width:'18px',height:'18px',marginRight:'6px'}}/> {t.frequentlyAdded}</h4>
-                                        {feedback.top_added.map((item, i) => (
-                                            <div key={i} className="feedback-item added">
-                                                <span>{item.item}</span>
-                                                <span className="feedback-count">×{item.count}</span>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                                {feedback.top_removed.length > 0 && (
-                                    <div className="feedback-col">
-                                        <h4 style={{display:'flex',alignItems:'center'}}><XCricleIcon style={{color:'var(--error)',width:'18px',height:'18px',marginRight:'6px'}}/> {t.frequentlyRemoved}</h4>
-                                        {feedback.top_removed.map((item, i) => (
-                                            <div key={i} className="feedback-item removed">
-                                                <span>{item.item}</span>
-                                                <span className="feedback-count">×{item.count}</span>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
-                            </div>
-                        </div>
-                    )}
                 </div>
             )}
 
             {/* Checklists Tab */}
             {(isOwner || isStatsPublic) && activeTab === "checklists" && (
                 <div className="tab-content animations-fade">
-                    {loading && <div className="profile-loading">{t.loadingStr}</div>}
+                    {loading && <ProfileChecklistSkeleton />}
                     {error && <div className="profile-error">{error}</div>}
 
                     {!loading && !error && checklists.length === 0 && (
@@ -1268,7 +1348,9 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                     <div className="checklists-grid">
                         {checklists.map((cl) => {
                             const isOwner = cl.user_id === user?.id;
-                            const isShared = isChecklistShared(cl, user?.id);
+                            const itemCount = getChecklistItemCount(cl);
+                            const travelersCount = getChecklistTravelerCount(cl);
+                            const showTravelersBadge = travelersCount > 1;
                             return (
                             <div
                                 key={cl.slug}
@@ -1296,19 +1378,27 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                                     )}
                                 </div>
                                 <div className="preview-city">
-                                    <span className="preview-city-text">{cl.city}</span>
+                                    <span className="preview-city-text">{translatePlaceLabel(cl.city, lang)}</span>
                                 </div>
                                 <div className="preview-dates">
                                     {formatDate(cl.start_date)} — {formatDate(cl.end_date)}
                                 </div>
-                                <div className="preview-items">
-                                    {pluralize(getChecklistItemCount(cl), ['вещь', 'вещи', 'вещей'], ['item', 'items'], lang)}
-                                </div>
-                                <div className="preview-temp-row">
-                                    <div className="preview-temp">
-                                        {cl.avg_temp > 0 ? "+" : ""}{Math.round(cl.avg_temp)}°C
+                                <div className="preview-meta-row">
+                                    <div className="preview-items-badge">
+                                        <span className="preview-items-badge-value">{itemCount}</span>
+                                        <span className="preview-items-badge-label">
+                                            {pluralizeWord(itemCount, ['вещь', 'вещи', 'вещей'], ['item', 'items'], lang)}
+                                        </span>
                                     </div>
-                                    {isShared && <span className="shared-badge" title={lang === 'en' ? 'Shared checklist' : 'Совместный чеклист'}>👥</span>}
+                                    {showTravelersBadge && (
+                                        <span
+                                            className="shared-badge"
+                                            title={lang === 'en' ? 'People going on this trip' : 'Людей в этой поездке'}
+                                        >
+                                            <UsersIcon style={{ width: "14px", height: "14px", marginRight: 0 }} />
+                                            <span>{travelersCount}</span>
+                                        </span>
+                                    )}
                                 </div>
                             </div>
                         );
@@ -1332,23 +1422,40 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                                     onClick={() => review.checklist_slug && navigate(`/checklist/${review.checklist_slug}`)}
                                 >
                                     <div className="profile-review-meta">
-                                        <div>
-                                            <div className="profile-review-city">{review.checklist_city || (lang === 'en' ? 'Trip' : 'Поездка')}</div>
+                                        <div className="profile-review-copy">
+                                            <div className="profile-review-city">{translatePlaceLabel(review.checklist_city || (lang === 'en' ? 'Trip' : 'Поездка'), lang)}</div>
+                                            <div className="profile-review-rating">
+                                                <span className="profile-review-stars">{"★".repeat(review.rating)}{"☆".repeat(5 - review.rating)}</span>
+                                            </div>
                                             <div className="profile-review-dates">
                                                 {review.checklist_start_date && review.checklist_end_date
-                                                    ? `${formatDate(review.checklist_start_date)} — ${formatDate(review.checklist_end_date)}`
+                                                    ? (
+                                                        <>
+                                                            <span>{formatDate(review.checklist_start_date)}</span>
+                                                            <span className="profile-review-dates-separator">—</span>
+                                                            <span>{formatDate(review.checklist_end_date)}</span>
+                                                        </>
+                                                    )
                                                     : ""}
                                             </div>
                                         </div>
-                                        <div className="profile-review-rating">
-                                            <strong>{review.rating}.0</strong>
-                                            <span>{"★".repeat(review.rating)}{"☆".repeat(5 - review.rating)}</span>
-                                        </div>
                                     </div>
                                     <p className="profile-review-text">{review.text}</p>
-                                    {review.photo && (
-                                        <div className="profile-review-photo">
-                                            <img src={review.photo} alt="Trip review" />
+                                    {getReviewPhotos(review).length > 0 && (
+                                        <div className={`profile-review-photo-gallery photos-${Math.min(getReviewPhotos(review).length, 4)}`}>
+                                            {getReviewPhotos(review).map((photo, index) => (
+                                                <button
+                                                    key={`${review.id}-${index}`}
+                                                    type="button"
+                                                    className="profile-review-photo"
+                                                    onClick={(event) => {
+                                                        event.stopPropagation();
+                                                        setSelectedReviewPhoto(photo);
+                                                    }}
+                                                >
+                                                    <img src={photo} alt={`Trip review ${index + 1}`} />
+                                                </button>
+                                            ))}
                                         </div>
                                     )}
                                 </article>
@@ -1549,7 +1656,7 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                                             className={`profile-invite-checklist ${disabled ? "disabled" : ""}`}
                                         >
                                             <div className="profile-invite-checklist-copy">
-                                                <strong>{checklist.city}</strong>
+                                                <strong>{translatePlaceLabel(checklist.city, lang)}</strong>
                                                 <span>
                                                     {formatDate(checklist.start_date)} — {formatDate(checklist.end_date)}
                                                 </span>
@@ -1592,6 +1699,14 @@ const ProfilePage = ({ user, token, onLogout, onUpdateUser, lang = "ru" }) => {
                 <div className="avatar-modal-overlay" onClick={() => setIsAvatarModalOpen(false)}>
                     <div className="avatar-modal-content" onClick={e => e.stopPropagation()}>
                         <img src={avatar} alt="Avatar Large" className="avatar-modal-img" />
+                    </div>
+                </div>
+            )}
+
+            {selectedReviewPhoto && (
+                <div className="avatar-modal-overlay" onClick={() => setSelectedReviewPhoto("")}>
+                    <div className="avatar-modal-content media-lightbox-content" onClick={(event) => event.stopPropagation()}>
+                        <img src={selectedReviewPhoto} alt="Review Large" className="media-lightbox-img" />
                     </div>
                 </div>
             )}

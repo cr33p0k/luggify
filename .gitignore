@@ -1,6 +1,8 @@
 # Переменные окружения
 .env
+client/.env
 server/.env
+server/.env.legacy
 
 # Python
 __pycache__/

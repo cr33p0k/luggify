@@ -4,10 +4,22 @@ from datetime import date
 from aiogram.types import User as TelegramUser
 
 import crud
+import schemas
+from assistant_intents import is_expense_intent
+from assistant_plan_service import (
+    apply_plan_proposals_to_checklist,
+    build_day_plan_question,
+    force_plan_proposals_date,
+    format_telegram_day_plan,
+    resolve_requested_trip_day,
+)
 from ai_service import ask_travel_ai
 from checklist_ai import apply_checklist_ai_actions, preview_checklist_ai_command
+from packing_apply import apply_packing_recommendations
+from currency_rates import convert_currency_amount, normalize_currency
 from database import SessionLocal
 from telegram_link import TelegramLinkTokenError, decode_telegram_link_token
+from trip_context import build_trip_context
 
 CHECKLIST_BUTTON_PAGE_SIZE = 8
 DEFAULT_CHECKLIST_INTERACTION_MODE = "pack"
@@ -64,6 +76,29 @@ def _pick_primary_checklist(checklists):
         return max(past, key=lambda checklist: checklist.end_date)
 
     return checklists[0]
+
+
+def _checklist_has_participant(checklist, user_id: int | None) -> bool:
+    if not checklist or not user_id:
+        return False
+    if getattr(checklist, "user_id", None) == user_id:
+        return True
+    return any(getattr(backpack, "user_id", None) == user_id for backpack in (checklist.backpacks or []))
+
+
+def _extract_collaborator_target_ids(actions: list[dict] | None, actor_user_id: int | None) -> set[int]:
+    target_ids: set[int] = set()
+    for action in actions or []:
+        for key in ("section_user_id", "target_user_id"):
+            raw_value = action.get(key)
+            try:
+                parsed = int(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if parsed <= 0 or parsed == actor_user_id:
+                continue
+            target_ids.add(parsed)
+    return target_ids
 
 
 def _get_section_visible_items(section: dict) -> list[str]:
@@ -448,6 +483,18 @@ def _format_item_with_quantity(item_name: str, quantity_map, packed_map=None) ->
     if packed_map is not None:
         return f"{item_name} {_get_item_packed_quantity(packed_map, item_name)}/{quantity}"
     return f"{item_name} ×{quantity}" if quantity > 1 else item_name
+
+
+def _format_money(value, currency: str = "RUB") -> str:
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return f"0 {currency}"
+    if amount.is_integer():
+        amount_text = str(int(amount))
+    else:
+        amount_text = f"{amount:.2f}".rstrip("0").rstrip(".")
+    return f"{amount_text} {currency}"
 
 
 def _build_baggage_label(backpack, actor_user_id: int | None = None) -> str:
@@ -863,7 +910,12 @@ async def link_web_account_from_telegram(tg_user: TelegramUser, encoded_token: s
     )
 
 
-async def process_ai_prompt_for_telegram(tg_user: TelegramUser, prompt: str, selected_slug: str = None) -> dict:
+async def process_ai_prompt_for_telegram(
+    tg_user: TelegramUser,
+    prompt: str,
+    selected_slug: str = None,
+    command_context: dict | None = None,
+) -> dict:
     prompt = (prompt or "").strip()
     if not prompt:
         return {"mode": "message", "message": "Напишите вопрос, и я постараюсь помочь."}
@@ -905,12 +957,97 @@ async def process_ai_prompt_for_telegram(tg_user: TelegramUser, prompt: str, sel
                 ),
             }
 
+        if is_expense_intent(cleaned_prompt):
+            if (
+                not selected_slug
+                and resolved_reference["mode"] == "no_explicit_target"
+                and len(all_checklists) > 1
+            ):
+                return {
+                    "mode": "pick_trip",
+                    "message": (
+                        "Сначала выбери поездку, куда записать трату. "
+                        "После этого буду добавлять расходы именно в неё."
+                    ),
+                    "checklists": all_checklists,
+                    "prompt": prompt,
+                }
+            context = build_trip_context(
+                checklist,
+                viewer_user_id=current_user.id if current_user else None,
+                language="ru",
+            )
+            result = await ask_travel_ai(
+                city=checklist.city,
+                question=cleaned_prompt,
+                language="ru",
+                start_date=str(checklist.start_date or ""),
+                end_date=str(checklist.end_date or ""),
+                avg_temp=checklist.avg_temp,
+                trip_context=context,
+            )
+            proposals = result.get("expense_proposals") if isinstance(result, dict) else []
+            if proposals:
+                return {
+                    "mode": "action",
+                    "message": await _apply_expense_proposals_for_telegram(db, current_user, checklist, proposals),
+                    "checklist_slug": checklist.slug,
+                    "checklist_title": format_checklist_title(checklist),
+                    "command_context": None,
+                }
+            return {
+                "mode": "message",
+                "message": result.get("answer", "Не смог распознать трату.") if isinstance(result, dict) else "Не смог распознать трату.",
+                "command_context": None,
+            }
+
         preview = await preview_checklist_ai_command(
             checklist,
             cleaned_prompt,
             "ru",
             actor_user_id=current_user.id if current_user else None,
+            command_context=command_context,
         )
+        actor_user_id = current_user.id if current_user else None
+        if (
+            preview["recognized_action_request"]
+            and not selected_slug
+            and resolved_reference["mode"] == "no_explicit_target"
+            and len(all_checklists) > 1
+        ):
+            return {
+                "mode": "pick_trip",
+                "message": (
+                    "Сначала выбери поездку, в которой сейчас находишься. "
+                    "После этого я буду применять команды именно к ней."
+                ),
+                "checklists": all_checklists,
+                "prompt": prompt,
+            }
+
+        collaborator_target_ids = _extract_collaborator_target_ids(preview.get("actions"), actor_user_id)
+        if (
+            preview["recognized_action_request"]
+            and collaborator_target_ids
+            and not selected_slug
+            and resolved_reference["mode"] != "resolved"
+        ):
+            matching_checklists = [
+                item
+                for item in all_checklists
+                if all(_checklist_has_participant(item, target_user_id) for target_user_id in collaborator_target_ids)
+            ]
+            if len(matching_checklists) > 1:
+                return {
+                    "mode": "pick_trip",
+                    "message": (
+                        "Похоже, у тебя несколько совместных поездок с этим участником. "
+                        "Сначала выбери нужную поездку, и потом я изменю багаж уже в ней."
+                    ),
+                    "checklists": matching_checklists,
+                    "prompt": prompt,
+                }
+
         if preview["recognized_action_request"]:
             if preview.get("requires_confirmation"):
                 return {
@@ -919,6 +1056,7 @@ async def process_ai_prompt_for_telegram(tg_user: TelegramUser, prompt: str, sel
                     "actions": preview.get("raw_actions") or preview["actions"],
                     "checklist_slug": checklist.slug,
                     "checklist_title": format_checklist_title(checklist),
+                    "command_context": preview.get("command_context"),
                 }
             if preview["actions"]:
                 command_result = await apply_checklist_ai_actions(
@@ -933,8 +1071,9 @@ async def process_ai_prompt_for_telegram(tg_user: TelegramUser, prompt: str, sel
                     "message": command_result["message"],
                     "checklist_slug": checklist.slug,
                     "checklist_title": format_checklist_title(command_result["checklist"]),
+                    "command_context": command_result.get("command_context"),
                 }
-            return {"mode": "message", "message": preview["message"]}
+            return {"mode": "message", "message": preview["message"], "command_context": preview.get("command_context")}
 
         result = await ask_travel_ai(
             city=checklist.city,
@@ -943,8 +1082,345 @@ async def process_ai_prompt_for_telegram(tg_user: TelegramUser, prompt: str, sel
             start_date=str(checklist.start_date or ""),
             end_date=str(checklist.end_date or ""),
             avg_temp=checklist.avg_temp,
+            trip_context=build_trip_context(
+                checklist,
+                viewer_user_id=current_user.id if current_user else None,
+                language="ru",
+            ),
         )
-        return {"mode": "message", "message": result.get("answer", "Не удалось получить ответ от AI.")}
+        if isinstance(result, dict) and result.get("packing_recommendations"):
+            command_result = await apply_packing_recommendations(
+                db=db,
+                checklist=checklist,
+                recommendations=result["packing_recommendations"],
+                actor_user_id=current_user.id if current_user else None,
+                language="ru",
+            )
+            return {
+                "mode": "message",
+                "message": f"{result.get('answer', 'Вещи обновлены.')}\n\nПрименено изменений: {command_result['applied_count']}",
+                "command_context": None,
+            }
+            
+        if isinstance(result, dict) and result.get("expense_proposals"):
+            return {
+                "mode": "message",
+                "message": (
+                    f"{result.get('answer', 'Я распознал действие по тратам.')}\n\n"
+                    "Чтобы безопасно применить это из Telegram, используйте команду /spent для траты "
+                    "или напишите бюджет как отдельную команду, например: /spent 12 EUR кофе."
+                ),
+                "command_context": None,
+            }
+        return {"mode": "message", "message": result.get("answer", "Не удалось получить ответ от AI."), "command_context": None}
+
+
+async def build_itinerary_view_for_telegram(
+    tg_user: TelegramUser,
+    prompt: str = "",
+    selected_slug: str = None,
+) -> dict:
+    prompt = (prompt or "").strip()
+    async with SessionLocal() as db:
+        all_checklists = await _load_user_checklists_with_session(db, tg_user)
+        if not all_checklists:
+            return {
+                "mode": "message",
+                "message": (
+                    "Пока не вижу поездок. Создайте поездку в Luggify, и я смогу показать маршрут."
+                ),
+            }
+
+        resolved_reference = _resolve_trip_reference(prompt, all_checklists, selected_slug)
+        if resolved_reference["mode"] == "pick_trip":
+            return {
+                "mode": "pick_trip",
+                "message": resolved_reference["message"],
+                "checklists": resolved_reference["checklists"],
+                "prompt": prompt,
+            }
+
+        if (
+            not selected_slug
+            and resolved_reference["mode"] == "no_explicit_target"
+            and len(all_checklists) > 1
+        ):
+            return {
+                "mode": "pick_trip",
+                "message": "Выберите поездку, чтобы посмотреть маршрут:",
+                "checklists": all_checklists,
+                "prompt": prompt,
+            }
+
+        checklist = None
+        cleaned_prompt = prompt
+        if resolved_reference["mode"] == "resolved":
+            checklist = resolved_reference["checklist"]
+            cleaned_prompt = resolved_reference["cleaned_prompt"]
+        elif selected_slug:
+            checklist = await _get_checklist_by_slug_with_session(db, tg_user, selected_slug)
+        if not checklist:
+            checklist = _pick_primary_checklist(all_checklists)
+        if not checklist:
+            return {
+                "mode": "message",
+                "message": "Пока не вижу подходящую поездку.",
+            }
+
+        if cleaned_prompt:
+            requested_day = resolve_requested_trip_day(cleaned_prompt, checklist, language="ru")
+            if requested_day.error or not requested_day.event_date:
+                target_date = None
+            else:
+                target_date = requested_day.event_date
+        else:
+            target_date = None
+
+        events = sorted(
+            [event for event in (checklist.events or []) if not target_date or event.event_date == target_date],
+            key=lambda event: (event.event_date or date.max, event.time or "99:99")
+        )
+        
+        if not events:
+            if target_date:
+                msg = f"На {target_date:%d.%m.%Y} событий нет. Составьте маршрут в приложении или через AI-чат."
+            else:
+                msg = "В этой поездке пока нет событий в маршруте. Составьте его в приложении или через AI-чат."
+            return {"mode": "message", "message": msg}
+
+        lines = [f"Маршрут поездки {format_checklist_title(checklist)}:\n"]
+        current_date = None
+        for event in events:
+            if event.event_date != current_date:
+                current_date = event.event_date
+                if current_date:
+                    lines.append(f"\n📅 {current_date:%d.%m.%Y}")
+                else:
+                    lines.append(f"\n📅 Даты не указаны")
+            time_str = event.time or "Без времени"
+            lines.append(f"• {time_str} — {event.title}")
+            if event.address:
+                lines.append(f"  📍 {event.address}")
+
+        return {
+            "mode": "message",
+            "message": "\n".join(lines)
+        }
+
+
+
+async def build_today_brief_text(tg_user: TelegramUser, selected_slug: str = None) -> str:
+    async with SessionLocal() as db:
+        current_user = await crud.get_user_by_tg_id(db, str(tg_user.id))
+        checklist = (
+            await _get_checklist_by_slug_with_session(db, tg_user, selected_slug)
+            if selected_slug
+            else await _get_primary_checklist_with_session(db, tg_user)
+        )
+        if not checklist:
+            return "Пока не вижу поездок. Создайте поездку в Luggify, и я соберу сводку дня."
+
+        actor_user_id = current_user.id if current_user else None
+        brief_date = date.today()
+        if checklist.start_date and checklist.end_date and not (checklist.start_date <= brief_date <= checklist.end_date):
+            brief_date = checklist.start_date
+        sections = _build_checklist_sections(checklist, actor_user_id, own_only=actor_user_id is not None)
+        remaining_rows = []
+        for section in sections:
+            progress = _get_section_progress(section)
+            quantity_map = section.get("item_quantities") or {}
+            packed_map = section.get("packed_quantities") or {}
+            for item in progress["remaining_items"]:
+                remaining_rows.append(_format_item_with_quantity(item, quantity_map, packed_map))
+        context = build_trip_context(checklist, viewer_user_id=actor_user_id, language="ru")
+
+    events = sorted(
+        [event for event in (checklist.events or []) if event.event_date == brief_date],
+        key=lambda event: event.time or "99:99",
+    )
+    plan_lines = [
+        f"• {(event.time or 'без времени')} {event.title}"
+        for event in events[:8]
+    ]
+    expenses = context.get("expenses") or {}
+    base_currency = expenses.get("base_currency") or "RUB"
+    warnings = []
+    if len(events) >= 8:
+        warnings.append("Маршрут плотный: оставьте запас на дорогу и отдых.")
+    if expenses.get("daily_budget_amount") is not None and expenses.get("today_remaining") is not None and expenses.get("today_remaining") < 0:
+        warnings.append("Дневной лимит уже превышен.")
+    if remaining_rows:
+        warnings.append(f"Осталось собрать: {', '.join(remaining_rows[:3])}.")
+
+    lines = [
+        f"Сегодня по поездке: {format_checklist_title(checklist)}",
+        f"Дата сводки: {brief_date:%d.%m.%Y}",
+    ]
+    if checklist.avg_temp is not None:
+        lines.append(f"Погода: около {round(checklist.avg_temp)}°C. Проверьте прогноз перед выходом.")
+    lines.append("")
+    lines.append("План:")
+    lines.extend(plan_lines or ["• На этот день пока нет событий."])
+    lines.append("")
+    lines.append("Вещи:")
+    lines.append("• Всё отмечено." if not remaining_rows else f"• Осталось {len(remaining_rows)}: {', '.join(remaining_rows[:5])}")
+    lines.append("")
+    lines.append("Траты:")
+    if expenses.get("daily_budget_amount") is not None:
+        lines.append(
+            f"• Сегодня потрачено {_format_money(expenses.get('today_spent', 0), base_currency)}, "
+            f"остаток на день {_format_money(expenses.get('today_remaining', 0), base_currency)}."
+        )
+    elif expenses.get("remaining") is not None:
+        lines.append(f"• Остаток бюджета поездки: {_format_money(expenses.get('remaining', 0), base_currency)}.")
+    else:
+        lines.append("• Бюджет пока не задан.")
+    if warnings:
+        lines.append("")
+        lines.append("Предупреждения:")
+        lines.extend(f"• {warning}" for warning in warnings)
+    return "\n".join(lines)
+
+
+async def build_budget_text(tg_user: TelegramUser, selected_slug: str = None) -> str:
+    async with SessionLocal() as db:
+        current_user = await crud.get_user_by_tg_id(db, str(tg_user.id))
+        checklist = (
+            await _get_checklist_by_slug_with_session(db, tg_user, selected_slug)
+            if selected_slug
+            else await _get_primary_checklist_with_session(db, tg_user)
+        )
+        if not checklist:
+            return "Пока не вижу поездок для расчёта бюджета."
+        context = build_trip_context(checklist, viewer_user_id=current_user.id if current_user else None, language="ru")
+    expenses = context.get("expenses") or {}
+    base = expenses.get("base_currency") or "RUB"
+    lines = [
+        f"Траты по поездке {format_checklist_title(checklist)}",
+        f"Всего потрачено: {_format_money(expenses.get('total_spent', 0), base)}",
+    ]
+    if expenses.get("remaining") is not None:
+        lines.append(f"Остаток бюджета: {_format_money(expenses.get('remaining', 0), base)}")
+    if expenses.get("daily_budget_amount") is not None:
+        lines.append(f"Дневной лимит: {_format_money(expenses.get('daily_budget_amount', 0), base)}")
+        lines.append(f"Осталось сегодня: {_format_money(expenses.get('today_remaining', 0), base)}")
+    by_category = expenses.get("by_category") or {}
+    if by_category:
+        lines.append("")
+        lines.append("Категории:")
+        for category, amount in sorted(by_category.items(), key=lambda item: item[1], reverse=True)[:6]:
+            lines.append(f"• {category}: {_format_money(amount, base)}")
+    return "\n".join(lines)
+
+
+async def _apply_expense_proposals_for_telegram(db, current_user, checklist, proposals: list[dict]) -> str:
+    if not proposals:
+        return "Не смог распознать трату. Попробуйте: /spent 12 EUR кофе"
+
+    base_currency = normalize_currency(checklist.expense_base_currency, "RUB")
+    created_titles: list[str] = []
+    budget_updated = False
+
+    for proposal in proposals:
+        if proposal.get("action") in {"set_budget", "set_daily_budget"}:
+            if proposal.get("base_currency"):
+                checklist.expense_base_currency = normalize_currency(proposal.get("base_currency"), base_currency)
+                base_currency = checklist.expense_base_currency
+            if proposal.get("budget_amount") is not None:
+                checklist.expense_budget_amount = float(proposal["budget_amount"])
+                budget_updated = True
+            if proposal.get("daily_budget_amount") is not None:
+                trip_profile = dict(checklist.trip_profile or {})
+                expense_profile = dict(trip_profile.get("expenses") or {})
+                expense_profile["daily_budget_amount"] = float(proposal["daily_budget_amount"])
+                trip_profile["expenses"] = expense_profile
+                checklist.trip_profile = trip_profile
+                budget_updated = True
+            continue
+
+        if proposal.get("action") != "create" or not proposal.get("title") or proposal.get("amount") is None:
+            continue
+
+        currency = normalize_currency(proposal.get("currency"), base_currency)
+        conversion = await convert_currency_amount(float(proposal["amount"]), currency, base_currency)
+        if conversion is None:
+            conversion = {"amount": float(proposal["amount"]), "rate": 1.0, "provider": "fallback", "rate_date": date.today().isoformat()}
+        expense = await crud.create_trip_expense(
+            db,
+            checklist.id,
+            schemas.TripExpenseCreate(
+                expense_date=proposal.get("expense_date"),
+                title=proposal["title"],
+                category=proposal.get("category") or "other",
+                amount=float(proposal["amount"]),
+                currency=currency,
+                note=proposal.get("note"),
+            ),
+            created_by_user_id=current_user.id if current_user else None,
+            amount_base=float(conversion["amount"]),
+            base_currency=base_currency,
+            fx_rate=float(conversion["rate"]),
+            fx_rate_date=str(conversion.get("rate_date") or ""),
+            fx_provider=str(conversion.get("provider") or ""),
+        )
+        created_titles.append(f"{expense.title}, {_format_money(expense.amount, expense.currency)}")
+
+    await db.commit()
+
+    if created_titles and budget_updated:
+        return "Добавил траты и обновил бюджет:\n" + "\n".join(f"• {title}" for title in created_titles)
+    if created_titles:
+        return "Добавил траты:\n" + "\n".join(f"• {title}" for title in created_titles)
+    if budget_updated:
+        return "Готово, обновил бюджет."
+    return "Я понял запрос, но не вижу полной траты для добавления."
+
+
+async def apply_spent_command_for_telegram(tg_user: TelegramUser, prompt: str, selected_slug: str = None) -> str:
+    async with SessionLocal() as db:
+        current_user = await crud.get_user_by_tg_id(db, str(tg_user.id))
+        checklist = (
+            await _get_checklist_by_slug_with_session(db, tg_user, selected_slug)
+            if selected_slug
+            else await _get_primary_checklist_with_session(db, tg_user)
+        )
+        if not checklist:
+            return "Пока не вижу поездку, куда добавить трату."
+        context = build_trip_context(checklist, viewer_user_id=current_user.id if current_user else None, language="ru")
+        result = await ask_travel_ai(
+            city=checklist.city,
+            question=prompt if re.search(r"добав|запиш|внес|потрат|расход|раздел|подел|бюджет|лимит|add|spent|expense|split|budget|limit", prompt, re.IGNORECASE) else f"добавь {prompt}",
+            language="ru",
+            trip_context=context,
+        )
+        proposals = result.get("expense_proposals") if isinstance(result, dict) else []
+        if not proposals:
+            return result.get("answer", "Не смог распознать трату. Попробуйте: /spent 12 EUR кофе") if isinstance(result, dict) else "Не смог распознать трату."
+        return await _apply_expense_proposals_for_telegram(db, current_user, checklist, proposals)
+
+
+async def set_telegram_notifications(tg_user: TelegramUser, enabled: bool) -> str:
+    async with SessionLocal() as db:
+        user = await ensure_telegram_user(tg_user)
+        user = await crud.get_user_by_tg_id(db, str(tg_user.id))
+        profile = dict(user.packing_profile or {})
+        telegram_settings = dict(profile.get("telegram_notifications") or {})
+        telegram_settings["daily_brief"] = bool(enabled)
+        profile["telegram_notifications"] = telegram_settings
+        user.packing_profile = profile
+        await db.commit()
+    return "Утренние уведомления включены." if enabled else "Утренние уведомления выключены."
+
+
+async def get_telegram_notifications_text(tg_user: TelegramUser) -> str:
+    user = await ensure_telegram_user(tg_user)
+    profile = dict(user.packing_profile or {})
+    enabled = bool((profile.get("telegram_notifications") or {}).get("daily_brief"))
+    return (
+        "Уведомления включены. Я буду присылать утреннюю сводку, когда будет подключён планировщик."
+        if enabled
+        else "Уведомления выключены. Можно включить утреннюю сводку кнопкой ниже."
+    )
 
 
 async def confirm_ai_actions_for_telegram(

@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -16,20 +17,28 @@ from telegram_bot.keyboards import (
     build_checklist_keyboard,
     build_confirmation_keyboard,
     build_main_menu,
+    build_notifications_keyboard,
     build_open_app_keyboard,
     build_trip_picker,
 )
 from telegram_bot.services import (
     build_account_debug_text,
+    build_budget_text,
+    build_itinerary_view_for_telegram,
     build_interactive_checklist_view,
     build_remaining_items_text,
+    build_today_brief_text,
     build_trip_overview_text,
     confirm_ai_actions_for_telegram,
     ensure_telegram_user,
     get_checklists_for_picker,
+    get_telegram_notifications_text,
     get_selected_or_primary_checklist,
     link_web_account_from_telegram,
+    apply_spent_command_for_telegram,
     process_ai_prompt_for_telegram,
+    save_plan_proposals_for_telegram,
+    set_telegram_notifications,
     toggle_interactive_checklist_item,
 )
 
@@ -46,20 +55,23 @@ HELP_TEXT = (
     "/start — открыть главное меню\n"
     "/link <код> — привязать Telegram к аккаунту с сайта\n"
     "/trip — показать ближайшую поездку\n"
+    "/today — сводка дня: план, вещи, траты, предупреждения\n"
+    "/plan — составить план дня\n"
+    "/spent 12 EUR кофе — добавить трату\n"
+    "/budget — показать бюджет\n"
+    "/left — сколько осталось сегодня\n"
+    "/notifications — утренние уведомления\n"
     "/list — открыть чеклист кнопками\n"
     "/forgot — показать, что ещё не собрано\n"
     "/choose — выбрать конкретную поездку\n"
     "/whoami — показать Telegram-статус и привязку\n"
     "/ai — включить AI-режим\n\n"
     "Примеры:\n"
-    "— добавить: добавь powerbank / закинь мне воду\n"
-    "— отметить: отметь паспорт / отметь у popich фен\n"
-    "— удалить: удали фен / удали у creepok свитер\n"
-    "— переместить: перекинь power bank popich\n"
-    "— багаж: создай багаж чемодан\n"
-    "— состояние: что уже отмечено / что осталось собрать\n\n"
-    "Если поездки ещё нет, AI тоже работает в формате:\n"
-    "Париж | что попробовать из еды?"
+    "План: лёгкий план на завтра / насыщенный план на третий день / план без музеев\n"
+    "Вещи: добавь воду в рюкзак / добавь по 2 футболки на каждый день / что осталось собрать\n"
+    "Траты: поставь дневной лимит 50 EUR / раздели 60 EUR ужин на троих\n"
+    "События: перенеси музей на вечер / проверь пересечения по времени\n\n"
+    "Без уточнения вещи попадают в твой основной багаж."
 )
 
 
@@ -93,6 +105,10 @@ async def _reset_dialog_state(state: FSMContext):
         pending_ai_checklist_slug=None,
         pending_ai_language=None,
         pending_trip_prompt=None,
+        pending_plan_prompt=None,
+        pending_plan_proposals=None,
+        pending_plan_checklist_slug=None,
+        last_ai_command_context=None,
     )
 
 
@@ -103,6 +119,10 @@ async def _handle_ai_result(message: Message, state: FSMContext, result: dict):
             pending_ai_checklist_slug=result["checklist_slug"],
             pending_ai_language="ru",
             pending_trip_prompt=None,
+            pending_plan_prompt=None,
+            pending_plan_proposals=None,
+            pending_plan_checklist_slug=None,
+            last_ai_command_context=result.get("command_context"),
         )
         await message.answer(
             f"Подтвердите изменение для поездки {result['checklist_title']}:\n\n"
@@ -117,6 +137,10 @@ async def _handle_ai_result(message: Message, state: FSMContext, result: dict):
             pending_ai_actions=None,
             pending_ai_checklist_slug=None,
             pending_ai_language=None,
+            pending_plan_prompt=None,
+            pending_plan_proposals=None,
+            pending_plan_checklist_slug=None,
+            last_ai_command_context=None,
         )
         await message.answer(
             result["message"],
@@ -134,6 +158,10 @@ async def _handle_ai_result(message: Message, state: FSMContext, result: dict):
         pending_ai_checklist_slug=None,
         pending_ai_language=None,
         pending_trip_prompt=None,
+        pending_plan_prompt=None,
+        pending_plan_proposals=None,
+        pending_plan_checklist_slug=None,
+        last_ai_command_context=result.get("command_context"),
     )
     await message.answer(result["message"], reply_markup=build_ai_menu(get_bot_settings()))
 
@@ -165,6 +193,79 @@ async def _configure_mini_app_button(bot: Bot, settings):
 def _extract_command_argument(message: Message) -> str:
     command_text = (message.text or "").strip()
     return command_text.split(maxsplit=1)[1].strip() if " " in command_text else ""
+
+
+def _normalize_text_command(value: str) -> str:
+    return " ".join((value or "").strip().lower().replace("ё", "е").split())
+
+
+def _is_trip_picker_request(value: str) -> bool:
+    normalized = _normalize_text_command(value)
+    return normalized in {
+        "выбрать поездку",
+        "выбери поездку",
+        "сменить поездку",
+        "смени поездку",
+        "выбрать чеклист",
+        "выбери чеклист",
+        "сменить чеклист",
+        "смени чеклист",
+        "choose trip",
+        "change trip",
+        "choose checklist",
+        "change checklist",
+    }
+
+
+async def _send_trip_picker(message: Message, state: FSMContext):
+    await ensure_telegram_user(message.from_user)
+    await state.update_data(
+        pending_ai_actions=None,
+        pending_ai_checklist_slug=None,
+        pending_ai_language=None,
+        pending_trip_prompt=None,
+        pending_plan_prompt=None,
+        pending_plan_proposals=None,
+        pending_plan_checklist_slug=None,
+        last_ai_command_context=None,
+    )
+    checklists = await get_checklists_for_picker(message.from_user)
+    if not checklists:
+        await message.answer(
+            "Пока не вижу поездок для выбора. Сначала создайте чеклист в приложении.",
+            reply_markup=build_main_menu(get_bot_settings()),
+        )
+        return
+
+    selected_slug = await _get_selected_slug(state)
+    await message.answer(
+        "Выберите поездку, с которой я буду работать по умолчанию:",
+        reply_markup=build_trip_picker(checklists, selected_slug),
+    )
+
+
+async def _handle_plan_result(message: Message, state: FSMContext, result: dict):
+    if result["mode"] == "pick_trip":
+        await state.update_data(
+            pending_plan_prompt=result.get("prompt") or "",
+            pending_ai_actions=None,
+            pending_trip_prompt=None,
+        )
+        await message.answer(
+            result["message"],
+            reply_markup=build_trip_picker(
+                result["checklists"],
+                callback_prefix="pick_trip_for_plan",
+                include_cancel=True,
+                cancel_callback="pick_trip_for_plan:cancel",
+            ),
+        )
+        return
+
+    await state.update_data(
+        pending_plan_prompt=None,
+    )
+    await message.answer(result["message"], reply_markup=build_main_menu(get_bot_settings()))
 
 
 async def _process_link_request(message: Message, state: FSMContext) -> bool:
@@ -220,8 +321,10 @@ async def handle_start(message: Message, state: FSMContext):
     open_app_keyboard = build_open_app_keyboard(settings)
     await message.answer(
         welcome,
-        reply_markup=open_app_keyboard or build_main_menu(settings),
+        reply_markup=build_main_menu(settings),
     )
+    if open_app_keyboard:
+        await message.answer("Открыть приложение:", reply_markup=open_app_keyboard)
 
 
 @router.message(Command("link"))
@@ -248,6 +351,18 @@ async def handle_trip(message: Message, state: FSMContext):
     )
 
 
+@router.message(Command("today"))
+@router.message(F.text == "Сегодня")
+async def handle_today(message: Message, state: FSMContext):
+    await _reset_dialog_state(state)
+    await ensure_telegram_user(message.from_user)
+    selected_slug = await _get_selected_slug(state)
+    await message.answer(
+        await build_today_brief_text(message.from_user, selected_slug),
+        reply_markup=build_main_menu(get_bot_settings()),
+    )
+
+
 @router.message(Command("list"))
 @router.message(F.text == "Чеклист")
 async def handle_checklist(message: Message, state: FSMContext):
@@ -267,6 +382,7 @@ async def handle_checklist(message: Message, state: FSMContext):
 
 @router.message(Command("forgot"))
 @router.message(F.text == "Что я забыл?")
+@router.message(F.text == "Вещи")
 async def handle_forgot(message: Message, state: FSMContext):
     await _reset_dialog_state(state)
     await ensure_telegram_user(message.from_user)
@@ -277,29 +393,75 @@ async def handle_forgot(message: Message, state: FSMContext):
     )
 
 
+@router.message(Command("budget"))
+@router.message(Command("left"))
+@router.message(F.text == "Траты")
+async def handle_budget(message: Message, state: FSMContext):
+    await _reset_dialog_state(state)
+    await ensure_telegram_user(message.from_user)
+    selected_slug = await _get_selected_slug(state)
+    await message.answer(
+        await build_budget_text(message.from_user, selected_slug),
+        reply_markup=build_main_menu(get_bot_settings()),
+    )
+
+
+@router.message(Command("spent"))
+async def handle_spent(message: Message, state: FSMContext):
+    await _reset_dialog_state(state)
+    await ensure_telegram_user(message.from_user)
+    argument = _extract_command_argument(message)
+    if not argument:
+        await message.answer("Напишите трату после команды, например: /spent 12 EUR кофе", reply_markup=build_main_menu(get_bot_settings()))
+        return
+    selected_slug = await _get_selected_slug(state)
+    await message.answer(
+        await apply_spent_command_for_telegram(message.from_user, argument, selected_slug),
+        reply_markup=build_main_menu(get_bot_settings()),
+    )
+
+
+@router.message(Command("notifications"))
+async def handle_notifications(message: Message, state: FSMContext):
+    await _reset_dialog_state(state)
+    await ensure_telegram_user(message.from_user)
+    await message.answer(
+        await get_telegram_notifications_text(message.from_user),
+        reply_markup=build_notifications_keyboard(),
+    )
+
+
+@router.message(Command("plan"))
+@router.message(F.text == "План дня")
+@router.message(F.text == "План")
+async def handle_day_plan(message: Message, state: FSMContext):
+    await ensure_telegram_user(message.from_user)
+    command_text = (message.text or "").strip()
+    parts = command_text.split(maxsplit=1)
+    direct_prompt = parts[1].strip() if len(parts) > 1 and command_text.startswith("/plan") else ""
+    selected_slug = await _get_selected_slug(state)
+    result = await build_itinerary_view_for_telegram(message.from_user, direct_prompt, selected_slug)
+    await _handle_plan_result(message, state, result)
+
+
+@router.message(F.text == "Оптимизировать")
+async def handle_optimize(message: Message, state: FSMContext):
+    await ensure_telegram_user(message.from_user)
+    selected_slug = await _get_selected_slug(state)
+    data = await state.get_data()
+    result = await process_ai_prompt_for_telegram(
+        message.from_user,
+        "Оптимизируй маршрут и проверь пересечения по времени",
+        selected_slug,
+        data.get("last_ai_command_context"),
+    )
+    await _handle_ai_result(message, state, result)
+
+
 @router.message(Command("choose"))
 @router.message(F.text == "Выбрать поездку")
 async def handle_choose_trip(message: Message, state: FSMContext):
-    await ensure_telegram_user(message.from_user)
-    await state.update_data(
-        pending_ai_actions=None,
-        pending_ai_checklist_slug=None,
-        pending_ai_language=None,
-        pending_trip_prompt=None,
-    )
-    checklists = await get_checklists_for_picker(message.from_user)
-    if not checklists:
-        await message.answer(
-            "Пока не вижу поездок для выбора. Сначала создайте чеклист в приложении.",
-            reply_markup=build_main_menu(get_bot_settings()),
-        )
-        return
-
-    selected_slug = await _get_selected_slug(state)
-    await message.answer(
-        "Выберите поездку, с которой я буду работать по умолчанию:",
-        reply_markup=build_trip_picker(checklists, selected_slug),
-    )
+    await _send_trip_picker(message, state)
 
 
 @router.message(Command("whoami"))
@@ -326,6 +488,10 @@ async def handle_pick_trip(callback: CallbackQuery, state: FSMContext):
         pending_ai_checklist_slug=None,
         pending_ai_language=None,
         pending_trip_prompt=None,
+        pending_plan_prompt=None,
+        pending_plan_proposals=None,
+        pending_plan_checklist_slug=None,
+        last_ai_command_context=None,
     )
     await callback.answer("Поездка выбрана")
     await callback.message.edit_text(
@@ -367,12 +533,44 @@ async def handle_pick_trip_for_prompt(callback: CallbackQuery, state: FSMContext
             pending_ai_actions=result["actions"],
             pending_ai_checklist_slug=result["checklist_slug"],
             pending_ai_language="ru",
+            last_ai_command_context=result.get("command_context"),
         )
         await callback.message.answer(
             f"Подтвердите изменение для поездки {result['checklist_title']}:\n\n"
-            f"{_format_pending_actions(result['actions'])}",
+        f"{_format_pending_actions(result['actions'])}",
             reply_markup=build_confirmation_keyboard(),
         )
+
+
+@router.callback_query(F.data.startswith("pick_trip_for_plan:"))
+async def handle_pick_trip_for_plan(callback: CallbackQuery, state: FSMContext):
+    slug = callback.data.split(":", 1)[1]
+    if slug == "cancel":
+        await state.update_data(pending_plan_prompt=None)
+        await callback.answer("Отменено")
+        await callback.message.edit_text("Окей, ничего не показываю.")
+        return
+
+    data = await state.get_data()
+    prompt = data.get("pending_plan_prompt") or ""
+
+    checklist = await get_selected_or_primary_checklist(callback.from_user, slug)
+    if not checklist or checklist.slug != slug:
+        await callback.answer("Не удалось выбрать поездку", show_alert=True)
+        return
+
+    await state.update_data(selected_checklist_slug=slug, pending_plan_prompt=None)
+    await callback.answer("Поездка выбрана")
+    result = await build_itinerary_view_for_telegram(callback.from_user, prompt, slug)
+    await callback.message.edit_text(result["message"])
+
+
+@router.callback_query(F.data.startswith("notif:"))
+async def handle_notifications_toggle(callback: CallbackQuery):
+    enabled = callback.data == "notif:on"
+    text = await set_telegram_notifications(callback.from_user, enabled)
+    await callback.answer("Готово")
+    await callback.message.edit_text(text)
 
 
 @router.message(Command("ai"))
@@ -385,20 +583,21 @@ async def handle_ai_entry(message: Message, state: FSMContext):
     selected_slug = await _get_selected_slug(state)
 
     if direct_prompt:
-        result = await process_ai_prompt_for_telegram(message.from_user, direct_prompt, selected_slug)
+        data = await state.get_data()
+        result = await process_ai_prompt_for_telegram(
+            message.from_user,
+            direct_prompt,
+            selected_slug,
+            data.get("last_ai_command_context"),
+        )
         await state.set_state(AIChatState.waiting_for_question)
         await _handle_ai_result(message, state, result)
         return
 
     await state.set_state(AIChatState.waiting_for_question)
     await message.answer(
-        "Напиши вопрос или команду.\n\n"
-        "— добавить: закинь мне воду\n"
-        "— отметить: отметь у popich паспорт\n"
-        "— удалить: удали у creepok свитер\n"
-        "— переместить: перекинь power bank popich\n"
-        "— состояние: что уже отмечено\n\n"
-        "Без чеклиста тоже можно: Город | вопрос",
+        "Напиши вопрос или команду по поездке.\n\n"
+        "Для примеров открой /help. Без уточнения вещь попадёт в твой основной багаж.",
         reply_markup=build_ai_menu(get_bot_settings()),
     )
 
@@ -418,6 +617,10 @@ async def handle_ai_question(message: Message, state: FSMContext):
         await message.answer("Лучше отправьте текстовый вопрос.")
         return
 
+    if _is_trip_picker_request(message.text):
+        await _send_trip_picker(message, state)
+        return
+
     data = await state.get_data()
     if data.get("pending_ai_actions"):
         await message.answer(
@@ -428,11 +631,18 @@ async def handle_ai_question(message: Message, state: FSMContext):
     if data.get("pending_trip_prompt"):
         await message.answer("Сначала выберите поездку кнопками ниже или нажмите Отмена.")
         return
+    if data.get("pending_plan_prompt"):
+        await message.answer("Сначала выберите поездку для плана кнопками ниже или нажмите Отмена.")
+        return
+    if data.get("pending_plan_proposals"):
+        await message.answer("Сначала сохраните или отмените предложенный план кнопками ниже.")
+        return
 
     result = await process_ai_prompt_for_telegram(
         message.from_user,
         message.text,
         data.get("selected_checklist_slug"),
+        data.get("last_ai_command_context"),
     )
     await _handle_ai_result(message, state, result)
 
@@ -459,6 +669,10 @@ async def handle_confirm_ai_yes(callback: CallbackQuery, state: FSMContext):
         pending_ai_checklist_slug=None,
         pending_ai_language=None,
         pending_trip_prompt=None,
+        pending_plan_prompt=None,
+        pending_plan_proposals=None,
+        pending_plan_checklist_slug=None,
+        last_ai_command_context=result.get("command_context"),
     )
     await callback.answer("Готово")
     await callback.message.edit_text(result["message"])
@@ -470,6 +684,10 @@ async def handle_confirm_ai_no(callback: CallbackQuery, state: FSMContext):
         pending_ai_actions=None,
         pending_ai_checklist_slug=None,
         pending_ai_language=None,
+        pending_plan_prompt=None,
+        pending_plan_proposals=None,
+        pending_plan_checklist_slug=None,
+        last_ai_command_context=None,
     )
     await callback.answer("Отменено")
     await callback.message.edit_text("Окей, ничего не меняю.")
@@ -583,8 +801,12 @@ async def handle_fallback(message: Message, state: FSMContext):
     if await _process_link_request(message, state):
         return
 
+    if _is_trip_picker_request(message.text or ""):
+        await _send_trip_picker(message, state)
+        return
+
     await message.answer(
-        "Пока я понимаю команды меню, /trip, /list, /forgot и /ai. "
+        "Пока я понимаю команды меню, /trip, /plan, /list, /forgot и /ai. "
         "Если хотите живой AI-диалог, нажмите «Спросить ИИ».",
         reply_markup=build_main_menu(get_bot_settings()),
     )
@@ -596,11 +818,17 @@ async def main():
         raise RuntimeError("TELEGRAM_BOT_TOKEN не задан. Бот не может стартовать.")
 
     logging.basicConfig(level=logging.INFO)
-    bot = Bot(token=settings.token)
+    bot = Bot(
+        token=settings.token,
+        session=AiohttpSession(timeout=settings.request_timeout),
+    )
     await _configure_mini_app_button(bot, settings)
     dispatcher = Dispatcher(storage=MemoryStorage())
     dispatcher.include_router(router)
-    await dispatcher.start_polling(bot)
+    await dispatcher.start_polling(
+        bot,
+        polling_timeout=settings.polling_timeout,
+    )
 
 
 if __name__ == "__main__":

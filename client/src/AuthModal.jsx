@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
+import { API_URL } from "./appUtils";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
 const TELEGRAM_BOT_USERNAME = import.meta.env.VITE_TELEGRAM_BOT_USERNAME || "luggify_bot";
 const TELEGRAM_WIDGET_SRC = "https://telegram.org/js/telegram-widget.js?22";
 
@@ -441,7 +441,8 @@ export default function AuthModal({ onClose, onAuth }) {
                 <button className="auth-close" onClick={onClose}>×</button>
 
                 <div className="auth-title">
-                    <span>🧳 Luggify</span>
+                    <img src="/luggify-logo.svg" alt="" className="auth-logo-mark" aria-hidden="true" />
+                    <span>LUGGIFY</span>
                 </div>
 
                 <div className="auth-tabs">
@@ -457,31 +458,6 @@ export default function AuthModal({ onClose, onAuth }) {
                     >
                         Регистрация
                     </button>
-                </div>
-
-                <div className="auth-telegram-block">
-                    <div className="auth-telegram-label">
-                        {tab === "login" ? "Войти через Telegram" : "Продолжить через Telegram"}
-                    </div>
-                    <div className="auth-telegram-widget-shell">
-                        {localTelegramWidgetBlocked ? (
-                            <div className="auth-telegram-local-fallback">
-                                <div className="auth-telegram-soon-icon">✈️</div>
-                                <div className="auth-telegram-soon-text">Скоро</div>
-                            </div>
-                        ) : (
-                            <div ref={telegramWidgetRef} className="auth-telegram-widget" />
-                        )}
-                    </div>
-                    {!localTelegramWidgetBlocked && (
-                        <div className="auth-telegram-hint">
-                            Быстрый вход без почты и пароля.
-                        </div>
-                    )}
-                </div>
-
-                <div className="auth-divider">
-                    <span>или</span>
                 </div>
 
                 <form className="auth-form" onSubmit={handleSubmit}>

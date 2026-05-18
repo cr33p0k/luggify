@@ -1,12 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import './JoinPage.css';
-
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+import { API_URL } from './appUtils';
 
 const JoinPage = () => {
   const { token } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -20,7 +20,13 @@ const JoinPage = () => {
       }
 
       try {
-        const res = await fetch(`${API_URL}/join/${token}`, {
+        const query = new URLSearchParams(location.search);
+        const childProfileId = query.get("child_profile_id");
+        const url = new URL(`${API_URL}/join/${token}`, window.location.origin);
+        if (childProfileId) {
+          url.searchParams.set("child_profile_id", childProfileId);
+        }
+        const res = await fetch(url.toString(), {
           method: "POST",
           headers: {
             "Authorization": `Bearer ${authToken}`
@@ -41,7 +47,7 @@ const JoinPage = () => {
     };
 
     handleJoin();
-  }, [token, navigate]);
+  }, [token, navigate, location.search]);
 
   return (
     <div className="join-page">

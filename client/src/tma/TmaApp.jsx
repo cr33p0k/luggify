@@ -1,90 +1,43 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./TmaApp.css";
-
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
-
-const safeParseJson = (value, fallback = null) => {
-  if (!value) return fallback;
-  try {
-    return JSON.parse(value);
-  } catch {
-    return fallback;
-  }
-};
+import { SuitcaseIcon } from "../Icons";
+import { API_URL, readJsonSafely, safeParseJson } from "../appUtils";
+import {
+  getItemQuantity,
+  getPackedQuantity,
+  normalizeItemKey,
+  normalizePackedQuantityMap,
+  normalizeQuantityMap,
+  setItemQuantityInMap,
+  setPackedQuantityInMap,
+} from "../packingState";
 
 const getTelegramWebApp = () =>
   typeof window !== "undefined" ? window.Telegram?.WebApp : null;
 
-const readJsonSafely = async (response) => {
-  const contentType = response.headers.get("content-type") || "";
-  if (!contentType.includes("application/json")) return null;
-  return response.json().catch(() => null);
-};
+const parseTelegramVersion = (value) =>
+  String(value || "")
+    .split(".")
+    .map((part) => Number.parseInt(part, 10))
+    .filter((part) => Number.isFinite(part));
 
-const normalizeItemKey = (value) =>
-  String(value || "").trim().toLowerCase().replaceAll("ё", "е");
-
-const normalizeQuantityMap = (value = {}) =>
-  Object.entries(value || {}).reduce((acc, [key, rawValue]) => {
-    const normalizedKey = normalizeItemKey(key);
-    const numericValue = Number(rawValue);
-    if (!normalizedKey || !Number.isFinite(numericValue) || numericValue < 1) {
-      return acc;
-    }
-    acc[normalizedKey] = Math.max(1, Math.round(numericValue));
-    return acc;
-  }, {});
-
-const normalizePackedQuantityMap = (value = {}) =>
-  Object.entries(value || {}).reduce((acc, [key, rawValue]) => {
-    const normalizedKey = normalizeItemKey(key);
-    const numericValue = Number(rawValue);
-    if (!normalizedKey || !Number.isFinite(numericValue)) {
-      return acc;
-    }
-    const safeValue = Math.max(0, Math.round(numericValue));
-    if (safeValue > 0) {
-      acc[normalizedKey] = safeValue;
-    }
-    return acc;
-  }, {});
-
-const getItemQuantity = (quantityMap = {}, item) => {
-  const normalizedKey = normalizeItemKey(item);
-  if (!normalizedKey) return 1;
-  return normalizeQuantityMap(quantityMap)[normalizedKey] || 1;
-};
-
-const getPackedQuantity = (quantityMap = {}, item) => {
-  const normalizedKey = normalizeItemKey(item);
-  if (!normalizedKey) return 0;
-  return normalizePackedQuantityMap(quantityMap)[normalizedKey] || 0;
-};
-
-const setItemQuantityInMap = (quantityMap = {}, item, nextQuantity) => {
-  const normalizedKey = normalizeItemKey(item);
-  if (!normalizedKey) return normalizeQuantityMap(quantityMap);
-  const nextMap = normalizeQuantityMap(quantityMap);
-  const numericValue = Number(nextQuantity);
-  if (!Number.isFinite(numericValue) || numericValue < 1) {
-    delete nextMap[normalizedKey];
-    return nextMap;
+const isTelegramVersionAtLeast = (value, minimum) => {
+  const current = parseTelegramVersion(value);
+  const required = parseTelegramVersion(minimum);
+  const maxLength = Math.max(current.length, required.length);
+  for (let index = 0; index < maxLength; index += 1) {
+    const currentPart = current[index] || 0;
+    const requiredPart = required[index] || 0;
+    if (currentPart > requiredPart) return true;
+    if (currentPart < requiredPart) return false;
   }
-  nextMap[normalizedKey] = Math.max(1, Math.round(numericValue));
-  return nextMap;
+  return true;
 };
 
-const setPackedQuantityInMap = (quantityMap = {}, item, nextQuantity) => {
-  const normalizedKey = normalizeItemKey(item);
-  if (!normalizedKey) return normalizePackedQuantityMap(quantityMap);
-  const nextMap = normalizePackedQuantityMap(quantityMap);
-  const numericValue = Number(nextQuantity);
-  if (!Number.isFinite(numericValue) || numericValue <= 0) {
-    delete nextMap[normalizedKey];
-    return nextMap;
-  }
-  nextMap[normalizedKey] = Math.max(0, Math.round(numericValue));
-  return nextMap;
+const resolveTelegramTheme = (webApp) => {
+  const scheme = String(webApp?.colorScheme || "").toLowerCase();
+  if (scheme === "light") return "light";
+  return "dark";
 };
 
 const getBaggageEditorIds = (baggage) =>
@@ -300,12 +253,12 @@ const getBaggageOwnerLabel = (baggage, userId) =>
 function TmaApp() {
   const [authState, setAuthState] = useState("loading");
   const [authError, setAuthError] = useState("");
+  const [isBootstrapping, setIsBootstrapping] = useState(true);
   const [token, setToken] = useState(() => localStorage.getItem("token") || "");
   const [user, setUser] = useState(() => safeParseJson(localStorage.getItem("user"), null));
   const [checklists, setChecklists] = useState([]);
   const [selectedSlug, setSelectedSlug] = useState("");
   const [checklist, setChecklist] = useState(null);
-  const [loadingTrips, setLoadingTrips] = useState(false);
   const [loadingChecklist, setLoadingChecklist] = useState(false);
   const [activeBackpackId, setActiveBackpackId] = useState(null);
   const [newItem, setNewItem] = useState("");
@@ -324,6 +277,7 @@ function TmaApp() {
   const [savingBackpackId, setSavingBackpackId] = useState(null);
   const [toast, setToast] = useState("");
   const toastTimerRef = useRef(null);
+  const bootstrappedSlugRef = useRef("");
 
   const authHeaders = useMemo(
     () => (token ? { Authorization: `Bearer ${token}` } : {}),
@@ -370,8 +324,18 @@ function TmaApp() {
     const webApp = getTelegramWebApp();
     webApp?.ready?.();
     webApp?.expand?.();
-    webApp?.setHeaderColor?.("#11100e");
-    webApp?.setBackgroundColor?.("#090908");
+    const applyTelegramTheme = () => {
+      const nextTheme = resolveTelegramTheme(webApp);
+      document.documentElement.dataset.theme = nextTheme;
+      document.body.classList.add("tma-body");
+    };
+    applyTelegramTheme();
+
+    if (isTelegramVersionAtLeast(webApp?.version, "6.1")) {
+      webApp?.setHeaderColor?.("#11100e");
+      webApp?.setBackgroundColor?.("#090908");
+    }
+    webApp?.onEvent?.("themeChanged", applyTelegramTheme);
 
     let cancelled = false;
 
@@ -387,6 +351,7 @@ function TmaApp() {
 
     const authenticate = async () => {
       setAuthState("loading");
+      setIsBootstrapping(true);
       const initData = webApp?.initData || "";
 
       if (initData) {
@@ -406,6 +371,7 @@ function TmaApp() {
           if (!cancelled) {
             setAuthError(error.message || "Не удалось войти через Telegram");
             setAuthState("error");
+            setIsBootstrapping(false);
           }
           return;
         }
@@ -430,12 +396,15 @@ function TmaApp() {
       if (!cancelled) {
         setAuthState("missing");
         setAuthError("Открой mini app из Telegram, чтобы я смог войти в твой аккаунт.");
+        setIsBootstrapping(false);
       }
     };
 
     authenticate();
     return () => {
       cancelled = true;
+      webApp?.offEvent?.("themeChanged", applyTelegramTheme);
+      document.body.classList.remove("tma-body");
     };
   }, []);
 
@@ -443,30 +412,42 @@ function TmaApp() {
     if (!token || authState !== "ready") return undefined;
     let cancelled = false;
 
-    const loadTrips = async () => {
-      setLoadingTrips(true);
+    const loadBootstrap = async () => {
+      setLoadingChecklist(true);
       try {
-        const data = await requestJson("/my-checklists");
-        if (cancelled) return;
-        const sorted = sortChecklists(data || []);
-        setChecklists(sorted);
         const urlSlug = new URLSearchParams(window.location.search).get("slug");
-        setSelectedSlug((currentSlug) => (
+        const data = await requestJson(
+          `/tma/bootstrap${urlSlug ? `?slug=${encodeURIComponent(urlSlug)}` : ""}`
+        );
+        if (cancelled) return;
+        const sorted = sortChecklists(data?.checklists || []);
+        const nextSelectedSlug =
+          data?.selected_slug ||
           (urlSlug && sorted.find((item) => item.slug === urlSlug)?.slug) ||
-          (currentSlug && sorted.find((item) => item.slug === currentSlug)?.slug) ||
           sorted[0]?.slug ||
+          "";
+        setChecklists(sorted);
+        setChecklist(data?.checklist || null);
+        bootstrappedSlugRef.current = nextSelectedSlug;
+        setSelectedSlug((currentSlug) => (
+          nextSelectedSlug ||
+          (currentSlug && sorted.find((item) => item.slug === currentSlug)?.slug) ||
           ""
         ));
+        setIsBootstrapping(false);
       } catch (error) {
         if (!cancelled) {
           setAuthError(error.message || "Не удалось загрузить поездки");
+          setIsBootstrapping(false);
         }
       } finally {
-        if (!cancelled) setLoadingTrips(false);
+        if (!cancelled) {
+          setLoadingChecklist(false);
+        }
       }
     };
 
-    loadTrips();
+    loadBootstrap();
     return () => {
       cancelled = true;
     };
@@ -474,6 +455,10 @@ function TmaApp() {
 
   useEffect(() => {
     if (!selectedSlug || !token) return undefined;
+    if (bootstrappedSlugRef.current === selectedSlug) {
+      bootstrappedSlugRef.current = "";
+      return undefined;
+    }
     let cancelled = false;
 
     const loadChecklist = async () => {
@@ -486,7 +471,10 @@ function TmaApp() {
       } catch (error) {
         if (!cancelled) showToast(error.message || "Не удалось открыть чеклист");
       } finally {
-        if (!cancelled) setLoadingChecklist(false);
+        if (!cancelled) {
+          setLoadingChecklist(false);
+          setIsBootstrapping(false);
+        }
       }
     };
 
@@ -995,10 +983,12 @@ function TmaApp() {
       }));
   }, [checklist?.events]);
 
-  if (authState === "loading") {
+  if (authState === "loading" || isBootstrapping) {
     return (
       <main className="tma-shell tma-centered">
-        <div className="tma-loader" />
+        <div className="tma-loader" aria-hidden="true">
+          <SuitcaseIcon />
+        </div>
         <p>Открываю Luggify...</p>
       </main>
     );
@@ -1034,8 +1024,7 @@ function TmaApp() {
       {toast && <div className="tma-toast">{toast}</div>}
 
       <section className="tma-trip-strip" aria-label="Поездки">
-        {loadingTrips && <span className="tma-chip ghost">Загружаю поездки</span>}
-        {!loadingTrips && checklists.length === 0 && (
+        {checklists.length === 0 && (
           <div className="tma-empty-card">
             <strong>Поездок пока нет</strong>
             <span>Создай чеклист на сайте, и здесь появится мобильный редактор.</span>
@@ -1173,7 +1162,6 @@ function TmaApp() {
                   <article key={day.day} className="tma-itinerary-day">
                     <div className="tma-itinerary-dayhead">
                       <strong>{day.label}</strong>
-                      <span>{day.events.length} событий</span>
                     </div>
                     <div className="tma-itinerary-events">
                       {day.events.map((event) => (

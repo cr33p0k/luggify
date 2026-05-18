@@ -1,9 +1,7 @@
 import React from "react";
 import AsyncSelect from "react-select/async";
 import "./CitySelect.css";
-
-
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+import { API_URL } from "./appUtils";
 
 const fetchCitiesWithCountry = async (inputValue) => {
   if (!inputValue || inputValue.length < 2) return [];

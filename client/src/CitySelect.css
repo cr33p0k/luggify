@@ -30,20 +30,20 @@
   border-radius: var(--radius-sm, 8px) !important;
   border: 1.5px solid var(--border-subtle, rgba(255, 165, 0, 0.12)) !important;
   box-shadow: none !important;
-  color: #f0f0f0;
+  color: var(--text-primary, #f0f0f0);
   min-height: 42px;
-  font-family: 'Inter', sans-serif;
+  font-family: var(--font-sans, 'Manrope', sans-serif);
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
 .react-select__control:hover,
 .react-select__control--is-focused {
   border-color: var(--orange, #ff9900) !important;
-  box-shadow: 0 0 0 3px rgba(255, 153, 0, 0.15) !important;
+  box-shadow: 0 0 0 3px var(--orange-glow, rgba(255, 153, 0, 0.15)) !important;
 }
 
 .react-select__menu {
-  background-color: var(--bg-input, #1a1a1a) !important;
+  background-color: var(--bg-elevated, var(--bg-input, #1a1a1a)) !important;
   max-height: 220px !important;
   overflow-y: auto !important;
   border-radius: 0 0 var(--radius-sm, 8px) var(--radius-sm, 8px) !important;
@@ -56,7 +56,7 @@
 
 .react-select__option {
   background-color: transparent;
-  color: #f0f0f0;
+  color: var(--text-primary, #f0f0f0);
   padding: 10px 14px;
   cursor: pointer;
   font-size: 0.9rem;
@@ -64,40 +64,40 @@
 }
 
 .react-select__option--is-focused {
-  background-color: rgba(255, 153, 0, 0.1) !important;
-  color: #fff !important;
+  background-color: var(--orange-glow, rgba(255, 153, 0, 0.1)) !important;
+  color: var(--text-primary, #fff) !important;
   box-shadow: none !important;
 }
 
 .react-select__option--is-selected {
   background-color: var(--orange, #ff9900) !important;
-  color: #0d0d0d !important;
+  color: var(--text-on-accent, #0d0d0d) !important;
 }
 
 .react-select__single-value {
-  color: #ffffff !important;
+  color: var(--text-primary, #ffffff) !important;
   font-weight: 500;
 }
 
 .react-select__input,
 .react-select__input input {
-  color: #f0f0f0 !important;
+  color: var(--text-primary, #f0f0f0) !important;
   background-color: transparent !important;
   caret-color: var(--orange, #ff9900) !important;
 }
 
 .react-select__placeholder {
-  color: #666;
+  color: var(--text-secondary, #666);
   font-size: 0.9rem;
 }
 
 .react-select__indicator-separator {
-  background-color: rgba(255, 255, 255, 0.08) !important;
+  background-color: var(--border-subtle, rgba(255, 255, 255, 0.08)) !important;
 }
 
 .react-select__dropdown-indicator svg,
 .react-select__clear-indicator svg {
-  fill: #666;
+  fill: var(--text-muted, #666);
   transition: fill 0.2s;
 }
 
@@ -115,7 +115,7 @@
 }
 
 .react-select__menu-list::-webkit-scrollbar-thumb {
-  background-color: rgba(255, 153, 0, 0.3);
+  background-color: var(--border-active, rgba(255, 153, 0, 0.3));
   border-radius: 3px;
 }
 

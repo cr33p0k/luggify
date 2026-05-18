@@ -36,7 +36,8 @@ pip install -r requirements.txt
 
 ### 4. Создайте файл .env
 
-Создайте файл `.env` в папке `server` со следующим содержимым:
+Для локальной разработки используется один общий файл `.env` в корне проекта.
+Не создавайте отдельный `server/.env`: он считается устаревшим и не читается приложением.
 
 ```env
 OPENWEATHER_API_KEY=ваш_ключ_openweather
@@ -97,7 +98,7 @@ uvicorn main:app --reload
 ## Troubleshooting
 
 ### Ошибка "DATABASE_URL is not set!"
-- Убедитесь, что файл `.env` существует в папке `server`
+- Убедитесь, что файл `.env` существует в корне проекта
 - Проверьте, что в `.env` указан правильный `DATABASE_URL`
 
 ### Ошибка "Не найден ключ OPENWEATHER_API_KEY"

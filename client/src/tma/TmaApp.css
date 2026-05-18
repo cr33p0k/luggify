@@ -12,14 +12,35 @@
   --tma-green: #8ff0cf;
 }
 
+:root[data-theme="light"] {
+  --tma-bg: #efe4d4;
+  --tma-panel: rgba(255, 251, 245, 0.92);
+  --tma-panel-soft: rgba(168, 91, 52, 0.08);
+  --tma-line: rgba(168, 91, 52, 0.16);
+  --tma-line-soft: rgba(113, 84, 52, 0.12);
+  --tma-text: #241b14;
+  --tma-muted: rgba(73, 58, 44, 0.66);
+  --tma-accent: #a85b34;
+  --tma-accent-strong: #c98158;
+  --tma-danger: #c45454;
+  --tma-green: #4c8f67;
+}
+
 * {
   box-sizing: border-box;
 }
 
-body:has(.tma-shell) {
+body.tma-body {
+  margin: 0;
   background:
     radial-gradient(circle at 20% -10%, rgba(255, 174, 61, 0.2), transparent 34rem),
     linear-gradient(180deg, #15130f 0%, var(--tma-bg) 42%);
+}
+
+:root[data-theme="light"] body.tma-body {
+  background:
+    radial-gradient(circle at 18% 0%, rgba(201, 129, 88, 0.14), transparent 32rem),
+    linear-gradient(180deg, #f7f1e7 0%, var(--tma-bg) 48%);
 }
 
 .tma-shell {
@@ -30,6 +51,12 @@ body:has(.tma-shell) {
     radial-gradient(circle at 82% 8%, rgba(143, 240, 207, 0.12), transparent 14rem),
     radial-gradient(circle at 10% 24%, rgba(255, 173, 61, 0.16), transparent 18rem);
   font-family: "Unbounded", "Manrope", sans-serif;
+}
+
+:root[data-theme="light"] .tma-shell {
+  background:
+    radial-gradient(circle at 82% 8%, rgba(76, 143, 103, 0.08), transparent 14rem),
+    radial-gradient(circle at 10% 24%, rgba(168, 91, 52, 0.12), transparent 18rem);
 }
 
 .tma-centered {
@@ -67,9 +94,34 @@ body:has(.tma-shell) {
 }
 
 .tma-loader {
-  border: 1px solid rgba(255, 173, 61, 0.14);
-  border-top-color: var(--tma-accent);
-  animation: tma-spin 0.9s linear infinite;
+  position: relative;
+  overflow: visible;
+  border: 1px solid rgba(255, 173, 61, 0.2);
+}
+
+.tma-loader::after {
+  content: "";
+  position: absolute;
+  left: -0.85rem;
+  right: -0.85rem;
+  bottom: -0.9rem;
+  height: 0.2rem;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(255, 173, 61, 0.08), rgba(255, 173, 61, 0.45), rgba(255, 173, 61, 0.08));
+  opacity: 0.8;
+}
+
+.tma-loader svg {
+  width: 2rem;
+  height: 2rem;
+  margin-right: 0;
+  color: var(--tma-accent);
+  animation: tma-loader-bob 0.95s ease-in-out infinite alternate;
+}
+
+.tma-loader svg path,
+.tma-loader svg rect {
+  filter: drop-shadow(0 0 0.55rem rgba(255, 173, 61, 0.28));
 }
 
 .tma-auth-card {
@@ -508,8 +560,8 @@ body:has(.tma-shell) {
 .tma-itinerary-event {
   width: 100%;
   display: grid;
-  grid-template-columns: 4.7rem minmax(0, 1fr);
-  gap: 0.75rem;
+  grid-template-columns: 3.9rem minmax(0, 1fr);
+  gap: 0.45rem;
   align-items: start;
   padding: 0.72rem;
   border: 1px solid var(--tma-line-soft);
@@ -536,6 +588,7 @@ body:has(.tma-shell) {
   color: var(--tma-accent);
   font-size: 0.78rem;
   letter-spacing: -0.02em;
+  white-space: nowrap;
 }
 
 .tma-itinerary-meta span {
@@ -1348,6 +1401,15 @@ input:disabled {
 @keyframes tma-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes tma-loader-bob {
+  0% {
+    transform: translateX(-0.38rem) rotate(-6deg);
+  }
+  100% {
+    transform: translateX(0.38rem) rotate(6deg);
   }
 }
 

@@ -67,6 +67,10 @@
 }
 
 .auth-title {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.7rem;
   text-align: center;
   font-size: 1.5rem;
   font-weight: 800;
@@ -75,7 +79,19 @@
   letter-spacing: -0.5px;
 }
 
+.auth-logo-mark {
+  width: 2.2rem;
+  height: 2.2rem;
+  flex-shrink: 0;
+  filter: drop-shadow(0 0 12px rgba(255, 166, 0, 0.2));
+}
+
 .auth-title span {
+  display: inline-block;
+  line-height: 1.08;
+  padding-block: 0.06em;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
   background: linear-gradient(135deg, #ff9900, #ffae42);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -103,7 +119,7 @@
   cursor: pointer;
   border-radius: 8px;
   transition: all 0.2s;
-  font-family: 'Inter', sans-serif;
+  font-family: var(--font-sans, 'Manrope', sans-serif);
 }
 
 .auth-tab.active {
@@ -214,7 +230,7 @@
   border-radius: 10px;
   color: #f0f0f0;
   font-size: 0.9rem;
-  font-family: 'Inter', sans-serif;
+  font-family: var(--font-sans, 'Manrope', sans-serif);
   outline: none;
   transition: border-color 0.2s, box-shadow 0.2s;
   box-sizing: border-box;
@@ -240,7 +256,7 @@
   font-weight: 700;
   cursor: pointer;
   transition: transform 0.15s, box-shadow 0.2s;
-  font-family: 'Inter', sans-serif;
+  font-family: var(--font-sans, 'Manrope', sans-serif);
 }
 
 .auth-submit:hover {
@@ -335,7 +351,7 @@
   font-size: 0.8rem;
   font-weight: 600;
   cursor: pointer;
-  font-family: 'Inter', sans-serif;
+  font-family: var(--font-sans, 'Manrope', sans-serif);
   transition: all 0.15s;
 }
 
@@ -398,4 +414,100 @@
   .auth-secondary-actions {
     flex-direction: column;
   }
+}
+
+/* Theme refresh */
+.auth-overlay {
+  background: rgba(10, 8, 6, 0.62);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+:root[data-theme="light"] .auth-overlay {
+  background: rgba(116, 86, 51, 0.16);
+}
+
+.auth-modal {
+  background: var(--bg-elevated, #161616);
+  border-color: var(--border-subtle, rgba(255, 165, 0, 0.12));
+  box-shadow: var(--shadow-panel, 0 16px 64px rgba(0, 0, 0, 0.5));
+}
+
+.auth-title {
+  font-family: var(--font-display, 'Fraunces', serif);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--text-primary, #f0f0f0);
+}
+
+.auth-title span {
+  background: none;
+  -webkit-text-fill-color: currentColor;
+  color: var(--text-primary, #f0f0f0);
+  text-transform: none;
+  letter-spacing: 0.04em;
+}
+
+.auth-tabs,
+.auth-telegram-block,
+.auth-telegram-local-fallback {
+  background: var(--surface-strong, rgba(255, 255, 255, 0.04));
+  border-color: var(--border-subtle, rgba(255, 255, 255, 0.06));
+}
+
+.auth-tab {
+  color: var(--text-secondary, #999);
+}
+
+.auth-tab.active {
+  background: linear-gradient(135deg, var(--orange, #ff9900), var(--orange-light, #ffae42));
+  color: var(--text-on-accent, #0d0d0d);
+  box-shadow: 0 12px 24px var(--orange-glow, rgba(255, 153, 0, 0.2));
+}
+
+.auth-tab:not(.active):hover,
+.auth-telegram-label,
+.auth-telegram-soon-text {
+  color: var(--text-primary, #f0f0f0);
+}
+
+.auth-telegram-hint,
+.auth-divider span,
+.auth-close,
+.auth-secondary-btn.ghost {
+  color: var(--text-secondary, #666);
+}
+
+.auth-divider span {
+  background: var(--bg-elevated, #161616);
+}
+
+.auth-input {
+  background: var(--bg-input, #1a1a1a);
+  border-color: var(--border-subtle, rgba(255, 165, 0, 0.12));
+  color: var(--text-primary, #f0f0f0);
+}
+
+.auth-input:focus {
+  box-shadow: 0 0 0 3px var(--orange-glow, rgba(255, 153, 0, 0.15));
+}
+
+.auth-input::placeholder {
+  color: var(--text-muted, #555);
+}
+
+.auth-submit {
+  background: linear-gradient(135deg, var(--orange, #ff9900), var(--orange-light, #ffae42));
+  color: var(--text-on-accent, #0d0d0d);
+  box-shadow: 0 14px 30px var(--orange-glow-strong, rgba(255, 153, 0, 0.22));
+}
+
+.auth-secondary-btn.accent {
+  background: var(--orange-glow, rgba(255, 153, 0, 0.08));
+  border-color: var(--border-active, rgba(255, 153, 0, 0.2));
+  color: var(--orange, #ff9900);
+}
+
+.auth-secondary-btn.ghost {
+  border-color: var(--border-subtle, rgba(255, 255, 255, 0.1));
 }

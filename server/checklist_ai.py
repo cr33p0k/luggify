@@ -6,9 +6,17 @@ from typing import Any, Optional
 import httpx
 
 import crud
+from packing_advisor import detect_packing_mode
+from packing_apply import apply_packing_recommendations
+from packing_followup import (
+    build_remaining_packing_context,
+    extract_packing_followup,
+    format_packing_apply_message,
+)
+from translations import get_category_map
 
 
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
 DEFAULT_GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 ACTION_PATTERNS = {
@@ -39,7 +47,7 @@ MOVE_PATTERNS = [
 ]
 
 SHARED_SECTION_ALIASES = [
-    "список вещей", "список", "чеклист", "назад", "back",
+    "назад", "back",
 ]
 
 SELF_SECTION_ALIASES = [
@@ -87,7 +95,19 @@ ITEM_SYNONYMS = {
     "подушка": "подушка для шеи",
 }
 
+ADDED_ITEM_NORMALIZATION_OVERRIDES = {
+    "футболок": "футболка",
+    "футболки": "футболка",
+    "футболку": "футболка",
+}
+
 ITEM_SPLIT_RE = re.compile(r"\s*(?:,|;|\n|\band\b|\bи\b|\bещё\b|\bещё\b)\s*", re.IGNORECASE)
+CONTINUATION_PREFIX_RE = re.compile(r"^\s*(?:и\s+)?(?:еще|ещё|тоже)\s+(.+)$", re.IGNORECASE)
+PACKING_ADVICE_COMMAND_RE = re.compile(
+    r"(?:^|\b)(что|какие|как|посоветуй|подскажи|what|which|how|recommend|advice)\b|"
+    r"(сделай\s+список\s+легч|облегч|убери\s+лишн|без\s+лишн|только\s+с\s+рюкзак|еду\s+с\s+рюкзак|поеду\s+с\s+рюкзак)",
+    re.IGNORECASE,
+)
 
 QUANTITY_WORDS = {
     "ноль": 0,
@@ -178,6 +198,31 @@ ITEM_GROUPS = {
     },
 }
 
+CATEGORY_ALIAS_OVERRIDES = {
+    "ru": {
+        "Важное": ["важное", "самое важное", "essentials"],
+        "Документы": ["документы", "доки", "бумаги", "доки и бумаги"],
+        "Одежда": ["одежда", "шмотки", "шмот", "вещи", "clothes"],
+        "Гигиена": ["гигиена", "косметика", "туалетка", "toiletries"],
+        "Техника": ["техника", "электроника", "гаджеты", "electronics", "tech"],
+        "Аптечка": ["аптечка", "лекарства", "медицина", "pharmacy", "medicine", "meds"],
+        "Для детей": ["для детей", "детское", "детям", "ребенку", "ребёнку", "kids", "baby"],
+        "Кемпинг": ["кемпинг", "походное", "походное снаряжение", "camping", "outdoor gear"],
+        "Прочее": ["прочее", "разное", "остальное", "misc"],
+    },
+    "en": {
+        "Essentials": ["essentials", "important"],
+        "Documents": ["documents", "docs", "papers"],
+        "Clothes": ["clothes", "clothing", "outfits"],
+        "Hygiene": ["hygiene", "toiletries", "cosmetics"],
+        "Electronics": ["electronics", "tech", "gadgets"],
+        "Pharmacy": ["pharmacy", "medicine", "meds", "first aid"],
+        "Kids": ["kids", "baby", "children"],
+        "Camping": ["camping", "outdoor gear", "camp"],
+        "Misc": ["misc", "other", "other stuff"],
+    },
+}
+
 INFO_PATTERNS = {
     "checked": [
         r"что\s+(?:уже\s+)?(?:отмечен\w*|собран\w*|упакован\w*|взял\w*)",
@@ -223,13 +268,138 @@ BAGGAGE_KIND_DEFAULT_NAMES = {
     "custom": "Багаж",
 }
 
-CREATE_BAGGAGE_PATTERNS = [
-    re.compile(r"^(?:созда\w*|добав\w*)\s+багаж\s+(.+)$", re.IGNORECASE),
+CREATE_BAGGAGE_COMMAND_RE = re.compile(
+    r"^(?P<verb>созда\w*|добав\w*|заведи\w*)\s+(?P<tail>.+)$",
+    re.IGNORECASE,
+)
+
+AI_PARSE_FALLBACK_HINTS = [
+    r"разлож\w*",
+    r"раскида\w*",
+    r"распредел\w*",
+    r"организ\w*",
+    r"упорядоч\w*",
+    r"оптимиз\w*",
+    r"привед\w*.*поряд",
+    r"по\s+уму",
+    r"убери\s+лишн\w*",
+    r"остав\w*\s+только",
+    r"сделай\s+список\s+(?:проще|чище|короче)",
+    r"trim\s+down",
+    r"organi[sz]e",
+    r"sort\s+out",
+    r"optimi[sz]e",
+    r"keep\s+only",
+    r"remove\s+unnecessary",
 ]
 
 
 def _normalize_item(value: str) -> str:
     return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+
+def _fallback_category(language: str = "ru") -> str:
+    mapping = get_category_map(language)
+    if language == "en" and "Misc" in mapping:
+        return "Misc"
+    return "Прочее"
+
+
+def _get_category_alias_map(language: str = "ru") -> dict[str, set[str]]:
+    lang = "en" if language == "en" else "ru"
+    alias_map: dict[str, set[str]] = {}
+    for category in get_category_map(lang).keys():
+        aliases = {_normalize_for_matching(category)}
+        aliases.update(
+            _normalize_for_matching(alias)
+            for alias in CATEGORY_ALIAS_OVERRIDES.get(lang, {}).get(category, [])
+        )
+        alias_map[category] = {alias for alias in aliases if alias}
+    return alias_map
+
+
+def _normalize_category_value(value: Optional[str], language: str = "ru") -> Optional[str]:
+    normalized = _normalize_for_matching(value or "")
+    if not normalized:
+        return None
+    requested_signature = _build_match_signature(normalized)
+    best_match = None
+    best_score = -1
+    for category, aliases in _get_category_alias_map(language).items():
+        if normalized == _normalize_for_matching(category):
+            return category
+        for alias in aliases:
+            if not alias:
+                continue
+            alias_signature = _build_match_signature(alias)
+            if normalized == alias:
+                score = 100 + len(alias)
+            elif re.search(rf"\b{re.escape(alias)}\b", normalized):
+                score = len(alias)
+            elif (
+                requested_signature["roots"]
+                and alias_signature["roots"]
+                and requested_signature["roots"] == alias_signature["roots"]
+            ):
+                score = 80 + len(alias)
+            elif (
+                requested_signature["roots"]
+                and alias_signature["roots"]
+                and requested_signature["roots"] & alias_signature["roots"]
+            ):
+                score = 64 + len(requested_signature["roots"] & alias_signature["roots"])
+            else:
+                continue
+            if score > best_score:
+                best_score = score
+                best_match = category
+    return best_match
+
+
+def _normalize_item_category_map(raw_map: Optional[dict[str, Any]], language: str = "ru") -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for key, value in (raw_map or {}).items():
+        normalized_key = _normalize_item(str(key))
+        normalized_category = _normalize_category_value(str(value), language) or str(value or "").strip()
+        if not normalized_key or not normalized_category:
+            continue
+        normalized[normalized_key] = normalized_category
+    return normalized
+
+
+def _get_item_category(category_map: Optional[dict[str, Any]], item: str, language: str = "ru") -> Optional[str]:
+    normalized_item = _normalize_item(item)
+    if not normalized_item:
+        return None
+    return _normalize_item_category_map(category_map, language).get(normalized_item)
+
+
+def _set_item_category(category_map: dict[str, str], item: str, category: Optional[str], language: str = "ru") -> None:
+    normalized_item = _normalize_item(item)
+    if not normalized_item:
+        return
+    normalized_category = _normalize_category_value(category, language) if category else None
+    if not normalized_category:
+        category_map.pop(normalized_item, None)
+    else:
+        category_map[normalized_item] = normalized_category
+
+
+def _infer_item_category(item: str, language: str = "ru") -> str:
+    normalized_item = _normalize_for_matching(item)
+    if not normalized_item:
+        return _fallback_category(language)
+    mapping = get_category_map(language)
+    for category, keywords in mapping.items():
+        for keyword in keywords:
+            normalized_keyword = _normalize_for_matching(keyword)
+            if normalized_keyword and normalized_keyword in normalized_item:
+                return category
+    return _fallback_category(language)
+
+
+def _resolve_category_hint(value: str, language: str = "ru") -> Optional[str]:
+    return _normalize_category_value(value, language)
 
 
 def _strip_conversational_prefixes(value: str) -> str:
@@ -316,6 +486,9 @@ def _merge_action_sets(*action_payloads: dict[str, Any]) -> dict[str, Any]:
                 action.get("source_hint"),
                 action.get("target_hint"),
                 action.get("section_hint"),
+                action.get("category_hint"),
+                action.get("section_user_id"),
+                action.get("child_profile_id"),
             )
             bucket = merged.setdefault(
                 key,
@@ -330,6 +503,14 @@ def _merge_action_sets(*action_payloads: dict[str, Any]) -> dict[str, Any]:
                 bucket["target_hint"] = action.get("target_hint")
             if action.get("section_hint") is not None:
                 bucket["section_hint"] = action.get("section_hint")
+            if action.get("category_hint") is not None:
+                bucket["category_hint"] = action.get("category_hint")
+            if action.get("section_user_id") is not None:
+                bucket["section_user_id"] = action.get("section_user_id")
+            if action.get("child_profile_id") is not None:
+                bucket["child_profile_id"] = action.get("child_profile_id")
+            if action.get("baggage_kind") is not None:
+                bucket["baggage_kind"] = action.get("baggage_kind")
             bucket["items"].extend(items)
 
     return {
@@ -601,12 +782,40 @@ def _expand_group_items(requested_item: str, candidates: list[str]) -> list[str]
     return []
 
 
-def _resolve_requested_items(requested_items: list[str], candidates: list[str]) -> list[str]:
+def _expand_category_items(
+    requested_item: str,
+    candidates: list[str],
+    item_categories: Optional[dict[str, Any]] = None,
+    language: str = "ru",
+) -> list[str]:
+    category = _resolve_category_hint(requested_item, language)
+    if not category:
+        return []
+    normalized_categories = _normalize_item_category_map(item_categories, language)
+    matches = []
+    for candidate in candidates:
+        candidate_category = normalized_categories.get(_normalize_item(candidate)) or _infer_item_category(candidate, language)
+        if candidate_category == category:
+            matches.append(candidate)
+    return _dedupe_preserve(matches)
+
+
+def _resolve_requested_items(
+    requested_items: list[str],
+    candidates: list[str],
+    item_categories: Optional[dict[str, Any]] = None,
+    language: str = "ru",
+) -> list[str]:
     resolved: list[str] = []
     for requested_item in requested_items:
         direct_matches = _match_existing_items([requested_item], candidates)
         if direct_matches:
             resolved.extend(direct_matches)
+            continue
+
+        category_matches = _expand_category_items(requested_item, candidates, item_categories, language)
+        if category_matches:
+            resolved.extend(category_matches)
             continue
 
         group_matches = _expand_group_items(requested_item, candidates)
@@ -616,7 +825,12 @@ def _resolve_requested_items(requested_items: list[str], candidates: list[str]) 
     return _dedupe_preserve(resolved)
 
 
-def _extract_info_request(command: str, checklist, actor_user_id: Optional[int] = None) -> Optional[dict[str, Any]]:
+def _extract_info_request(
+    command: str,
+    checklist,
+    actor_user_id: Optional[int] = None,
+    language: str = "ru",
+) -> Optional[dict[str, Any]]:
     cleaned_command = _strip_conversational_prefixes(command or "")
     lowered = _normalize_for_matching(cleaned_command)
     if not lowered:
@@ -628,6 +842,10 @@ def _extract_info_request(command: str, checklist, actor_user_id: Optional[int] 
             request_type = candidate_type
             break
 
+    category_hint = _resolve_category_hint(cleaned_command, language)
+    if not request_type and category_hint and re.search(r"^(что|какие|покажи|show|what|which)\b", lowered, re.IGNORECASE):
+        request_type = "items"
+
     if not request_type:
         return None
 
@@ -638,6 +856,7 @@ def _extract_info_request(command: str, checklist, actor_user_id: Optional[int] 
         "info_request": {
             "type": request_type,
             "section": section,
+            "category_hint": category_hint,
         },
     }
 
@@ -709,13 +928,103 @@ def _normalize_section(value: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def _normalize_person_name(value: str) -> str:
+    normalized = _normalize_for_matching(value or "")
+    normalized = re.sub(r"^(?:для|у|к|в|во|to|for)\s+", "", normalized).strip()
+    if not normalized:
+        return ""
+    
+    # Common Russian endings for names in different cases (Dative, Accusative, etc.)
+    # We strip them to get a "root" name.
+    def stem_name(token: str) -> str:
+        if not token:
+            return ""
+        # e.g., Кат-е, Кат-ю, Вер-е, Вер-у
+        stemmed = re.sub(r"(?:е|у|ю|и|я|ой|ом|ам|ям|ах|ях)$", "", token)
+        # If the stem is too short, we might have over-stripped (e.g., "Я")
+        if len(stemmed) < 2:
+            return token
+        return stemmed
+
+    tokens = [stem_name(token) for token in normalized.split()]
+    return " ".join(tokens)
+
+
+def _names_match(requested: str, candidate: str) -> bool:
+    requested_name = _normalize_person_name(requested)
+    candidate_name = _normalize_person_name(candidate)
+    if not requested_name or not candidate_name:
+        return False
+    return (
+        requested_name == candidate_name
+        or requested_name in candidate_name
+        or candidate_name in requested_name
+    )
+
+
+def _get_child_profiles(checklist) -> list[dict[str, Any]]:
+    trip_profile = getattr(checklist, "trip_profile", None) or {}
+    if not isinstance(trip_profile, dict):
+        return []
+    profiles = []
+    for profile in trip_profile.get("child_profiles") or []:
+        if isinstance(profile, dict) and str(profile.get("id") or "").strip():
+            profiles.append(profile)
+    return profiles
+
+
+def _get_child_profile(checklist, child_profile_id: Optional[str]) -> Optional[dict[str, Any]]:
+    if not child_profile_id:
+        return None
+    for profile in _get_child_profiles(checklist):
+        if str(profile.get("id") or "") == str(child_profile_id):
+            return profile
+    return None
+
+
+def _get_child_profile_name(checklist, child_profile_id: Optional[str]) -> Optional[str]:
+    profile = _get_child_profile(checklist, child_profile_id)
+    if not profile:
+        return None
+    name = str(profile.get("name") or "").strip()
+    return name or None
+
+
+def _get_backpack_owner_name(checklist, backpack) -> str:
+    child_name = _get_child_profile_name(checklist, getattr(backpack, "child_profile_id", None))
+    if child_name:
+        return child_name
+    return backpack.user.username if getattr(backpack, "user", None) else f"id:{backpack.user_id}"
+
+
+def _to_ru_genitive_name(name: str) -> str:
+    cleaned = str(name or "").strip()
+    if not cleaned:
+        return cleaned
+    lowered = cleaned.lower().replace("ё", "е")
+    if lowered.endswith("а"):
+        return cleaned[:-1] + ("и" if lowered.endswith(("ка", "га", "ха", "ча", "жа", "ша", "ща")) else "ы")
+    if lowered.endswith("я"):
+        return cleaned[:-1] + "и"
+    if lowered.endswith("й"):
+        return cleaned[:-1] + "я"
+    if re.search(r"[бвгджзклмнпрстфхцчшщ]$", lowered):
+        return cleaned + "а"
+    return cleaned
+
+
 def _get_baggage_name(backpack) -> str:
     kind = getattr(backpack, "kind", None) or "backpack"
     return (getattr(backpack, "name", None) or BAGGAGE_KIND_DEFAULT_NAMES.get(kind, "Багаж")).strip()
 
 
-def _get_baggage_label(backpack) -> str:
-    owner_name = backpack.user.username if getattr(backpack, "user", None) else f"id:{backpack.user_id}"
+def _get_baggage_label(backpack, checklist=None) -> str:
+    child_name = _get_child_profile_name(checklist, getattr(backpack, "child_profile_id", None)) if checklist is not None else None
+    owner_name = _get_backpack_owner_name(checklist, backpack) if checklist is not None else (
+        backpack.user.username if getattr(backpack, "user", None) else f"id:{backpack.user_id}"
+    )
+    if child_name:
+        owner_name = _to_ru_genitive_name(child_name)
     baggage_name = _get_baggage_name(backpack)
     is_default = bool(getattr(backpack, "is_default", False))
     if is_default and _normalize_for_matching(baggage_name) in {"рюкзак", "backpack"}:
@@ -737,6 +1046,85 @@ def _get_baggage_aliases(backpack) -> set[str]:
     return aliases
 
 
+def _resolve_baggage_owner(
+    checklist,
+    owner_hint: Optional[str],
+    actor_user_id: Optional[int] = None,
+) -> Optional[dict[str, Any]]:
+    cleaned_hint = re.sub(
+        r"\b(?:для|у|к|в|во|багаж|рюкзак|чемодан|сумка|ручная|кладь|backpack|suitcase|bag|baggage|luggage|for|to)\b",
+        " ",
+        str(owner_hint or ""),
+        flags=re.IGNORECASE,
+    )
+    cleaned_hint = re.sub(r"\s+", " ", cleaned_hint).strip()
+
+    if cleaned_hint:
+        for profile in _get_child_profiles(checklist):
+            child_name = str(profile.get("name") or "").strip()
+            if child_name and _names_match(cleaned_hint, child_name):
+                return {
+                    "user_id": getattr(checklist, "user_id", None) or actor_user_id,
+                    "child_profile_id": str(profile.get("id") or "").strip(),
+                    "label": child_name,
+                }
+
+        for backpack in checklist.backpacks or []:
+            username = backpack.user.username if getattr(backpack, "user", None) else ""
+            if username and _names_match(cleaned_hint, username):
+                return {
+                    "user_id": backpack.user_id,
+                    "child_profile_id": None,
+                    "label": username,
+                }
+
+    owner_id = actor_user_id or getattr(checklist, "user_id", None)
+    if not owner_id:
+        return None
+    return {
+        "user_id": owner_id,
+        "child_profile_id": None,
+        "label": "я",
+    }
+
+
+def _has_named_baggage_owner(checklist, owner_hint: str, actor_user_id: Optional[int] = None) -> bool:
+    cleaned_hint = str(owner_hint or "").strip()
+    if not cleaned_hint:
+        return False
+    for profile in _get_child_profiles(checklist):
+        child_name = str(profile.get("name") or "").strip()
+        if child_name and _names_match(cleaned_hint, child_name):
+            return True
+    for backpack in checklist.backpacks or []:
+        username = backpack.user.username if getattr(backpack, "user", None) else ""
+        child_name = _get_child_profile_name(checklist, getattr(backpack, "child_profile_id", None)) or ""
+        if (username and _names_match(cleaned_hint, username)) or (child_name and _names_match(cleaned_hint, child_name)):
+            return True
+    return False
+
+
+def _strip_baggage_kind_words(value: str) -> str:
+    cleaned = str(value or "")
+    for aliases in BAGGAGE_KIND_ALIASES.values():
+        for alias in sorted(aliases, key=len, reverse=True):
+            cleaned = re.sub(rf"\b{re.escape(alias)}\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:багаж|baggage|luggage|для|for|to)\b", " ", cleaned, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", cleaned).strip(" .,!?:;")
+
+
+def _looks_like_baggage_reference(value: str) -> bool:
+    normalized = _normalize_for_matching(value)
+    if not normalized:
+        return False
+    aliases = {
+        _normalize_for_matching(alias)
+        for kind_aliases in BAGGAGE_KIND_ALIASES.values()
+        for alias in kind_aliases
+    }
+    return normalized in aliases or normalized in {"багаж", "baggage", "luggage"}
+
+
 def _pick_actor_backpack(checklist, actor_user_id: Optional[int]):
     if actor_user_id is None:
         return None
@@ -755,20 +1143,21 @@ def _pick_actor_backpack(checklist, actor_user_id: Optional[int]):
     return owned[0]
 
 
-def _build_backpack_reference(backpack) -> dict[str, Any]:
+def _build_backpack_reference(backpack, checklist=None) -> dict[str, Any]:
     return {
         "kind": "backpack",
         "backpack_id": backpack.id,
         "user_id": backpack.user_id,
-        "label": _get_baggage_label(backpack),
+        "child_profile_id": getattr(backpack, "child_profile_id", None),
+        "label": _get_baggage_label(backpack, checklist),
     }
 
 
 def _resolve_default_section_reference(checklist, actor_user_id: Optional[int] = None) -> dict[str, Any]:
     actor_backpack = _pick_actor_backpack(checklist, actor_user_id)
     if actor_backpack:
-        return _build_backpack_reference(actor_backpack)
-    return {"kind": "shared", "label": "список вещей"}
+        return _build_backpack_reference(actor_backpack, checklist)
+    return {}
 
 
 def _guess_baggage_kind(name: str) -> str:
@@ -782,29 +1171,54 @@ def _guess_baggage_kind(name: str) -> str:
     return "custom"
 
 
-def _extract_baggage_management_actions(command: str) -> dict[str, Any]:
+def _extract_baggage_management_actions(
+    command: str,
+    checklist=None,
+    actor_user_id: Optional[int] = None,
+) -> dict[str, Any]:
     cleaned_command = _strip_conversational_prefixes(command or "")
     if not cleaned_command:
         return {"recognized_action_request": False, "actions": []}
 
-    for pattern in CREATE_BAGGAGE_PATTERNS:
-        match = pattern.match(cleaned_command)
-        if not match:
-            continue
-        baggage_name = re.sub(r"\s+", " ", match.group(1).strip(" .,!?:;"))
-        if not baggage_name:
-            return {"recognized_action_request": True, "actions": []}
-        display_name = baggage_name[0].upper() + baggage_name[1:] if baggage_name[0].islower() else baggage_name
-        return {
-            "recognized_action_request": True,
-            "actions": [{
-                "type": "create_baggage",
-                "items": [display_name],
-                "baggage_kind": _guess_baggage_kind(display_name),
-            }],
-        }
+    # Match create/add baggage commands
+    # e.g., "создай чемодан для кати", "добавь рюкзак", "заведи чемодан"
+    match = CREATE_BAGGAGE_COMMAND_RE.match(cleaned_command)
+    if not match:
+        return {"recognized_action_request": False, "actions": []}
 
-    return {"recognized_action_request": False, "actions": []}
+    verb = (match.group("verb") or "").lower()
+    tail = re.sub(r"\s+", " ", match.group("tail").strip(" .,!?:;"))
+    
+    # Check if it looks like baggage management
+    baggage_keywords = r"багаж|рюкзак|чемодан|сумк|ручн|backpack|suitcase|bag|baggage|luggage|carry"
+    has_baggage_keyword = re.search(baggage_keywords, tail, re.IGNORECASE)
+    
+    if not has_baggage_keyword:
+        return {"recognized_action_request": False, "actions": []}
+
+    baggage_kind = _guess_baggage_kind(tail)
+    owner_hint = _strip_baggage_kind_words(tail)
+    owner = _resolve_baggage_owner(checklist, owner_hint, actor_user_id) if checklist is not None else None
+    
+    if owner_hint and owner and owner.get("label") and _names_match(owner_hint, owner["label"]):
+        baggage_name = BAGGAGE_KIND_DEFAULT_NAMES.get(baggage_kind, "Багаж")
+    else:
+        baggage_name = owner_hint or BAGGAGE_KIND_DEFAULT_NAMES.get(baggage_kind, "Багаж")
+    
+    display_name = baggage_name[0].upper() + baggage_name[1:] if baggage_name and baggage_name[0].islower() else baggage_name
+    if not display_name:
+        return {"recognized_action_request": True, "actions": []}
+
+    return {
+        "recognized_action_request": True,
+        "actions": [{
+            "type": "create_baggage",
+            "items": [display_name],
+            "baggage_kind": baggage_kind,
+            **({"target_user_id": owner.get("user_id")} if owner and owner.get("user_id") else {}),
+            **({"child_profile_id": owner.get("child_profile_id")} if owner and owner.get("child_profile_id") else {}),
+        }],
+    }
 
 
 def _extract_move_actions(command: str, checklist, actor_user_id: Optional[int] = None) -> dict[str, Any]:
@@ -976,6 +1390,8 @@ def _resolve_section_reference(checklist, raw_section: Optional[str], actor_user
 
     normalized = _normalize_section(raw_section)
     normalized_full = _normalize_for_matching(raw_section)
+    if not normalized and normalized_full:
+        normalized = normalized_full
     if not normalized:
         return None
 
@@ -988,8 +1404,12 @@ def _resolve_section_reference(checklist, raw_section: Optional[str], actor_user
 
     for backpack in checklist.backpacks or []:
         username = _normalize_item(backpack.user.username if backpack.user else "")
+        child_name = _get_child_profile_name(checklist, getattr(backpack, "child_profile_id", None)) or ""
         is_actor_baggage = actor_user_id is not None and backpack.user_id == actor_user_id
-        owner_match = bool(username and (normalized == username or username in normalized or normalized in username))
+        owner_match = bool(
+            (username and _names_match(normalized, username))
+            or (child_name and _names_match(normalized, child_name))
+        )
         self_match = self_requested and is_actor_baggage
 
         baggage_aliases = _get_baggage_aliases(backpack)
@@ -997,7 +1417,6 @@ def _resolve_section_reference(checklist, raw_section: Optional[str], actor_user
             alias and (
                 alias == normalized_full
                 or alias in normalized_full
-                or normalized_full in alias
             )
             for alias in baggage_aliases
         )
@@ -1017,7 +1436,7 @@ def _resolve_section_reference(checklist, raw_section: Optional[str], actor_user
             best_match = backpack
 
     if best_match and best_score > 0:
-        return _build_backpack_reference(best_match)
+        return _build_backpack_reference(best_match, checklist)
 
     return None
 
@@ -1035,6 +1454,7 @@ def _build_backpack_section(snapshot: dict[str, Any], backpack: dict[str, Any]) 
         "kind": "backpack",
         "backpack_id": backpack["id"],
         "user_id": backpack["user_id"],
+        "child_profile_id": backpack.get("child_profile_id"),
         "name": backpack.get("name"),
         "kind_name": backpack.get("kind"),
         "is_default": backpack.get("is_default", False),
@@ -1053,11 +1473,147 @@ def _pick_user_backpack_snapshot(backpacks: list[dict[str, Any]], user_id: Optio
     return owned[0]
 
 
+def _get_backpack_editor_ids(backpack) -> set[int]:
+    editor_ids: set[int] = set()
+    for raw_value in getattr(backpack, "editor_user_ids", None) or []:
+        try:
+            parsed = int(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if parsed > 0:
+            editor_ids.add(parsed)
+    return editor_ids
+
+
+def _can_edit_backpack(backpack, checklist, actor_user_id: Optional[int]) -> bool:
+    if not backpack or not checklist or not actor_user_id:
+        return False
+    if getattr(backpack, "user_id", None) == actor_user_id:
+        return True
+    hidden_sections = getattr(checklist, "hidden_sections", None) or []
+    if f"backpack:{getattr(backpack, 'id', None)}" in hidden_sections:
+        return False
+    return actor_user_id in _get_backpack_editor_ids(backpack)
+
+
+def _build_access_denied_result(backpack, language: str = "ru") -> dict[str, Any]:
+    return {
+        "type": "access_denied",
+        "items": [],
+        "section_label": _get_baggage_label(backpack) if backpack else None,
+        "section_user_id": getattr(backpack, "user_id", None) if backpack else None,
+        "message": (
+            f"У тебя нет доступа к багажу «{_get_baggage_label(backpack)}»."
+            if language == "ru"
+            else f"You do not have access to '{_get_baggage_label(backpack)}'."
+        ) if backpack else (
+            "У тебя нет доступа к этому багажу."
+            if language == "ru"
+            else "You do not have access to this baggage."
+        ),
+    }
+
+
 def _build_default_action_section(snapshot: dict[str, Any], actor_user_id: Optional[int] = None) -> dict[str, Any]:
     actor_backpack = _pick_user_backpack_snapshot(snapshot["backpacks"], actor_user_id)
     if actor_backpack:
         return _build_backpack_section(snapshot, actor_backpack)
-    return _build_shared_section(snapshot)
+    return {}
+
+
+def _resolve_addressee_tail(
+    value: str,
+    checklist,
+    actor_user_id: Optional[int] = None,
+) -> Optional[tuple[str, str]]:
+    tail = (value or "").strip()
+    if not tail:
+        return None
+
+    tokens = tail.split()
+    for suffix_length in range(1, min(len(tokens), 3) + 1):
+        section_hint = " ".join(tokens[-suffix_length:]).strip()
+        items_part = " ".join(tokens[:-suffix_length]).strip()
+        if not items_part:
+            continue
+        if re.search(r"\b(?:в|во|to)$", _normalize_for_matching(items_part), re.IGNORECASE):
+            continue
+        resolved = _resolve_section_reference(checklist, section_hint, actor_user_id)
+        if resolved and resolved.get("kind") == "backpack":
+            return section_hint, items_part
+    return None
+
+
+def _resolve_owned_baggage_tail(
+    value: str,
+    checklist,
+    actor_user_id: Optional[int] = None,
+) -> Optional[tuple[str, str]]:
+    tail = (value or "").strip()
+    if not tail:
+        return None
+    owner_first_match = re.match(r"^(.+?)\s+(?:в|во|to)\s+(.+)$", tail, re.IGNORECASE)
+    if owner_first_match:
+        owner_hint, baggage_and_items = owner_first_match.groups()
+        if _has_named_baggage_owner(checklist, owner_hint, actor_user_id):
+            tokens = baggage_and_items.split()
+            for prefix_length in range(min(len(tokens), 4), 0, -1):
+                if _looks_like_quantity_token(tokens[prefix_length - 1]):
+                    continue
+                baggage_part = " ".join(tokens[:prefix_length]).strip()
+                items_part = " ".join(tokens[prefix_length:]).strip()
+                if not items_part:
+                    continue
+                if not _looks_like_baggage_reference(baggage_part):
+                    continue
+                section_hint = f"{baggage_part} {owner_hint}".strip()
+                if _resolve_section_reference(checklist, section_hint, actor_user_id):
+                    return section_hint, items_part
+
+    match = re.match(r"^(.+?)\s+(?:в|во|to)\s+(.+)$", tail, re.IGNORECASE)
+    if not match:
+        return None
+    left_part, baggage_part = match.groups()
+    if not re.search(r"рюкзак|чемодан|сумк|багаж|ручн|backpack|suitcase|bag|baggage|luggage|carry", baggage_part, re.IGNORECASE):
+        return None
+
+    tokens = left_part.split()
+    for owner_length in range(1, min(len(tokens), 3) + 1):
+        owner_hint = " ".join(tokens[-owner_length:]).strip()
+        items_part = " ".join(tokens[:-owner_length]).strip()
+        if not items_part or _looks_like_quantity_token(tokens[-owner_length]):
+            continue
+        if not _has_named_baggage_owner(checklist, owner_hint, actor_user_id):
+            continue
+        section_hint = f"{baggage_part} {owner_hint}".strip()
+        if _resolve_section_reference(checklist, section_hint, actor_user_id):
+            return section_hint, items_part
+    return None
+
+
+def _extract_trailing_category_hint(value: str, language: str = "ru") -> tuple[Optional[str], str]:
+    tail = (value or "").strip()
+    if not tail:
+        return None, ""
+
+    patterns = [
+        re.compile(r"^(.+?)\s+(?:в|во|to)\s+(.+)$", re.IGNORECASE),
+        re.compile(r"^(.+?)\s+(?:в\s+категорию|to\s+category)\s+(.+)$", re.IGNORECASE),
+    ]
+    for pattern in patterns:
+        match = pattern.match(tail)
+        if not match:
+            continue
+        items_part, category_part = match.groups()
+        category_hint = _resolve_category_hint(category_part, language)
+        if category_hint and items_part.strip():
+            return category_hint, items_part.strip()
+    return None, tail
+
+
+def _split_add_items_with_category(value: str, language: str = "ru") -> tuple[list[str], Optional[str]]:
+    category_hint, items_part = _extract_trailing_category_hint(value, language)
+    return _split_items(items_part), category_hint
 
 
 def _iter_candidate_source_sections(
@@ -1098,10 +1654,15 @@ def _get_backpack_snapshot(snapshot: dict[str, Any], backpack_id: int) -> Option
     return next((bp for bp in snapshot["backpacks"] if bp["id"] == backpack_id), None)
 
 
-def _find_backpacks_with_item(snapshot: dict[str, Any], requested_item: str) -> list[dict[str, Any]]:
+def _find_backpacks_with_item(snapshot: dict[str, Any], requested_item: str, language: str = "ru") -> list[dict[str, Any]]:
     matches = []
     for backpack in snapshot["backpacks"]:
-        if _resolve_requested_items([requested_item], backpack["items"]):
+        if _resolve_requested_items(
+            [requested_item],
+            backpack["items"],
+            backpack.get("item_categories"),
+            language,
+        ):
             matches.append(backpack)
     return matches
 
@@ -1112,8 +1673,9 @@ def _infer_source_section(
     requested_item: str,
     target_section: Optional[dict[str, Any]],
     actor_user_id: Optional[int] = None,
+    language: str = "ru",
 ) -> Optional[dict[str, Any]]:
-    backpack_matches = _find_backpacks_with_item(snapshot, requested_item)
+    backpack_matches = _find_backpacks_with_item(snapshot, requested_item, language)
 
     if target_section and target_section.get("kind") == "backpack":
         backpack_matches = [bp for bp in backpack_matches if bp["id"] != target_section["backpack_id"]]
@@ -1128,7 +1690,12 @@ def _infer_source_section(
             "label": selected["label"],
         }
 
-    if _resolve_requested_items([requested_item], snapshot["shared"]["items"]):
+    if _resolve_requested_items(
+        [requested_item],
+        snapshot["shared"]["items"],
+        snapshot["shared"].get("item_categories"),
+        language,
+    ):
         return {"kind": "shared", "label": "список вещей"}
 
     return None
@@ -1140,8 +1707,9 @@ def _find_source_section_for_request(
     requested_item: str,
     target_section: Optional[dict[str, Any]],
     actor_user_id: Optional[int] = None,
+    language: str = "ru",
 ) -> Optional[dict[str, Any]]:
-    explicit_inferred = _infer_source_section(checklist, snapshot, requested_item, target_section, actor_user_id)
+    explicit_inferred = _infer_source_section(checklist, snapshot, requested_item, target_section, actor_user_id, language)
     if explicit_inferred:
         if explicit_inferred["kind"] == "backpack":
             return {
@@ -1150,16 +1718,28 @@ def _find_source_section_for_request(
                 "matched_items": _resolve_requested_items(
                     [requested_item],
                     (_get_backpack_snapshot(snapshot, explicit_inferred["backpack_id"]) or {}).get("items", []),
+                    (_get_backpack_snapshot(snapshot, explicit_inferred["backpack_id"]) or {}).get("item_categories"),
+                    language,
                 ),
             }
         return {
             **explicit_inferred,
             "snapshot": snapshot["shared"],
-            "matched_items": _resolve_requested_items([requested_item], snapshot["shared"]["items"]),
+            "matched_items": _resolve_requested_items(
+                [requested_item],
+                snapshot["shared"]["items"],
+                snapshot["shared"].get("item_categories"),
+                language,
+            ),
         }
 
     for section in _iter_candidate_source_sections(snapshot, target_section, actor_user_id):
-        matched_items = _resolve_requested_items([requested_item], section["snapshot"]["items"])
+        matched_items = _resolve_requested_items(
+            [requested_item],
+            section["snapshot"]["items"],
+            section["snapshot"].get("item_categories"),
+            language,
+        )
         if matched_items:
             return {
                 **section,
@@ -1181,6 +1761,7 @@ def _take_transfer_state(section: dict[str, Any], actual_item: str) -> dict[str,
         "added": any(_normalize_item(existing) == normalized for existing in section.get("added_items", [])),
         "quantity": quantity,
         "packed_quantity": packed_quantity,
+        "category": _get_item_category(section.get("item_categories"), actual_item),
     }
 
 
@@ -1190,6 +1771,7 @@ def _remove_item_from_section(section: dict[str, Any], actual_item: str) -> None
         section[key] = [existing for existing in section.get(key, []) if _normalize_item(existing) != normalized]
     _set_item_quantity(section.setdefault("item_quantities", {}), actual_item, 0)
     _set_item_packed_quantity(section.setdefault("packed_quantities", {}), actual_item, 0)
+    _set_item_category(section.setdefault("item_categories", {}), actual_item, None)
 
 
 def _append_unique(target: list[str], item: str) -> list[str]:
@@ -1229,6 +1811,10 @@ def _normalize_single_added_word(word: str) -> str:
     lowered = cleaned.lower()
     if len(lowered) < 3:
         return cleaned
+
+    override = ADDED_ITEM_NORMALIZATION_OVERRIDES.get(lowered.replace("ё", "е"))
+    if override:
+        return override[0].upper() + override[1:] if cleaned[:1].isupper() else override
 
     if re.fullmatch(r"[а-яё-]+", lowered):
         if lowered.endswith("ку"):
@@ -1270,7 +1856,7 @@ def _resolve_action_section_snapshot(
     snapshot: dict[str, Any],
     section_hint: Optional[str],
     actor_user_id: Optional[int] = None,
-) -> dict[str, Any]:
+) -> Optional[dict[str, Any]]:
     section_ref = _resolve_section_reference(checklist, section_hint, actor_user_id) if section_hint else None
     if not section_ref or section_ref.get("kind") == "shared":
         return _build_default_action_section(snapshot, actor_user_id)
@@ -1327,6 +1913,8 @@ def _personalize_section_label(
             trimmed = label[: -(len(actor_username) + 1)].strip()
             if trimmed:
                 return f"твой {trimmed}" if language == "ru" else f"your {trimmed}"
+        if normalized_username and normalized_username not in normalized_label:
+            return label
 
     return "твой багаж" if language == "ru" else "your baggage"
 
@@ -1399,7 +1987,12 @@ def _resolve_leading_section_tail(
     return None
 
 
-def _extract_actions_fallback(command: str, checklist=None, actor_user_id: Optional[int] = None) -> dict[str, Any]:
+def _extract_actions_fallback(
+    command: str,
+    checklist=None,
+    actor_user_id: Optional[int] = None,
+    language: str = "ru",
+) -> dict[str, Any]:
     cleaned_command = _strip_conversational_prefixes(command or "")
     lowered = cleaned_command.lower()
     if not lowered:
@@ -1426,11 +2019,25 @@ def _extract_actions_fallback(command: str, checklist=None, actor_user_id: Optio
         matched_scoped_variant = False
         alias_head_match = re.match(rf"^(?:{alias})\s+(.+)$", cleaned_command, re.IGNORECASE)
         if alias_head_match and checklist is not None:
-            leading_section = _resolve_leading_section_tail(alias_head_match.group(1), checklist, actor_user_id)
-            if leading_section:
-                section_hint, items_part = leading_section
-                if not (action == "add" and re.match(r"^\s*у\b", section_hint, re.IGNORECASE)):
-                    items = _split_items(items_part)
+            alias_tail = alias_head_match.group(1).strip()
+            if action == "add":
+                add_to_self_match = re.match(r"^(?:мне|себе)\s+(.+)$", alias_tail, re.IGNORECASE)
+                if add_to_self_match:
+                    items, category_hint = _split_add_items_with_category(add_to_self_match.group(1), language)
+                    if items:
+                        recognized = True
+                        matched_scoped_variant = True
+                        actions.append({
+                            "type": action,
+                            "items": items,
+                            "section_hint": "мой рюкзак",
+                            **({"category_hint": category_hint} if category_hint else {}),
+                        })
+
+                owned_baggage_tail = _resolve_owned_baggage_tail(alias_tail, checklist, actor_user_id)
+                if owned_baggage_tail:
+                    section_hint, items_part = owned_baggage_tail
+                    items, category_hint = _split_add_items_with_category(items_part, language)
                     if items:
                         recognized = True
                         matched_scoped_variant = True
@@ -1439,17 +2046,58 @@ def _extract_actions_fallback(command: str, checklist=None, actor_user_id: Optio
                             "type": action,
                             "items": items,
                             "section_hint": canonical_section or section_hint,
+                            **({"category_hint": category_hint} if category_hint else {}),
+                        })
+                        continue
+
+                trailing_addressee = _resolve_addressee_tail(alias_tail, checklist, actor_user_id)
+                if trailing_addressee:
+                    section_hint, items_part = trailing_addressee
+                    items, category_hint = _split_add_items_with_category(items_part, language)
+                    if items:
+                        recognized = True
+                        matched_scoped_variant = True
+                        canonical_section = _canonicalize_section_hint(checklist, section_hint, actor_user_id)
+                        actions.append({
+                            "type": action,
+                            "items": items,
+                            "section_hint": canonical_section or section_hint,
+                            **({"category_hint": category_hint} if category_hint else {}),
+                        })
+
+            leading_section = _resolve_leading_section_tail(alias_tail, checklist, actor_user_id)
+            if leading_section:
+                section_hint, items_part = leading_section
+                if not (action == "add" and re.match(r"^\s*у\b", section_hint, re.IGNORECASE)):
+                    items, category_hint = (
+                        _split_add_items_with_category(items_part, language)
+                        if action == "add"
+                        else (_split_items(items_part), None)
+                    )
+                    if items:
+                        recognized = True
+                        matched_scoped_variant = True
+                        canonical_section = _canonicalize_section_hint(checklist, section_hint, actor_user_id)
+                        actions.append({
+                            "type": action,
+                            "items": items,
+                            "section_hint": canonical_section or section_hint,
+                            **({"category_hint": category_hint} if category_hint else {}),
                         })
 
             scoped_tail = _resolve_section_prefixed_tail(
-                alias_head_match.group(1),
+                alias_tail,
                 checklist,
                 actor_user_id,
                 allow_user_prefix=action in {"check", "remove", "uncheck"},
             )
             if scoped_tail:
                 section_hint, items_part = scoped_tail
-                items = _split_items(items_part)
+                items, category_hint = (
+                    _split_add_items_with_category(items_part, language)
+                    if action == "add"
+                    else (_split_items(items_part), None)
+                )
                 if items:
                     recognized = True
                     matched_scoped_variant = True
@@ -1458,6 +2106,7 @@ def _extract_actions_fallback(command: str, checklist=None, actor_user_id: Optio
                         "type": action,
                         "items": items,
                         "section_hint": canonical_section or section_hint,
+                        **({"category_hint": category_hint} if category_hint else {}),
                     })
 
         section_prepositions = r"у|из|в|во" if action in {"check", "remove", "uncheck"} else r"в|во"
@@ -1485,17 +2134,36 @@ def _extract_actions_fallback(command: str, checklist=None, actor_user_id: Optio
                 continue
 
             recognized = True
-            items = _split_items(items_part)
+            items, category_hint = (
+                _split_add_items_with_category(items_part, language)
+                if action == "add"
+                else (_split_items(items_part), None)
+            )
             if items:
                 matched_scoped_variant = True
                 actions.append({
                     "type": action,
                     "items": items,
                     "section_hint": resolved_section.get("label") or section_hint.strip(),
+                    **({"category_hint": category_hint} if category_hint else {}),
                 })
 
         if matched_scoped_variant:
             continue
+
+        if action == "add":
+            continuation_match = CONTINUATION_PREFIX_RE.match(cleaned_command)
+            if continuation_match:
+                items, category_hint = _split_add_items_with_category(continuation_match.group(1), language)
+                if items:
+                    return {
+                        "recognized_action_request": True,
+                        "actions": [{
+                            "type": "add",
+                            "items": items,
+                            **({"category_hint": category_hint} if category_hint else {}),
+                        }],
+                    }
 
         pattern = re.compile(rf"(?:^|[,.!?\n]\s*|\s+)(?:{alias})\s+(.+?)(?=(?:[,.!?]\s+)|$)", re.IGNORECASE)
         for match in pattern.finditer(cleaned_command):
@@ -1503,14 +2171,31 @@ def _extract_actions_fallback(command: str, checklist=None, actor_user_id: Optio
                 recognized = True
                 continue
             recognized = True
-            items = _split_items(match.group(1))
+            items, category_hint = (
+                _split_add_items_with_category(match.group(1), language)
+                if action == "add"
+                else (_split_items(match.group(1)), None)
+            )
             if items:
-                actions.append({"type": action, "items": items})
+                payload = {"type": action, "items": items}
+                if category_hint:
+                    payload["category_hint"] = category_hint
+                actions.append(payload)
 
     if actions:
-        merged: dict[tuple[str, Optional[str]], list[str]] = {}
+        merged: dict[tuple[str, Optional[str], Optional[str]], list[str]] = {}
         for action in actions:
-            merged.setdefault((action["type"], action.get("section_hint")), []).extend(action["items"])
+            key = (action["type"], action.get("section_hint"), action.get("category_hint"))
+            clean_items = [
+                item for item in action["items"]
+                if not (
+                    action.get("section_hint")
+                    and action["type"] in {"remove", "check", "uncheck"}
+                    and re.search(r"рюкзак|чемодан|сумк|багаж|клад|backpack|suitcase|bag|baggage|luggage|carry", item, re.IGNORECASE)
+                    and _resolve_section_reference(checklist, item, actor_user_id)
+                )
+            ]
+            merged.setdefault(key, []).extend(clean_items)
         return {
             "recognized_action_request": True,
             "actions": [
@@ -1518,28 +2203,152 @@ def _extract_actions_fallback(command: str, checklist=None, actor_user_id: Optio
                     "type": action_type,
                     "items": _dedupe_preserve(items),
                     **({"section_hint": section_hint} if section_hint else {}),
+                    **({"category_hint": category_hint} if category_hint else {}),
                 }
-                for (action_type, section_hint), items in merged.items()
+                for (action_type, section_hint, category_hint), items in merged.items()
             ],
         }
 
     return {"recognized_action_request": recognized, "actions": []}
 
 
-async def _extract_actions_with_ai(command: str, checklist_items: list[str], language: str = "ru") -> Optional[dict[str, Any]]:
+def _extract_contextual_followup_actions(
+    command: str,
+    command_context: Optional[dict[str, Any]],
+) -> dict[str, Any]:
+    continuation_match = CONTINUATION_PREFIX_RE.match(command or "")
+    if not continuation_match or not command_context:
+        return {"recognized_action_request": False, "actions": []}
+
+    action_type = (command_context.get("action_type") or "").strip().lower()
+    if action_type != "add":
+        return {"recognized_action_request": False, "actions": []}
+
+    items = _split_items(continuation_match.group(1))
+    if not items:
+        return {"recognized_action_request": True, "actions": []}
+
+    action_payload: dict[str, Any] = {
+        "type": "add",
+        "items": items,
+    }
+    if command_context.get("section_hint"):
+        action_payload["section_hint"] = command_context["section_hint"]
+    if command_context.get("category_hint"):
+        action_payload["category_hint"] = command_context["category_hint"]
+    return {
+        "recognized_action_request": True,
+        "actions": [action_payload],
+    }
+
+
+def _compact_trip_context_for_ai(trip_context: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not isinstance(trip_context, dict):
+        return {}
+
+    baggage = trip_context.get("baggage") or {}
+
+    def item_names(section: dict[str, Any], limit: int = 25) -> list[str]:
+        names = []
+        for item in (section.get("items") or [])[:limit]:
+            if item.get("is_removed"):
+                continue
+            name = str(item.get("name") or "").strip()
+            if name:
+                category = str(item.get("category") or "").strip()
+                names.append(f"{name} [{category}]" if category else name)
+        return names
+
+    return {
+        "trip": trip_context.get("trip") or {},
+        "trip_profile": trip_context.get("trip_profile") or {},
+        "daily_forecast": (trip_context.get("daily_forecast") or [])[:8],
+        "events": (trip_context.get("events") or [])[:8],
+        "participants": trip_context.get("participants") or [],
+        "baggage": {
+            "shared_items": item_names(baggage.get("shared") or {}),
+            "backpacks": [
+                {
+                    "backpack_id": backpack.get("backpack_id"),
+                    "label": backpack.get("label"),
+                    "user_id": backpack.get("user_id"),
+                    "child_profile_id": backpack.get("child_profile_id"),
+                    "owner_username": backpack.get("owner_username"),
+                    "baggage_kind": backpack.get("baggage_kind"),
+                    "items": item_names(backpack),
+                    "removed_items": backpack.get("removed_items") or [],
+                }
+                for backpack in (baggage.get("backpacks") or [])[:12]
+            ],
+        },
+        "packing_summary": {
+            "packed_count": (trip_context.get("packing_summary") or {}).get("packed_count", 0),
+            "remaining_count": (trip_context.get("packing_summary") or {}).get("remaining_count", 0),
+            "remaining_items": (trip_context.get("packing_summary") or {}).get("remaining_items", [])[:20],
+        },
+        "attractions": (trip_context.get("attractions") or [])[:6],
+    }
+
+
+def _get_ai_parse_fallback_mode() -> str:
+    mode = os.getenv("CHECKLIST_AI_PARSE_FALLBACK_MODE", "smart").strip().lower()
+    return mode if mode in {"off", "smart", "always"} else "smart"
+
+
+def _should_use_ai_parse_fallback(command: str, language: str = "ru") -> bool:
+    mode = _get_ai_parse_fallback_mode()
+    if mode == "off":
+        return False
+    if mode == "always":
+        return True
+
+    cleaned_command = _strip_conversational_prefixes(command or "")
+    normalized = _normalize_for_matching(cleaned_command)
+    if not normalized:
+        return False
+
+    return any(re.search(pattern, normalized, re.IGNORECASE) for pattern in AI_PARSE_FALLBACK_HINTS)
+
+
+async def _extract_actions_with_ai(
+    command: str,
+    checklist_items: list[str],
+    language: str = "ru",
+    trip_context: Optional[dict[str, Any]] = None,
+) -> Optional[dict[str, Any]]:
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         return None
 
+    compact_trip_context = _compact_trip_context_for_ai(trip_context)
     prompt = (
         "Ты превращаешь просьбу пользователя в команды редактирования чеклиста.\n"
         "Верни только JSON без markdown и без пояснений.\n"
+        "Доступные типы действий:\n"
+        "1. add - добавить вещи (укажи section_user_id или child_profile_id если известно)\n"
+        "2. remove - удалить вещи\n"
+        "3. check/uncheck - отметить как собранное/несобранное\n"
+        "4. create_baggage - создать новый чемодан/рюкзак (items - названия, baggage_kind: backpack|suitcase|bag|carry_on)\n"
+        "5. remove_baggage - удалить чемодан/рюкзак\n"
+        "\n"
         "Формат ответа:\n"
-        "{\"recognized_action_request\": true|false, \"actions\": [{\"type\": \"add|remove|check|uncheck\", \"items\": [\"...\"]}]}\n"
+        "{\n"
+        "  \"recognized_action_request\": true|false,\n"
+        "  \"actions\": [\n"
+        "    {\n"
+        "      \"type\": \"add|remove|check|uncheck|create_baggage|remove_baggage\",\n"
+        "      \"items\": [\"...\"],\n"
+        "      \"section_user_id\": 123, // опционально\n"
+        "      \"child_profile_id\": \"...\", // опционально\n"
+        "      \"baggage_kind\": \"...\" // для создания багажа\n"
+        "    }\n"
+        "  ]\n"
+        "}\n"
         "recognized_action_request=true только если пользователь явно просит изменить чеклист.\n"
         "Если это обычный вопрос или совет, верни {\"recognized_action_request\": false, \"actions\": []}.\n"
-        "Для remove/check/uncheck старайся использовать точные названия из текущего чеклиста.\n"
+        "Для действий над существующими вещами старайся использовать точные названия из текущего чеклиста.\n"
         f"Текущий чеклист: {json.dumps(checklist_items, ensure_ascii=False)}\n"
+        f"Единый контекст поездки: {json.dumps(compact_trip_context, ensure_ascii=False, default=str)}\n"
         f"Язык пользователя: {language}\n"
         f"Сообщение пользователя: {command}"
     )
@@ -1550,6 +2359,9 @@ async def _extract_actions_with_ai(command: str, checklist_items: list[str], lan
             "temperature": 0.1,
             "maxOutputTokens": 300,
             "topP": 0.8,
+            "thinkingConfig": {
+                "thinkingBudget": 0,
+            },
         },
     }
 
@@ -1610,8 +2422,14 @@ def _build_ai_candidate_items(checklist, actor_user_id: Optional[int] = None) ->
 
     candidates.extend(checklist.items or [])
 
+    hidden_sections = set(getattr(checklist, "hidden_sections", None) or [])
     for backpack in checklist.backpacks or []:
         if actor_backpack and backpack.id == actor_backpack.id:
+            continue
+        if (
+            f"backpack:{getattr(backpack, 'id', None)}" in hidden_sections
+            and getattr(backpack, "user_id", None) != actor_user_id
+        ):
             continue
         candidates.extend(backpack.items or [])
 
@@ -1623,12 +2441,21 @@ async def parse_checklist_actions(
     checklist,
     language: str = "ru",
     actor_user_id: Optional[int] = None,
+    command_context: Optional[dict[str, Any]] = None,
+    trip_context: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    baggage_management_result = _extract_baggage_management_actions(command)
+    if detect_packing_mode(command) and PACKING_ADVICE_COMMAND_RE.search(command or ""):
+        return {"recognized_action_request": False, "actions": []}
+
+    contextual_followup_result = _extract_contextual_followup_actions(command, command_context)
+    if contextual_followup_result["recognized_action_request"]:
+        return _with_item_specs(contextual_followup_result)
+
+    baggage_management_result = _extract_baggage_management_actions(command, checklist, actor_user_id)
     if baggage_management_result["recognized_action_request"]:
         return _with_item_specs(baggage_management_result)
 
-    info_result = _extract_info_request(command, checklist, actor_user_id)
+    info_result = _extract_info_request(command, checklist, actor_user_id, language)
     if info_result is not None:
         return _with_item_specs(info_result)
 
@@ -1637,10 +2464,12 @@ async def parse_checklist_actions(
         return _with_item_specs(move_result)
 
     checklist_items = _build_ai_candidate_items(checklist, actor_user_id)
-    fallback_result = _extract_actions_fallback(command, checklist, actor_user_id)
+    fallback_result = _extract_actions_fallback(command, checklist, actor_user_id, language)
     if fallback_result.get("actions"):
         return _with_item_specs(fallback_result)
-    ai_result = await _extract_actions_with_ai(command, checklist_items, language)
+    if not _should_use_ai_parse_fallback(command, language):
+        return _with_item_specs(fallback_result)
+    ai_result = await _extract_actions_with_ai(command, checklist_items, language, trip_context)
     if ai_result is not None:
         return _with_item_specs(_merge_action_sets(ai_result, fallback_result))
     return _with_item_specs(fallback_result)
@@ -1901,6 +2730,21 @@ def _build_success_message(
             fragments.append(f"Создал багаж: {item_list}")
         elif item["type"] == "not_found" and item["items"]:
             fragments.append(f"Не нашёл: {item_list}")
+        elif item["type"] == "access_denied":
+            fragments.append(
+                item.get("message")
+                or (
+                    "У тебя нет доступа к этому багажу."
+                    if language == "ru"
+                    else "You do not have access to this baggage."
+                )
+            )
+        elif item["type"] == "no_default_baggage":
+            fragments.append(
+                "Не нашёл твой основной багаж. Сначала выбери или создай его."
+                if language == "ru"
+                else "I couldn't find your default baggage yet. Create or choose it first."
+            )
 
     if not fragments:
         return "Чеклист обновлён."
@@ -1922,6 +2766,28 @@ def _build_noop_message(recognized_action_request: bool, language: str = "ru") -
     )
 
 
+def _build_command_context(action_results: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if not action_results:
+        return None
+
+    primary = next(
+        (
+            action
+            for action in action_results
+            if action.get("type") in {"add", "increase_quantity", "restore", "exists"}
+        ),
+        None,
+    )
+    if not primary:
+        return None
+
+    return {
+        "action_type": "add",
+        "section_hint": primary.get("section_label"),
+        "category_hint": primary.get("category_hint"),
+    }
+
+
 def _format_list_message(title: str, items: list[str], empty_message: str) -> str:
     if not items:
         return empty_message
@@ -1938,7 +2804,13 @@ def _build_info_message(
     if not section or section.get("kind") == "shared":
         default_backpack = _pick_actor_backpack(checklist, actor_user_id)
         if default_backpack:
-            section = _build_backpack_reference(default_backpack)
+            section = _build_backpack_reference(default_backpack, checklist)
+        else:
+            return (
+                "У тебя пока нет основного багажа для этой поездки."
+                if language == "ru"
+                else "You do not have a default baggage for this trip yet."
+            )
 
     if section and section.get("kind") == "backpack":
         backpack = next((bp for bp in (checklist.backpacks or []) if bp.id == section.get("backpack_id")), None)
@@ -1946,6 +2818,7 @@ def _build_info_message(
         checked_items = list(backpack.checked_items or []) if backpack else []
         removed_items = list(backpack.removed_items or []) if backpack else []
         quantity_map = _normalize_quantity_map(backpack.item_quantities if backpack else {})
+        category_map = _normalize_item_category_map(getattr(backpack, "item_categories", None) if backpack else {}, language)
         packed_map = _hydrate_packed_quantities(
             section_items,
             checked_items,
@@ -1958,6 +2831,7 @@ def _build_info_message(
         checked_items = list(checklist.checked_items or [])
         removed_items = list(checklist.removed_items or [])
         quantity_map = _normalize_quantity_map(getattr(checklist, "item_quantities", None))
+        category_map = _normalize_item_category_map(getattr(checklist, "item_categories", None), language)
         packed_map = _hydrate_packed_quantities(
             section_items,
             checked_items,
@@ -1972,30 +2846,41 @@ def _build_info_message(
         if _normalize_item(item) not in {_normalize_item(x) for x in checked_items}
     ]
 
+    category_hint = info_request.get("category_hint")
+    if category_hint:
+        category_label = _normalize_category_value(category_hint, language) or category_hint
+        visible_items = [item for item in visible_items if _get_item_category(category_map, item, language) == category_label]
+        remaining_items = [item for item in remaining_items if _get_item_category(category_map, item, language) == category_label]
+        checked_items = [item for item in checked_items if _get_item_category(category_map, item, language) == category_label]
+        removed_items = [item for item in removed_items if _get_item_category(category_map, item, language) == category_label]
+        category_scope = f" в категории «{category_label}»" if language == "ru" else f" in category '{category_label}'"
+    else:
+        category_scope = ""
+
     request_type = info_request.get("type")
     if request_type == "checked":
         return _format_list_message(
-            f"Уже отмечено в разделе «{section_label}»:",
+            f"Уже отмечено в разделе «{section_label}»{category_scope}:",
             [_format_item_with_quantity(item, quantity_map, packed_map) for item in checked_items],
-            f"Пока ничего не отмечено в разделе «{section_label}».",
+            f"Пока ничего не отмечено в разделе «{section_label}»{category_scope}.",
         )
     if request_type == "remaining":
         return _format_list_message(
-            f"Ещё осталось собрать в разделе «{section_label}»:",
+            f"Ещё осталось собрать в разделе «{section_label}»{category_scope}:",
             [_format_item_with_quantity(item, quantity_map, packed_map) for item in remaining_items],
-            f"В разделе «{section_label}» всё уже собрано.",
+            f"В разделе «{section_label}»{category_scope} всё уже собрано.",
         )
     if request_type == "removed":
         return _format_list_message(
-            f"Скрыто или убрано в разделе «{section_label}»:",
+            f"Скрыто или убрано в разделе «{section_label}»{category_scope}:",
             [_format_item_with_quantity(item, quantity_map, packed_map) for item in removed_items],
-            f"В разделе «{section_label}» ничего не скрыто.",
+            f"В разделе «{section_label}»{category_scope} ничего не скрыто.",
         )
     if request_type == "items":
         return _format_list_message(
-            f"Сейчас в разделе «{section_label}»:",
+            f"Сейчас в разделе «{section_label}»{category_scope}:",
             [_format_item_with_quantity(item, quantity_map, packed_map) for item in visible_items],
-            f"Раздел «{section_label}» пока пустой.",
+            f"Раздел «{section_label}»{category_scope} пока пустой.",
         )
 
     return _build_noop_message(False, language)
@@ -2009,7 +2894,12 @@ def _build_add_candidate_pool(snapshot: dict[str, Any], action_section: dict[str
     return _dedupe_preserve(pool)
 
 
-def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: Optional[int] = None) -> dict[str, Any]:
+def _simulate_actions(
+    checklist,
+    actions: list[dict[str, Any]],
+    actor_user_id: Optional[int] = None,
+    language: str = "ru",
+) -> dict[str, Any]:
     if not actions:
         return {
             "action_results": [],
@@ -2027,6 +2917,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
             "added_items": list(checklist.added_items or []),
             "removed_items": list(checklist.removed_items or []),
             "item_quantities": _normalize_quantity_map(getattr(checklist, "item_quantities", None)),
+            "item_categories": _normalize_item_category_map(getattr(checklist, "item_categories", None), language),
             "packed_quantities": _hydrate_packed_quantities(
                 list(checklist.items or []),
                 list(checklist.checked_items or []),
@@ -2041,12 +2932,14 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                     "kind": getattr(backpack, "kind", None) or "backpack",
                     "sort_order": getattr(backpack, "sort_order", 0) or 0,
                     "is_default": bool(getattr(backpack, "is_default", False)),
-                    "label": _get_baggage_label(backpack),
+                    "child_profile_id": getattr(backpack, "child_profile_id", None),
+                    "label": _get_baggage_label(backpack, checklist),
                     "items": list(backpack.items or []),
                     "checked_items": list(backpack.checked_items or []),
                     "added_items": list(backpack.added_items or []),
                     "removed_items": list(backpack.removed_items or []),
                     "item_quantities": _normalize_quantity_map(getattr(backpack, "item_quantities", None)),
+                    "item_categories": _normalize_item_category_map(getattr(backpack, "item_categories", None), language),
                     "packed_quantities": _hydrate_packed_quantities(
                         list(backpack.items or []),
                         list(backpack.checked_items or []),
@@ -2065,6 +2958,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
             "added_items": list(checklist.added_items or []),
             "removed_items": list(checklist.removed_items or []),
             "item_quantities": _normalize_quantity_map(getattr(checklist, "item_quantities", None)),
+            "item_categories": _normalize_item_category_map(getattr(checklist, "item_categories", None), language),
             "packed_quantities": _hydrate_packed_quantities(
                 list(checklist.items or []),
                 list(checklist.checked_items or []),
@@ -2081,12 +2975,14 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                 "kind": getattr(backpack, "kind", None) or "backpack",
                 "sort_order": getattr(backpack, "sort_order", 0) or 0,
                 "is_default": bool(getattr(backpack, "is_default", False)),
-                "label": _get_baggage_label(backpack),
+                "child_profile_id": getattr(backpack, "child_profile_id", None),
+                "label": _get_baggage_label(backpack, checklist),
                 "items": list(backpack.items or []),
                 "checked_items": list(backpack.checked_items or []),
                 "added_items": list(backpack.added_items or []),
                 "removed_items": list(backpack.removed_items or []),
                 "item_quantities": _normalize_quantity_map(getattr(backpack, "item_quantities", None)),
+                "item_categories": _normalize_item_category_map(getattr(backpack, "item_categories", None), language),
                 "packed_quantities": _hydrate_packed_quantities(
                     list(backpack.items or []),
                     list(backpack.checked_items or []),
@@ -2103,6 +2999,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
     added_items = snapshot["shared"]["added_items"]
     removed_items = snapshot["shared"]["removed_items"]
     item_quantities = snapshot["shared"]["item_quantities"]
+    item_categories = snapshot["shared"]["item_categories"]
     packed_quantities = snapshot["shared"]["packed_quantities"]
     action_results: list[dict[str, Any]] = []
 
@@ -2124,25 +3021,47 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
             target_section = _resolve_section_reference(checklist, action.get("target_hint"), actor_user_id)
             if not target_section:
                 continue
+            if target_section.get("kind") == "backpack":
+                target_backpack = next(
+                    (bp for bp in (checklist.backpacks or []) if bp.id == target_section.get("backpack_id")),
+                    None,
+                )
+                if not _can_edit_backpack(target_backpack, checklist, actor_user_id):
+                    action_results.append(_build_access_denied_result(target_backpack, language))
+                    continue
 
             moved_items: list[dict[str, Any]] = []
             for spec in item_specs:
                 requested_item = spec["item"]
                 source_section = _resolve_section_reference(checklist, action.get("source_hint"), actor_user_id)
                 if source_section and source_section.get("kind") == "backpack":
+                    source_backpack = next(
+                        (bp for bp in (checklist.backpacks or []) if bp.id == source_section.get("backpack_id")),
+                        None,
+                    )
+                    if not _can_edit_backpack(source_backpack, checklist, actor_user_id):
+                        action_results.append(_build_access_denied_result(source_backpack, language))
+                        continue
                     source_section = {
                         **source_section,
                         "snapshot": _get_backpack_snapshot(snapshot, source_section["backpack_id"]),
                         "matched_items": _resolve_requested_items(
                             [requested_item],
                             (_get_backpack_snapshot(snapshot, source_section["backpack_id"]) or {}).get("items", []),
+                            (_get_backpack_snapshot(snapshot, source_section["backpack_id"]) or {}).get("item_categories"),
+                            language,
                         ),
                     }
                 elif source_section and source_section.get("kind") == "shared":
                     source_section = {
                         **source_section,
                         "snapshot": snapshot["shared"],
-                        "matched_items": _resolve_requested_items([requested_item], snapshot["shared"]["items"]),
+                        "matched_items": _resolve_requested_items(
+                            [requested_item],
+                            snapshot["shared"]["items"],
+                            snapshot["shared"].get("item_categories"),
+                            language,
+                        ),
                     }
 
                 if not source_section:
@@ -2152,6 +3071,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                         requested_item,
                         target_section,
                         actor_user_id,
+                        language,
                     )
                     if not inferred:
                         continue
@@ -2161,7 +3081,12 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                 if not source_section.get("snapshot") or not target_snapshot:
                     continue
 
-                actual_items = source_section.get("matched_items") or _resolve_requested_items([requested_item], source_section["snapshot"]["items"])
+                actual_items = source_section.get("matched_items") or _resolve_requested_items(
+                    [requested_item],
+                    source_section["snapshot"]["items"],
+                    source_section["snapshot"].get("item_categories"),
+                    language,
+                )
                 if not actual_items:
                     continue
 
@@ -2190,6 +3115,8 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                             actual_item,
                             target_existing_packed + transfer_state["packed_quantity"],
                         )
+                        if transfer_state.get("category") and not _get_item_category(snapshot["shared"]["item_categories"], actual_item, language):
+                            _set_item_category(snapshot["shared"]["item_categories"], actual_item, transfer_state["category"], language)
                         snapshot["shared"]["removed_items"] = [
                             existing for existing in snapshot["shared"]["removed_items"]
                             if _normalize_item(existing) != normalized_item
@@ -2210,6 +3137,8 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                         )
                         if transfer_state["added"]:
                             _append_unique(target_snapshot["added_items"], actual_item)
+                        if transfer_state.get("category") and not _get_item_category(target_snapshot["item_categories"], actual_item, language):
+                            _set_item_category(target_snapshot["item_categories"], actual_item, transfer_state["category"], language)
                         target_snapshot["removed_items"] = [
                             existing for existing in target_snapshot["removed_items"]
                             if _normalize_item(existing) != normalized_item
@@ -2246,6 +3175,20 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
             action.get("section_hint"),
             actor_user_id,
         )
+        if not action_section:
+            action_results.append({
+                "type": "no_default_baggage",
+                "items": [],
+            })
+            continue
+        if action_section.get("kind") == "backpack":
+            action_backpack = next(
+                (bp for bp in (checklist.backpacks or []) if bp.id == action_section.get("backpack_id")),
+                None,
+            )
+            if not _can_edit_backpack(action_backpack, checklist, actor_user_id):
+                action_results.append(_build_access_denied_result(action_backpack, language))
+                continue
         is_shared_section = action_section["kind"] == "shared"
         section_snapshot = action_section["snapshot"]
 
@@ -2255,6 +3198,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
             section_added_items = added_items
             section_removed_items = removed_items
             section_item_quantities = item_quantities
+            section_item_categories = item_categories
             section_packed_quantities = packed_quantities
         else:
             section_items = section_snapshot["items"]
@@ -2262,6 +3206,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
             section_added_items = section_snapshot["added_items"]
             section_removed_items = section_snapshot["removed_items"]
             section_item_quantities = section_snapshot["item_quantities"]
+            section_item_categories = section_snapshot["item_categories"]
             section_packed_quantities = section_snapshot["packed_quantities"]
 
         if action_type == "add":
@@ -2275,12 +3220,20 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                 already_exists = any(_normalize_item(existing) == normalized_item for existing in section_items)
                 is_removed = any(_normalize_item(existing) == normalized_item for existing in section_removed_items)
                 current_quantity = _get_item_quantity(section_item_quantities, existing_item)
+                resolved_category = (
+                    _normalize_category_value(action.get("category_hint"), language)
+                    or _get_item_category(section_item_categories, existing_item, language)
+                    or _get_item_category(section_item_categories, cleaned_item, language)
+                    or _infer_item_category(cleaned_item, language)
+                )
 
                 if already_exists and is_removed:
                     section_removed_items = [
                         existing for existing in section_removed_items
                         if _normalize_item(existing) != normalized_item
                     ]
+                    if resolved_category:
+                        _set_item_category(section_item_categories, existing_item, resolved_category, language)
                     if spec["explicit_quantity"]:
                         next_quantity = current_quantity + spec["quantity"]
                         _set_item_quantity(section_item_quantities, existing_item, next_quantity)
@@ -2289,8 +3242,10 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                         action_results.append({
                             "type": "increase_quantity",
                             "items": [existing_item],
+                            "item_quantities": {_normalize_item(existing_item): next_quantity},
                             "amount": spec["quantity"],
                             "total_quantity": next_quantity,
+                            **({"category_hint": resolved_category} if resolved_category else {}),
                             **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
@@ -2304,12 +3259,15 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                         action_results.append({
                             "type": "restore",
                             "items": [existing_item],
+                            **({"category_hint": resolved_category} if resolved_category else {}),
                             **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
                     continue
 
                 if already_exists:
+                    if resolved_category:
+                        _set_item_category(section_item_categories, existing_item, resolved_category, language)
                     if spec["explicit_quantity"]:
                         next_quantity = current_quantity + spec["quantity"]
                         _set_item_quantity(section_item_quantities, existing_item, next_quantity)
@@ -2318,8 +3276,10 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                         action_results.append({
                             "type": "increase_quantity",
                             "items": [existing_item],
+                            "item_quantities": {_normalize_item(existing_item): next_quantity},
                             "amount": spec["quantity"],
                             "total_quantity": next_quantity,
+                            **({"category_hint": resolved_category} if resolved_category else {}),
                             **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
@@ -2328,6 +3288,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                             "type": "exists",
                             "items": [existing_item],
                             "total_quantity": current_quantity,
+                            **({"category_hint": resolved_category} if resolved_category else {}),
                             **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                             **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                         })
@@ -2336,6 +3297,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                 initial_quantity = spec["quantity"] if spec["explicit_quantity"] else 1
                 _set_item_quantity(section_item_quantities, cleaned_item, initial_quantity)
                 _set_item_packed_quantity(section_packed_quantities, cleaned_item, 0)
+                _set_item_category(section_item_categories, cleaned_item, resolved_category, language)
                 if all(_normalize_item(existing) != normalized_item for existing in section_added_items):
                     section_added_items.append(cleaned_item)
                 section_removed_items = [
@@ -2345,14 +3307,21 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
                 action_results.append({
                     "type": "add",
                     "items": [cleaned_item],
+                    "item_quantities": {_normalize_item(cleaned_item): initial_quantity},
                     "total_quantity": initial_quantity,
+                    **({"category_hint": resolved_category} if resolved_category else {}),
                     **({"section_label": action_section["label"]} if action_section["label"] != "список вещей" else {}),
                     **({"section_user_id": action_section.get("user_id")} if action_section.get("kind") == "backpack" else {}),
                 })
 
         elif action_type == "remove":
             for spec in item_specs:
-                matched_items = _resolve_requested_items([spec["item"]], section_items)
+                matched_items = _resolve_requested_items(
+                    [spec["item"]],
+                    section_items,
+                    section_item_categories,
+                    language,
+                )
                 if not matched_items:
                     action_results.append({
                         "type": "not_found",
@@ -2415,7 +3384,12 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
 
         elif action_type == "check":
             for spec in item_specs:
-                matched_items = _resolve_requested_items([spec["item"]], section_items)
+                matched_items = _resolve_requested_items(
+                    [spec["item"]],
+                    section_items,
+                    section_item_categories,
+                    language,
+                )
                 if not matched_items:
                     action_results.append({
                         "type": "not_found",
@@ -2459,7 +3433,12 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
 
         elif action_type == "uncheck":
             for spec in item_specs:
-                matched_items = _resolve_requested_items([spec["item"]], section_items)
+                matched_items = _resolve_requested_items(
+                    [spec["item"]],
+                    section_items,
+                    section_item_categories,
+                    language,
+                )
                 if not matched_items:
                     action_results.append({
                         "type": "not_found",
@@ -2507,6 +3486,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
             added_items = _dedupe_preserve(section_added_items)
             removed_items = _dedupe_preserve(section_removed_items)
             item_quantities = _normalize_quantity_map(section_item_quantities)
+            item_categories = _normalize_item_category_map(section_item_categories, language)
             packed_quantities = _normalize_packed_quantity_map(section_packed_quantities)
         else:
             section_snapshot["items"] = _dedupe_preserve(section_items)
@@ -2514,6 +3494,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
             section_snapshot["added_items"] = _dedupe_preserve(section_added_items)
             section_snapshot["removed_items"] = _dedupe_preserve(section_removed_items)
             section_snapshot["item_quantities"] = _normalize_quantity_map(section_item_quantities)
+            section_snapshot["item_categories"] = _normalize_item_category_map(section_item_categories, language)
             section_snapshot["packed_quantities"] = _normalize_packed_quantity_map(section_packed_quantities)
 
     return {
@@ -2523,6 +3504,7 @@ def _simulate_actions(checklist, actions: list[dict[str, Any]], actor_user_id: O
         "added_items": _dedupe_preserve(added_items),
         "removed_items": _dedupe_preserve(removed_items),
         "item_quantities": _normalize_quantity_map(item_quantities),
+        "item_categories": _normalize_item_category_map(item_categories, language),
         "packed_quantities": _normalize_packed_quantity_map(packed_quantities),
         "backpacks": snapshot["backpacks"],
     }
@@ -2533,8 +3515,10 @@ async def preview_checklist_ai_command(
     command: str,
     language: str = "ru",
     actor_user_id: Optional[int] = None,
+    command_context: Optional[dict[str, Any]] = None,
+    trip_context: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    parsed = await parse_checklist_actions(command, checklist, language, actor_user_id)
+    parsed = await parse_checklist_actions(command, checklist, language, actor_user_id, command_context, trip_context)
     actions = parsed["actions"]
     recognized_action_request = parsed["recognized_action_request"]
     info_request = parsed.get("info_request")
@@ -2548,6 +3532,7 @@ async def preview_checklist_ai_command(
             "message": _build_info_message(checklist, info_request, language, actor_user_id),
             "checklist": checklist,
             "requires_confirmation": False,
+            "command_context": None,
         }
 
     if not actions:
@@ -2559,24 +3544,34 @@ async def preview_checklist_ai_command(
             "message": _build_noop_message(recognized_action_request, language),
             "checklist": checklist,
             "requires_confirmation": False,
+            "command_context": None,
         }
 
     baggage_actions = [action for action in actions if action.get("type") == "create_baggage"]
     if baggage_actions:
-        owner_id = actor_user_id or checklist.user_id
         existing_names = {
-            _normalize_for_matching(_get_baggage_name(backpack))
+            (
+                getattr(backpack, "user_id", None),
+                getattr(backpack, "child_profile_id", None),
+                _normalize_for_matching(_get_baggage_name(backpack)),
+            )
             for backpack in (checklist.backpacks or [])
-            if backpack.user_id == owner_id
         }
         action_results = []
         for action in baggage_actions:
             baggage_name = next(iter(action.get("items") or []), "").strip()
             if not baggage_name:
                 continue
-            if _normalize_for_matching(baggage_name) in existing_names:
+            owner_id = action.get("target_user_id") or actor_user_id or checklist.user_id
+            child_profile_id = action.get("child_profile_id")
+            if (owner_id, child_profile_id, _normalize_for_matching(baggage_name)) in existing_names:
                 continue
-            action_results.append({"type": "create_baggage", "items": [baggage_name]})
+            action_results.append({
+                "type": "create_baggage",
+                "items": [baggage_name],
+                **({"section_user_id": owner_id} if owner_id else {}),
+                **({"child_profile_id": child_profile_id} if child_profile_id else {}),
+            })
 
         if not action_results:
             return {
@@ -2587,6 +3582,7 @@ async def preview_checklist_ai_command(
                 "message": _build_noop_message(True, language),
                 "checklist": checklist,
                 "requires_confirmation": False,
+                "command_context": None,
             }
 
         return {
@@ -2597,9 +3593,10 @@ async def preview_checklist_ai_command(
             "message": _build_success_message(action_results, checklist, language, actor_user_id),
             "checklist": checklist,
             "requires_confirmation": False,
+            "command_context": _build_command_context(action_results),
         }
 
-    simulated = _simulate_actions(checklist, actions, actor_user_id)
+    simulated = _simulate_actions(checklist, actions, actor_user_id, language)
     action_results = simulated["action_results"]
 
     if not action_results:
@@ -2611,6 +3608,7 @@ async def preview_checklist_ai_command(
             "message": _build_noop_message(True, language),
             "checklist": checklist,
             "requires_confirmation": False,
+            "command_context": None,
         }
 
     requires_confirmation = any(
@@ -2626,6 +3624,7 @@ async def preview_checklist_ai_command(
         "message": _build_success_message(action_results, checklist, language, actor_user_id),
         "checklist": checklist,
         "requires_confirmation": requires_confirmation,
+        "command_context": _build_command_context(action_results),
     }
 
 
@@ -2638,28 +3637,34 @@ async def apply_checklist_ai_actions(
 ) -> dict[str, Any]:
     baggage_actions = [action for action in actions if action.get("type") == "create_baggage"]
     if baggage_actions:
-        owner_id = actor_user_id or checklist.user_id
-        if not owner_id:
+        default_owner_id = actor_user_id or checklist.user_id
+        if not default_owner_id:
             return {
                 "applied": False,
                 "recognized_action_request": True,
                 "actions": actions,
                 "message": _build_noop_message(True, language),
                 "checklist": checklist,
+                "command_context": None,
             }
 
         existing_names = {
-            _normalize_for_matching(_get_baggage_name(backpack))
+            (
+                getattr(backpack, "user_id", None),
+                getattr(backpack, "child_profile_id", None),
+                _normalize_for_matching(_get_baggage_name(backpack)),
+            )
             for backpack in (checklist.backpacks or [])
-            if backpack.user_id == owner_id
         }
         action_results = []
         for action in baggage_actions:
             baggage_name = next(iter(action.get("items") or []), "").strip()
             if not baggage_name:
                 continue
+            owner_id = action.get("target_user_id") or action.get("section_user_id") or default_owner_id
+            child_profile_id = action.get("child_profile_id")
             normalized_name = _normalize_for_matching(baggage_name)
-            if normalized_name in existing_names:
+            if (owner_id, child_profile_id, normalized_name) in existing_names:
                 continue
             await crud.create_user_baggage(
                 db,
@@ -2667,9 +3672,15 @@ async def apply_checklist_ai_actions(
                 user_id=owner_id,
                 name=baggage_name,
                 kind=action.get("baggage_kind") or _guess_baggage_kind(baggage_name),
+                child_profile_id=child_profile_id,
             )
-            existing_names.add(normalized_name)
-            action_results.append({"type": "create_baggage", "items": [baggage_name]})
+            existing_names.add((owner_id, child_profile_id, normalized_name))
+            action_results.append({
+                "type": "create_baggage",
+                "items": [baggage_name],
+                **({"section_user_id": owner_id} if owner_id else {}),
+                **({"child_profile_id": child_profile_id} if child_profile_id else {}),
+            })
 
         updated_checklist = await crud.get_checklist_by_id(db, checklist.id)
         if not action_results:
@@ -2679,6 +3690,7 @@ async def apply_checklist_ai_actions(
                 "actions": actions,
                 "message": _build_noop_message(True, language),
                 "checklist": updated_checklist or checklist,
+                "command_context": None,
             }
 
         return {
@@ -2687,9 +3699,10 @@ async def apply_checklist_ai_actions(
             "actions": action_results,
             "message": _build_success_message(action_results, updated_checklist or checklist, language, actor_user_id),
             "checklist": updated_checklist or checklist,
+            "command_context": _build_command_context(action_results),
         }
 
-    simulated = _simulate_actions(checklist, actions, actor_user_id)
+    simulated = _simulate_actions(checklist, actions, actor_user_id, language)
     action_results = simulated["action_results"]
 
     if not action_results:
@@ -2699,6 +3712,7 @@ async def apply_checklist_ai_actions(
             "actions": actions,
             "message": _build_noop_message(True, language),
             "checklist": checklist,
+            "command_context": None,
         }
 
     checklist.items = simulated["items"]
@@ -2706,6 +3720,7 @@ async def apply_checklist_ai_actions(
     checklist.added_items = simulated["added_items"]
     checklist.removed_items = simulated["removed_items"]
     checklist.item_quantities = simulated["item_quantities"]
+    checklist.item_categories = simulated["item_categories"]
     checklist.packed_quantities = simulated["packed_quantities"]
     backpack_map = {backpack.id: backpack for backpack in (checklist.backpacks or [])}
     for backpack_snapshot in simulated["backpacks"]:
@@ -2717,6 +3732,7 @@ async def apply_checklist_ai_actions(
         backpack.added_items = _dedupe_preserve(backpack_snapshot["added_items"])
         backpack.removed_items = _dedupe_preserve(backpack_snapshot["removed_items"])
         backpack.item_quantities = _normalize_quantity_map(backpack_snapshot.get("item_quantities"))
+        backpack.item_categories = _normalize_item_category_map(backpack_snapshot.get("item_categories"), language)
         backpack.packed_quantities = _normalize_packed_quantity_map(backpack_snapshot.get("packed_quantities"))
 
     await db.commit()
@@ -2728,6 +3744,7 @@ async def apply_checklist_ai_actions(
         "actions": action_results,
         "message": _build_success_message(action_results, updated_checklist, language, actor_user_id),
         "checklist": updated_checklist,
+        "command_context": _build_command_context(action_results),
     }
 
 
@@ -2737,8 +3754,56 @@ async def execute_checklist_ai_command(
     command: str,
     language: str = "ru",
     actor_user_id: Optional[int] = None,
+    command_context: Optional[dict[str, Any]] = None,
+    trip_context: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    preview = await preview_checklist_ai_command(checklist, command, language, actor_user_id)
+    packing_followup = extract_packing_followup(command, command_context, language)
+    if packing_followup["recognized_action_request"]:
+        selected_recommendations = packing_followup.get("recommendations") or []
+        next_context = None if packing_followup.get("clear_context") else command_context
+        if not selected_recommendations:
+            return {
+                "applied": False,
+                "recognized_action_request": True,
+                "actions": [],
+                "message": packing_followup.get("message") or _build_noop_message(True, language),
+                "checklist": checklist,
+                "command_context": next_context,
+            }
+
+        owner_id = actor_user_id or getattr(checklist, "user_id", None)
+        if not owner_id:
+            return {
+                "applied": False,
+                "recognized_action_request": True,
+                "actions": [],
+                "message": (
+                    "Нужно войти в аккаунт, чтобы применить рекомендации к багажу."
+                    if language == "ru"
+                    else "You need to sign in before applying recommendations to baggage."
+                ),
+                "checklist": checklist,
+                "command_context": command_context,
+            }
+
+        apply_result = await apply_packing_recommendations(
+            db,
+            checklist,
+            selected_recommendations,
+            actor_user_id=owner_id,
+            language=language,
+        )
+        remaining_context = build_remaining_packing_context(command_context, selected_recommendations)
+        return {
+            "applied": bool(apply_result.get("applied_count")),
+            "recognized_action_request": True,
+            "actions": apply_result.get("actions") or [],
+            "message": format_packing_apply_message(apply_result, selected_recommendations, language),
+            "checklist": apply_result.get("checklist") or checklist,
+            "command_context": None if packing_followup.get("clear_context") else remaining_context,
+        }
+
+    preview = await preview_checklist_ai_command(checklist, command, language, actor_user_id, command_context, trip_context)
     if not preview["recognized_action_request"] or not preview["actions"]:
         return preview
     return await apply_checklist_ai_actions(

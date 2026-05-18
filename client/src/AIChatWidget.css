@@ -69,10 +69,10 @@
 
 /* Chat Widget */
 .ai-chat-widget {
-  width: 380px;
+  width: 480px;
   max-width: calc(100vw - 48px);
-  height: 520px;
-  max-height: calc(100vh - 120px);
+  height: 680px;
+  max-height: calc(100vh - 72px);
   background: #141414;
   border: 1px solid rgba(255, 153, 0, 0.15);
   border-radius: 20px;
@@ -161,6 +161,12 @@
   max-width: 85%;
 }
 
+.ai-msg-content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .ai-msg.user {
   align-self: flex-end;
 }
@@ -194,6 +200,526 @@
 .ai-msg.ai .ai-msg-bubble strong {
   color: #ff9900;
   font-weight: 600;
+}
+
+.ai-plan-proposals {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-plan-card {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 153, 0, 0.12);
+  border-radius: 12px;
+  padding: 10px 12px;
+  color: #d6d6d6;
+  cursor: pointer;
+}
+
+.ai-plan-card.applied {
+  border-color: rgba(80, 200, 120, 0.28);
+  background: rgba(80, 200, 120, 0.08);
+}
+
+.ai-plan-card.meal-choice {
+  border-color: rgba(255, 153, 0, 0.32);
+  background:
+    linear-gradient(135deg, rgba(255, 153, 0, 0.1), transparent 56%),
+    rgba(255, 255, 255, 0.045);
+}
+
+.ai-plan-card.danger {
+  border-color: rgba(255, 90, 90, 0.2);
+  background: rgba(255, 90, 90, 0.06);
+}
+
+.ai-plan-card input {
+  margin-top: 2px;
+  accent-color: #ff9900;
+}
+
+.ai-plan-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ai-plan-card-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 0.72rem;
+  color: #9d9d9d;
+}
+
+.ai-plan-card-title {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #f2f2f2;
+}
+
+.ai-plan-card-meta {
+  font-size: 0.74rem;
+  line-height: 1.4;
+  color: #adadad;
+}
+
+.ai-plan-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.ai-plan-edit-input {
+  width: 100%;
+  box-sizing: border-box;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 153, 0, 0.15);
+  background: rgba(16, 16, 16, 0.9);
+  color: #f0f0f0;
+  padding: 8px 10px;
+  font-size: 0.76rem;
+  font-family: inherit;
+  outline: none;
+}
+
+select.ai-plan-edit-input {
+  appearance: none;
+  padding-right: 28px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    calc(100% - 16px) 52%,
+    calc(100% - 11px) 52%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+.ai-plan-edit-input:focus {
+  border-color: rgba(255, 153, 0, 0.45);
+  box-shadow: 0 0 0 2px rgba(255, 153, 0, 0.08);
+}
+
+.ai-plan-edit-input-full {
+  grid-column: 1 / -1;
+}
+
+.ai-plan-edit-textarea {
+  resize: vertical;
+  min-height: 74px;
+}
+
+.ai-apply-plan-btn {
+  border: none;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #ff9900, #ffae42);
+  color: #111;
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+
+.ai-apply-plan-btn:hover {
+  transform: translateY(-1px);
+}
+
+.ai-apply-plan-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.ai-restaurant-proposals {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-restaurant-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 0.76rem;
+  color: #adadad;
+}
+
+.ai-restaurant-heading strong {
+  color: #f2f2f2;
+  font-size: 0.82rem;
+}
+
+.ai-restaurant-note {
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: #9d9d9d;
+}
+
+.ai-restaurant-attribution {
+  align-self: flex-end;
+  font-size: 0.62rem;
+  line-height: 1.3;
+  color: var(--text-muted, #7f746c);
+  opacity: 0.62;
+}
+
+.ai-restaurant-attribution summary {
+  list-style: none;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.ai-restaurant-attribution summary::-webkit-details-marker {
+  display: none;
+}
+
+.ai-restaurant-attribution span {
+  display: block;
+  margin-top: 3px;
+}
+
+.ai-restaurant-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 153, 0, 0.14);
+  background:
+    linear-gradient(135deg, rgba(255, 153, 0, 0.08), transparent 42%),
+    rgba(255, 255, 255, 0.035);
+  color: #d6d6d6;
+}
+
+.ai-plan-restaurant-slot {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle, rgba(255, 153, 0, 0.12));
+}
+
+.ai-restaurant-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-restaurant-inline + .ai-restaurant-inline {
+  margin-top: 10px;
+}
+
+.ai-restaurant-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ai-restaurant-dropdown {
+  position: relative;
+}
+
+.ai-restaurant-select-button {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 153, 0, 0.22);
+  background:
+    linear-gradient(135deg, rgba(255, 153, 0, 0.1), rgba(255, 255, 255, 0.02)),
+    var(--surface-strong, rgba(255, 255, 255, 0.04));
+  color: var(--text-primary, #f2f2f2);
+  padding: 11px 12px;
+  font-size: 0.78rem;
+  font-weight: 800;
+  font-family: inherit;
+  outline: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  text-align: left;
+}
+
+.ai-restaurant-select-button span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-restaurant-select-button:focus,
+.ai-restaurant-select-button.open {
+  border-color: rgba(255, 153, 0, 0.5);
+  box-shadow: 0 0 0 2px rgba(255, 153, 0, 0.1);
+}
+
+.ai-restaurant-select-chevron {
+  flex: 0 0 auto;
+  color: var(--orange, #ff9900);
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.ai-restaurant-menu {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 153, 0, 0.18);
+  background: var(--bg-elevated, #17130f);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.22);
+}
+
+.ai-restaurant-menu-item {
+  border: 0;
+  border-radius: 10px;
+  padding: 9px 10px;
+  background: transparent;
+  color: var(--text-primary, #f2f2f2);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ai-restaurant-menu-item:hover,
+.ai-restaurant-menu-item.active {
+  background: rgba(255, 153, 0, 0.12);
+}
+
+.ai-restaurant-menu-item strong {
+  font-size: 0.8rem;
+  line-height: 1.25;
+}
+
+.ai-restaurant-menu-item span {
+  color: var(--text-secondary, #9d9d9d);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.ai-restaurant-selected-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 153, 0, 0.12);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.ai-restaurant-selected-summary div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ai-restaurant-selected-summary strong {
+  color: var(--text-primary, #f2f2f2);
+  font-size: 0.82rem;
+  line-height: 1.25;
+}
+
+.ai-restaurant-selected-summary span {
+  color: #9d9d9d;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.ai-restaurant-custom-note {
+  color: #9d9d9d;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.ai-restaurant-card.compact {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.ai-restaurant-card.applied {
+  border-color: rgba(80, 200, 120, 0.28);
+  background: rgba(80, 200, 120, 0.08);
+}
+
+.ai-restaurant-card-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ai-restaurant-card-kicker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #ffae42;
+}
+
+.ai-restaurant-card-kicker span {
+  color: #9d9d9d;
+  font-weight: 600;
+}
+
+.ai-restaurant-card-title {
+  margin-top: 3px;
+  color: #f2f2f2;
+  font-size: 0.88rem;
+  line-height: 1.25;
+  font-weight: 800;
+}
+
+.ai-restaurant-card-description {
+  color: #b8b8b8;
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.ai-restaurant-address {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  color: var(--orange, #ff9900);
+  background: var(--surface-soft, rgba(255, 153, 0, 0.06));
+  border: 1px solid var(--border-subtle, rgba(255, 153, 0, 0.14));
+  border-radius: 10px;
+  padding: 6px 8px;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.ai-restaurant-address:hover {
+  background: var(--orange-glow, rgba(255, 153, 0, 0.1));
+  border-color: rgba(255, 153, 0, 0.28);
+}
+
+.ai-restaurant-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ai-restaurant-card.compact .ai-restaurant-card-actions {
+  justify-content: flex-end;
+}
+
+.ai-restaurant-more {
+  width: fit-content;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle, rgba(255, 153, 0, 0.16));
+  background: var(--surface-soft, rgba(255, 255, 255, 0.04));
+  color: var(--orange, #ff9900);
+  padding: 7px 11px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.ai-restaurant-more:hover {
+  border-color: rgba(255, 153, 0, 0.3);
+  background: var(--orange-glow, rgba(255, 153, 0, 0.08));
+}
+
+.ai-restaurant-choose {
+  border-radius: 999px;
+  border: 1px solid rgba(255, 153, 0, 0.18);
+  padding: 7px 11px;
+  font-size: 0.73rem;
+  font-weight: 800;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.ai-restaurant-choose {
+  color: #111;
+  background: linear-gradient(135deg, #ff9900, #ffae42);
+}
+
+.ai-restaurant-skip {
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle, rgba(255, 153, 0, 0.16));
+  background: var(--surface-soft, rgba(255, 255, 255, 0.04));
+  color: var(--text-secondary, #b8b8b8);
+  padding: 7px 11px;
+  font-size: 0.73rem;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.ai-restaurant-hide {
+  border-radius: 999px;
+  border: 1px solid rgba(190, 92, 70, 0.22);
+  background: rgba(190, 92, 70, 0.07);
+  color: var(--text-secondary, #b8b8b8);
+  padding: 7px 11px;
+  font-size: 0.73rem;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.ai-restaurant-hide:hover:not(:disabled) {
+  color: #d37b62;
+  border-color: rgba(190, 92, 70, 0.36);
+  background: rgba(190, 92, 70, 0.11);
+}
+
+.ai-restaurant-hide:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.ai-restaurant-skip:hover:not(:disabled) {
+  color: var(--orange, #ff9900);
+  border-color: rgba(255, 153, 0, 0.3);
+  background: var(--orange-glow, rgba(255, 153, 0, 0.08));
+}
+
+.ai-restaurant-skip:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.ai-restaurant-choose:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 /* Typing Indicator */
@@ -242,7 +768,7 @@
   font-size: 0.75rem;
   cursor: pointer;
   transition: all 0.15s;
-  font-family: 'Inter', sans-serif;
+  font-family: var(--font-sans, 'Manrope', sans-serif);
   white-space: nowrap;
 }
 
@@ -257,13 +783,84 @@
   cursor: not-allowed;
 }
 
-/* Input Area */
+
+
+.ai-commands-toggle-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 12px;
+  background: var(--surface-strong, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border-subtle, rgba(255, 153, 0, 0.15));
+  color: var(--text-secondary, #b8b8b8);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.ai-commands-toggle-btn:hover {
+  color: var(--orange, #ff9900);
+  border-color: rgba(255, 153, 0, 0.3);
+  background: rgba(255, 153, 0, 0.08);
+}
+
+.ai-commands-menu-popup {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  border-radius: 14px;
+  border: 1px solid var(--border-subtle, rgba(255, 153, 0, 0.18));
+  background: var(--bg-elevated, #17130f);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.22);
+  z-index: 20;
+  min-width: 140px;
+}
+
+.ai-command-menu-item {
+  border: 0;
+  border-radius: 10px;
+  padding: 9px 12px;
+  background: transparent;
+  color: var(--text-primary, #f2f2f2);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+  transition: background 0.1s;
+}
+
+.ai-command-menu-item:hover {
+  background: rgba(255, 153, 0, 0.12);
+  color: var(--orange, #ff9900);
+}
+
+.ai-command-menu-item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.ai-command-menu-item-danger {
+  color: var(--danger, #e05555);
+}
+
+.ai-command-menu-item-danger:hover {
+  background: rgba(224, 85, 85, 0.12);
+  color: var(--danger, #e05555);
+}
+
 .ai-chat-input-area {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 10px 16px 12px;
   background: #161616;
 }
 
@@ -275,7 +872,7 @@
   border-radius: 12px;
   color: #f0f0f0;
   font-size: 0.85rem;
-  font-family: 'Inter', sans-serif;
+  font-family: var(--font-sans, 'Manrope', sans-serif);
   outline: none;
   transition: border-color 0.2s;
 }
@@ -329,7 +926,7 @@
   .ai-chat-widget {
     width: auto;
     max-width: none;
-    height: min(70dvh, 560px);
+    height: min(78dvh, 640px);
     max-height: calc(100dvh - 32px);
   }
 }
@@ -364,4 +961,117 @@
     width: 50px;
     height: 50px;
   }
+}
+
+/* Theme refresh */
+.ai-fab {
+  background: linear-gradient(135deg, var(--orange, #ff9900), var(--orange-light, #ffae42));
+  color: var(--text-on-accent, #0d0d0d);
+  border: 1px solid var(--border-subtle, rgba(255, 153, 0, 0.15));
+  box-shadow: var(--shadow-soft, 0 4px 20px rgba(255, 153, 0, 0.4));
+  animation: none;
+}
+
+.ai-fab:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 20px 36px var(--orange-glow-strong, rgba(255, 153, 0, 0.22));
+}
+
+.ai-fab-badge {
+  background: var(--bg-elevated, #0d0d0d);
+  color: var(--orange, #ff9900);
+  border-color: var(--border-active, rgba(255, 153, 0, 0.3));
+}
+
+.ai-chat-widget {
+  background: var(--bg-elevated, #141414);
+  border-color: var(--border-subtle, rgba(255, 153, 0, 0.15));
+  box-shadow: var(--shadow-panel, 0 16px 64px rgba(0, 0, 0, 0.6));
+}
+
+.ai-chat-header {
+  background: linear-gradient(135deg, var(--orange-glow, rgba(255, 153, 0, 0.08)), transparent);
+  border-bottom-color: var(--border-subtle, rgba(255, 153, 0, 0.1));
+}
+
+.ai-chat-avatar,
+.ai-msg.user .ai-msg-bubble,
+.ai-apply-plan-btn,
+.ai-chat-send {
+  background: linear-gradient(135deg, var(--orange, #ff9900), var(--orange-light, #ffae42));
+  color: var(--text-on-accent, #0d0d0d);
+}
+
+.ai-chat-title,
+.ai-plan-card-title,
+.ai-restaurant-heading strong,
+.ai-restaurant-card-title {
+  color: var(--text-primary, #f0f0f0);
+}
+
+.ai-chat-subtitle,
+.ai-plan-card-head,
+.ai-plan-card-meta,
+.ai-restaurant-note,
+.ai-restaurant-attribution,
+.ai-restaurant-card-kicker span,
+.ai-restaurant-card-description {
+  color: var(--text-secondary, #888);
+}
+
+.ai-chat-close {
+  color: var(--text-muted, #666);
+}
+
+.ai-chat-close:hover {
+  color: var(--danger, #ff4d4d);
+}
+
+.ai-msg.ai .ai-msg-bubble,
+.ai-plan-card,
+.ai-restaurant-card,
+.ai-plan-edit-input,
+.ai-chat-input-area,
+.ai-chat-input,
+.ai-suggestion-btn {
+  background: var(--surface-strong, rgba(255, 255, 255, 0.04));
+  border-color: var(--border-subtle, rgba(255, 153, 0, 0.15));
+  color: var(--text-primary, #d0d0d0);
+}
+
+.ai-msg.ai .ai-msg-bubble strong,
+.ai-suggestion-btn:hover,
+.ai-restaurant-card-kicker,
+.ai-restaurant-address {
+  color: var(--orange, #ff9900);
+}
+
+.ai-plan-card.applied,
+.ai-restaurant-card.applied {
+  border-color: rgba(76, 143, 103, 0.28);
+  background: rgba(76, 143, 103, 0.08);
+}
+
+.ai-plan-card.danger {
+  border-color: rgba(196, 84, 84, 0.22);
+  background: rgba(196, 84, 84, 0.08);
+}
+
+.ai-plan-edit-input:focus,
+.ai-chat-input:focus {
+  border-color: var(--orange, #ff9900);
+  box-shadow: 0 0 0 2px var(--orange-glow, rgba(255, 153, 0, 0.08));
+}
+
+.ai-restaurant-choose {
+  background: linear-gradient(135deg, var(--orange, #ff9900), var(--orange-light, #ffae42));
+  color: var(--text-on-accent, #111);
+}
+
+.ai-chat-input::placeholder {
+  color: var(--text-muted, #555);
+}
+
+.ai-typing span {
+  background: var(--text-muted, #666);
 }

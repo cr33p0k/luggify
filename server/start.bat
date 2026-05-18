@@ -5,10 +5,10 @@ echo.
 REM Активация виртуального окружения
 call venv\Scripts\activate.bat
 
-REM Проверка наличия .env файла
-if not exist .env (
-    echo ERROR: .env file not found!
-    echo Please create .env file based on .env.example
+REM Проверка наличия общего .env файла в корне проекта
+if not exist ..\.env (
+    echo ERROR: ..\.env file not found!
+    echo Please create the project root .env based on .env.example
     pause
     exit /b 1
 )

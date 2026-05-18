@@ -6,6 +6,7 @@ import models
 import schemas
 import uuid
 from auth import get_password_hash
+from packing_logic import normalize_trip_profile
 
 
 DEFAULT_BAGGAGE_NAME = "Рюкзак"
@@ -42,6 +43,7 @@ def _normalize_packing_profile(profile: dict | None) -> dict:
         "gender": gender,
         "traveling_with_pet": bool(source.get("traveling_with_pet")),
         "has_allergies": bool(source.get("has_allergies")),
+        "traveling_with_children": bool(source.get("traveling_with_children")),
         "always_include_items": _normalize_packing_profile_items(source.get("always_include_items")),
     }
 
@@ -375,10 +377,13 @@ async def create_checklist(db: AsyncSession, data: schemas.ChecklistCreate):
         added_items=data.added_items,
         item_quantities=data.item_quantities or {},
         packed_quantities=data.packed_quantities or {},
+        item_categories=data.item_categories or {},
+        item_translations=data.item_translations or {},
         daily_forecast=[f.model_dump(mode='json') if hasattr(f, 'model_dump') else f for f in data.daily_forecast] if data.daily_forecast else None,
         user_id=data.user_id,
         origin_city=data.origin_city,
         transports=data.transports,
+        trip_profile=data.trip_profile.model_dump(mode="json") if hasattr(data.trip_profile, "model_dump") else (data.trip_profile or {}),
     )
     db.add(checklist)
     await db.commit()
@@ -496,6 +501,9 @@ async def update_checklist_state(
     items=None,
     item_quantities=None,
     packed_quantities=None,
+    item_categories=None,
+    item_translations=None,
+    trip_profile=None,
 ):
     result = await db.execute(select(models.Checklist).where(models.Checklist.slug == slug))
     checklist = result.scalar_one_or_none()
@@ -513,6 +521,13 @@ async def update_checklist_state(
         checklist.item_quantities = item_quantities
     if packed_quantities is not None:
         checklist.packed_quantities = packed_quantities
+    if item_categories is not None:
+        checklist.item_categories = item_categories
+    if item_translations is not None:
+        checklist.item_translations = item_translations
+    if trip_profile is not None:
+        current_profile = checklist.trip_profile if isinstance(checklist.trip_profile, dict) else {}
+        checklist.trip_profile = normalize_trip_profile({**current_profile, **trip_profile})
     await db.commit()
     await db.refresh(checklist)
     return checklist
@@ -577,7 +592,14 @@ async def create_itinerary_event(db: AsyncSession, checklist_id: int, data: sche
         time=data.time,
         title=data.title,
         description=data.description,
-        address=data.address
+        address=data.address,
+        lat=data.lat,
+        lng=data.lng,
+        place_source=data.place_source,
+        duration_minutes=data.duration_minutes,
+        travel_buffer_minutes=data.travel_buffer_minutes,
+        event_type=data.event_type,
+        meta=data.meta or {},
     )
     db.add(new_event)
     await db.commit()
@@ -606,6 +628,96 @@ async def delete_itinerary_event(db: AsyncSession, event_id: int):
         return True
     return False
 
+
+# === Trip Expenses CRUD ===
+
+async def get_expense_by_id(db: AsyncSession, expense_id: int):
+    result = await db.execute(select(models.TripExpense).where(models.TripExpense.id == expense_id))
+    return result.scalar_one_or_none()
+
+
+async def get_expenses_by_checklist_id(db: AsyncSession, checklist_id: int):
+    result = await db.execute(
+        select(models.TripExpense)
+        .where(models.TripExpense.checklist_id == checklist_id)
+        .order_by(models.TripExpense.expense_date.desc().nullslast(), models.TripExpense.created_at.desc())
+    )
+    return result.scalars().all()
+
+
+async def create_trip_expense(
+    db: AsyncSession,
+    checklist_id: int,
+    data: schemas.TripExpenseCreate,
+    *,
+    created_by_user_id: int | None,
+    amount_base: float,
+    base_currency: str,
+    fx_rate: float,
+    fx_rate_date: str | None,
+    fx_provider: str | None,
+):
+    expense = models.TripExpense(
+        checklist_id=checklist_id,
+        created_by_user_id=created_by_user_id,
+        expense_date=data.expense_date,
+        title=data.title.strip(),
+        category=(data.category or "other").strip().lower(),
+        amount=float(data.amount),
+        currency=data.currency.upper(),
+        amount_base=amount_base,
+        base_currency=base_currency.upper(),
+        fx_rate=fx_rate,
+        fx_rate_date=fx_rate_date,
+        fx_provider=fx_provider,
+        note=(data.note or None),
+    )
+    db.add(expense)
+    await db.commit()
+    await db.refresh(expense)
+    return expense
+
+
+async def update_trip_expense(
+    db: AsyncSession,
+    expense: models.TripExpense,
+    data: schemas.TripExpenseUpdate,
+    *,
+    amount_base: float | None = None,
+    base_currency: str | None = None,
+    fx_rate: float | None = None,
+    fx_rate_date: str | None = None,
+    fx_provider: str | None = None,
+):
+    update_data = data.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        if key == "currency" and value:
+            value = str(value).upper()
+        if key == "category" and value:
+            value = str(value).strip().lower()
+        if key == "title" and value:
+            value = str(value).strip()
+        setattr(expense, key, value)
+    if amount_base is not None:
+        expense.amount_base = amount_base
+    if base_currency is not None:
+        expense.base_currency = base_currency.upper()
+    if fx_rate is not None:
+        expense.fx_rate = fx_rate
+    if fx_rate_date is not None:
+        expense.fx_rate_date = fx_rate_date
+    if fx_provider is not None:
+        expense.fx_provider = fx_provider
+    await db.commit()
+    await db.refresh(expense)
+    return expense
+
+
+async def delete_trip_expense(db: AsyncSession, expense: models.TripExpense):
+    await db.delete(expense)
+    await db.commit()
+    return True
+
 # === Shared Backpacks CRUD ===
 
 def _normalize_baggage_kind(kind: str | None) -> str:
@@ -628,6 +740,30 @@ async def get_backpacks_by_user(db: AsyncSession, checklist_id: int, user_id: in
             models.UserBackpack.user_id == user_id,
         )
         .order_by(
+            models.UserBackpack.is_default.desc(),
+            models.UserBackpack.sort_order.asc(),
+            models.UserBackpack.id.asc(),
+        )
+    )
+    return result.scalars().all()
+
+
+async def get_backpacks_by_owner_scope(
+    db: AsyncSession,
+    checklist_id: int,
+    user_id: int,
+    child_profile_id: str | None = None,
+):
+    stmt = select(models.UserBackpack).where(
+        models.UserBackpack.checklist_id == checklist_id,
+        models.UserBackpack.user_id == user_id,
+    )
+    if child_profile_id:
+        stmt = stmt.where(models.UserBackpack.child_profile_id == child_profile_id)
+    else:
+        stmt = stmt.where(models.UserBackpack.child_profile_id.is_(None))
+    result = await db.execute(
+        stmt.order_by(
             models.UserBackpack.is_default.desc(),
             models.UserBackpack.sort_order.asc(),
             models.UserBackpack.id.asc(),
@@ -664,14 +800,22 @@ async def create_user_backpack(
     user_id: int,
     name: str | None = None,
     kind: str | None = None,
+    child_profile_id: str | None = None,
     is_default: bool | None = None,
     items: list[str] | None = None,
+    item_quantities: dict[str, int] | None = None,
+    item_categories: dict[str, str] | None = None,
+    item_translations: dict[str, dict[str, str]] | None = None,
 ):
-    existing_backpacks = await get_backpacks_by_user(db, checklist_id, user_id)
+    normalized_child_profile_id = (child_profile_id or "").strip() or None
+    existing_backpacks = await get_backpacks_by_owner_scope(db, checklist_id, user_id, normalized_child_profile_id)
     normalized_kind = _normalize_baggage_kind(kind)
     normalized_name = _normalize_baggage_name(name, normalized_kind)
     initial_items = _normalize_packing_profile_items(items)
-    initial_quantities = {item: 1 for item in initial_items}
+    initial_quantities = {
+        item: max(int((item_quantities or {}).get(item, 1) or 1), 1)
+        for item in initial_items
+    }
 
     if name is None and kind is None:
         existing_default = next((bp for bp in existing_backpacks if bp.is_default), None)
@@ -696,6 +840,7 @@ async def create_user_backpack(
     new_backpack = models.UserBackpack(
         checklist_id=checklist_id,
         user_id=user_id,
+        child_profile_id=normalized_child_profile_id,
         name=normalized_name,
         kind=normalized_kind,
         sort_order=max_sort_order + 1,
@@ -707,6 +852,8 @@ async def create_user_backpack(
         removed_items=[],
         item_quantities=initial_quantities,
         packed_quantities={},
+        item_categories=item_categories or {},
+        item_translations=item_translations or {},
     )
     db.add(new_backpack)
     await db.commit()
@@ -720,6 +867,7 @@ async def create_user_baggage(
     user_id: int,
     name: str,
     kind: str | None = None,
+    child_profile_id: str | None = None,
 ):
     return await create_user_backpack(
         db,
@@ -727,6 +875,7 @@ async def create_user_baggage(
         user_id=user_id,
         name=name,
         kind=kind or "custom",
+        child_profile_id=child_profile_id,
         is_default=False,
     )
 
@@ -755,7 +904,7 @@ async def update_baggage_meta(db: AsyncSession, backpack_id: int, data: schemas.
     update_data = data.model_dump(exclude_unset=True)
     owned_backpacks = None
     if update_data.get("is_default") is True or "editor_user_ids" in update_data:
-        owned_backpacks = await get_backpacks_by_user(db, backpack.checklist_id, backpack.user_id)
+        owned_backpacks = await get_backpacks_by_owner_scope(db, backpack.checklist_id, backpack.user_id, backpack.child_profile_id)
 
     if update_data.get("is_default") is True and owned_backpacks is not None:
         for existing in owned_backpacks:
@@ -781,12 +930,20 @@ async def update_baggage_meta(db: AsyncSession, backpack_id: int, data: schemas.
 
 
 def baggage_has_content(backpack: models.UserBackpack) -> bool:
-    return bool(
-        (backpack.items or [])
-        or (backpack.checked_items or [])
-        or (backpack.added_items or [])
-        or (backpack.removed_items or [])
-    )
+    removed_lookup = {
+        str(item).strip().lower()
+        for item in (backpack.removed_items or [])
+        if str(item).strip()
+    }
+
+    def has_visible_items(values) -> bool:
+        for item in values or []:
+            normalized = str(item).strip().lower()
+            if normalized and normalized not in removed_lookup:
+                return True
+        return False
+
+    return has_visible_items(backpack.items) or has_visible_items(backpack.added_items)
 
 
 async def delete_baggage(db: AsyncSession, backpack_id: int):
@@ -794,7 +951,7 @@ async def delete_baggage(db: AsyncSession, backpack_id: int):
     if not backpack:
         return None, "not_found"
 
-    owned_backpacks = await get_backpacks_by_user(db, backpack.checklist_id, backpack.user_id)
+    owned_backpacks = await get_backpacks_by_owner_scope(db, backpack.checklist_id, backpack.user_id, backpack.child_profile_id)
     if len(owned_backpacks) <= 1:
         return None, "last_baggage"
     if backpack.is_default:

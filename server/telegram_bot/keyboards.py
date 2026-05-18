@@ -10,15 +10,23 @@ MINI_APP_BUTTON_TEXT = "Open Luggify"
 def build_main_menu(settings: TelegramBotSettings) -> ReplyKeyboardMarkup:
     keyboard = [
         [
-            KeyboardButton(text="Моя поездка"),
-            KeyboardButton(text="Что я забыл?"),
+            KeyboardButton(text="Сегодня"),
+            KeyboardButton(text="План"),
+        ],
+        [
+            KeyboardButton(text="Вещи"),
+            KeyboardButton(text="Траты"),
         ],
         [
             KeyboardButton(text="Чеклист"),
-            KeyboardButton(text="Выбрать поездку"),
+            KeyboardButton(text="Оптимизировать"),
         ],
         [
+            KeyboardButton(text="Моя поездка"),
             KeyboardButton(text="Спросить ИИ"),
+        ],
+        [
+            KeyboardButton(text="Выбрать поездку"),
             KeyboardButton(text="Помощь"),
         ],
     ]
@@ -86,6 +94,31 @@ def build_confirmation_keyboard() -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text="Да", callback_data="confirm_ai:yes"),
         InlineKeyboardButton(text="Нет", callback_data="confirm_ai:no"),
+    )
+    return builder.as_markup()
+
+
+def build_telegram_plan_keyboard(settings: TelegramBotSettings) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="Сохранить весь план", callback_data="plan:save_all"),
+        InlineKeyboardButton(text="Не сохранять", callback_data="plan:cancel"),
+    )
+    if settings.mini_app_url:
+        builder.row(
+            InlineKeyboardButton(
+                text=MINI_APP_BUTTON_TEXT,
+                web_app=WebAppInfo(url=settings.mini_app_url),
+            )
+        )
+    return builder.as_markup()
+
+
+def build_notifications_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="Включить", callback_data="notif:on"),
+        InlineKeyboardButton(text="Выключить", callback_data="notif:off"),
     )
     return builder.as_markup()
 

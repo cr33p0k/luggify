@@ -81,10 +81,15 @@ class Checklist(Base):
     added_items = Column(ARRAY(String), nullable=True)
     item_quantities = Column(JSON, nullable=False, default=dict, server_default="{}")
     packed_quantities = Column(JSON, nullable=False, default=dict, server_default="{}")
+    item_categories = Column(JSON, nullable=False, default=dict, server_default="{}")
+    item_translations = Column(JSON, nullable=False, default=dict, server_default="{}")
     daily_forecast = Column(JSON, nullable=True) 
     is_public = Column(Boolean, default=True)
     hidden_sections = Column(ARRAY(String), default=[], server_default="{}")
     transports = Column(ARRAY(String), nullable=True)
+    trip_profile = Column(JSON, nullable=False, default=dict, server_default="{}")
+    expense_budget_amount = Column(Float, nullable=True)
+    expense_base_currency = Column(String, nullable=False, default="RUB", server_default="RUB")
 
     # Привязка к пользователю (nullable — для обратной совместимости)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
@@ -105,6 +110,7 @@ class Checklist(Base):
     # События маршрута
     events = relationship("ItineraryEvent", back_populates="checklist", cascade="all, delete-orphan", lazy="selectin")
     reviews = relationship("TripReview", back_populates="checklist", cascade="all, delete-orphan", lazy="selectin")
+    expenses = relationship("TripExpense", back_populates="checklist", cascade="all, delete-orphan", lazy="selectin")
 
 class TripReview(Base):
     __tablename__ = "trip_reviews"
@@ -132,6 +138,7 @@ class UserBackpack(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
     name = Column(String, nullable=False, default="Рюкзак", server_default="Рюкзак")
     kind = Column(String, nullable=False, default="backpack", server_default="backpack")
+    child_profile_id = Column(String, nullable=True, index=True)
     sort_order = Column(Integer, nullable=False, default=0, server_default="0")
     is_default = Column(Boolean, nullable=False, default=False, server_default="false")
     editor_user_ids = Column(ARRAY(Integer), nullable=False, default=list, server_default="{}")
@@ -143,6 +150,8 @@ class UserBackpack(Base):
     removed_items = Column(ARRAY(String), default=[])
     item_quantities = Column(JSON, nullable=False, default=dict, server_default="{}")
     packed_quantities = Column(JSON, nullable=False, default=dict, server_default="{}")
+    item_categories = Column(JSON, nullable=False, default=dict, server_default="{}")
+    item_translations = Column(JSON, nullable=False, default=dict, server_default="{}")
     
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
@@ -160,9 +169,39 @@ class ItineraryEvent(Base):
     title = Column(String, nullable=False)
     description = Column(String, nullable=True)
     address = Column(String, nullable=True)
+    lat = Column(Float, nullable=True)
+    lng = Column(Float, nullable=True)
+    place_source = Column(String, nullable=True)
+    duration_minutes = Column(Integer, nullable=True)
+    travel_buffer_minutes = Column(Integer, nullable=True)
+    event_type = Column(String, nullable=True)
+    meta = Column(JSON, nullable=False, default=dict, server_default="{}")
     created_at = Column(DateTime, server_default=func.now())
 
     checklist = relationship("Checklist", back_populates="events")
+
+class TripExpense(Base):
+    __tablename__ = "trip_expenses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    checklist_id = Column(Integer, ForeignKey("checklists.id", ondelete="CASCADE"), nullable=False, index=True)
+    created_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    expense_date = Column(Date, nullable=True)
+    title = Column(String, nullable=False)
+    category = Column(String, nullable=False, default="other", server_default="other")
+    amount = Column(Float, nullable=False)
+    currency = Column(String, nullable=False, default="RUB", server_default="RUB")
+    amount_base = Column(Float, nullable=False)
+    base_currency = Column(String, nullable=False, default="RUB", server_default="RUB")
+    fx_rate = Column(Float, nullable=False, default=1, server_default="1")
+    fx_rate_date = Column(String, nullable=True)
+    fx_provider = Column(String, nullable=True)
+    note = Column(String, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    checklist = relationship("Checklist", back_populates="expenses")
+    created_by = relationship("User", lazy="joined")
 
 class CityAttraction(Base):
     __tablename__ = "city_attractions"
